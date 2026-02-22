@@ -21,10 +21,8 @@
 #    Copyright 2025-2026 Octra Labs
 #              2025-2026 lambda0xe
 #              dev[at]octra.org
-# 
 #              2025-2026 Aleksandr Tsereteli
 #              alex[at]octra.org
-# 
 #              2025-2026 Vadim S.
 #              2025-2026 Julia Lezra
 #
@@ -45,6 +43,7 @@ PVAC_DIR:=pvac
 PVAC_BUILD:=$(PVAC_DIR)/build
 
 ifeq ($(UNAME_S),Darwin)
+
 SHARED_EXT:=dylib
 SHARED_FLAGS:=-dynamiclib
 SSL_PREFIX:=$(shell brew --prefix openssl 2>/dev/null || echo /usr/local/opt/openssl)
@@ -53,6 +52,7 @@ LDFLAGS:=-L$(SSL_PREFIX)/lib -lssl -lcrypto -L$(PVAC_BUILD) -lpvac -Wl,-rpath,@e
 TARGET:=octra_wallet
 
 else ifneq ($(IS_WIN),)
+
 SHARED_EXT:=dll
 SHARED_FLAGS:=-shared
 SSL_PREFIX:=$(shell echo $$MINGW_PREFIX)
@@ -61,6 +61,7 @@ LDFLAGS:=-L$(SSL_PREFIX)/lib -lssl -lcrypto -lws2_32 -lbcrypt -L$(PVAC_BUILD) -l
 TARGET:=octra_wallet.exe
 
 else
+
 SHARED_EXT:=so
 SHARED_FLAGS:=-shared
 CXXFLAGS+=-DCPPHTTPLIB_OPENSSL_SUPPORT
@@ -78,9 +79,13 @@ $(PVAC_BUILD):
 	@mkdir -p $(PVAC_BUILD)
 
 $(LIBPVAC): $(PVAC_DIR)/pvac_c_api.cpp | $(PVAC_BUILD)
+ifneq ($(IS_WIN),)
+	$(CXX) $(CXXFLAGS) -fPIC $(SHARED_FLAGS) -I$(PVAC_DIR)/include -o $@ $< -lbcrypt
+else
 	$(CXX) $(CXXFLAGS) -fPIC $(SHARED_FLAGS) -I$(PVAC_DIR)/include -o $@ $<
 ifeq ($(UNAME_S),Darwin)
 	install_name_tool -id @rpath/libpvac.$(SHARED_EXT) $@
+endif
 endif
 
 lib/tweetnacl.o: lib/tweetnacl.c
