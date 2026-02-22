@@ -53,11 +53,11 @@ TARGET:=octra_wallet
 
 else ifneq ($(IS_WIN),)
 
-SHARED_EXT:=dll
-SHARED_FLAGS:=-shared
+SHARED_EXT:=a
+SHARED_FLAGS:=
 SSL_PREFIX:=$(shell echo $$MINGW_PREFIX)
 CXXFLAGS+=-I$(SSL_PREFIX)/include -DCPPHTTPLIB_OPENSSL_SUPPORT
-LDFLAGS:=-L$(SSL_PREFIX)/lib -lssl -lcrypto -lws2_32 -lbcrypt -L$(PVAC_BUILD) -lpvac
+LDFLAGS:=-static -L$(SSL_PREFIX)/lib -L$(PVAC_BUILD) -lpvac -lssl -lcrypto -lws2_32 -lbcrypt -lcrypt32 -lgdi32 -lz
 TARGET:=octra_wallet.exe
 
 else
@@ -80,7 +80,8 @@ $(PVAC_BUILD):
 
 $(LIBPVAC): $(PVAC_DIR)/pvac_c_api.cpp | $(PVAC_BUILD)
 ifneq ($(IS_WIN),)
-	$(CXX) $(CXXFLAGS) -fPIC $(SHARED_FLAGS) -I$(PVAC_DIR)/include -o $@ $< -lbcrypt
+	$(CXX) $(CXXFLAGS) -c -I$(PVAC_DIR)/include -o $(PVAC_BUILD)/pvac_c_api.o $<
+	ar rcs $@ $(PVAC_BUILD)/pvac_c_api.o
 else
 	$(CXX) $(CXXFLAGS) -fPIC $(SHARED_FLAGS) -I$(PVAC_DIR)/include -o $@ $<
 ifeq ($(UNAME_S),Darwin)
@@ -96,16 +97,10 @@ lib/randombytes.o: lib/randombytes.c
 
 $(TARGET): main.cpp lib/tweetnacl.o lib/randombytes.o $(LIBPVAC)
 	$(CXX) $(CXXFLAGS) -o $@ main.cpp lib/tweetnacl.o lib/randombytes.o $(LDFLAGS)
-ifneq ($(IS_WIN),)
-	@cp $(LIBPVAC) .
-endif
 
 clean:
 	rm -f $(TARGET) lib/*.o
 	rm -rf $(PVAC_BUILD)
-ifneq ($(IS_WIN),)
-	rm -f libpvac.dll
-endif
 
 run: $(TARGET)
 	./$(TARGET) 8420
