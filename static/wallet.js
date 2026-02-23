@@ -41,8 +41,7 @@ var _explorerUrl = 'https://devnet.octrascan.io';
 
 function $(id) { return document.getElementById(id); }
 
-function updateStealthBadge(count) {
-  _unclaimedCount = count;
+function updateStealthBadge(count) {  _unclaimedCount = count;
   var badge = $('stealth-badge');
   if (!badge) return;
   if (count > 0) {
