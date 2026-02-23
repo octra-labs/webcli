@@ -173,10 +173,13 @@ inline bool verify_range(
     return true;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Aggregated Range Proof — single R1CS circuit for all 65 sub-proofs
+// ═══════════════════════════════════════════════════════════════════
 
 struct AggregatedRangeProof {
-    std::vector<Cipher> ct_bit;
-    bp::R1CSProof proof;
+    std::vector<Cipher> ct_bit;  // 64 encrypted bits (needed by verifier)
+    bp::R1CSProof proof;         // single R1CS proof covering all 65 circuits
 };
 
 namespace detail {
@@ -286,7 +289,7 @@ inline AggregatedRangeProof make_aggregated_range_proof(
 
     std::vector<detail::BitPrepData> bit_data(RANGE_BITS);
 
-    // parallel -encrypt bits + compute ct_check + decrypt layers
+    // Phase 1: parallel — encrypt bits + compute ct_check + decrypt layers
     unsigned hw = std::thread::hardware_concurrency();
     unsigned n_threads = (hw > 1) ? std::min(hw, (unsigned)RANGE_BITS) : 1;
 
@@ -313,10 +316,12 @@ inline AggregatedRangeProof make_aggregated_range_proof(
             th.join();
     }
 
+    // Phase 2: LC diff
     auto ct_lc_diff = detail::compute_lc_diff(pk, arp.ct_bit, ct_value);
     detail::BitPrepData lc_data;
     detail::prepare_lc(pk, sk, ct_lc_diff, lc_data);
 
+    // Phase 3: sequential — feed all 65 circuits into ONE prover
     bp::R1CSProver prover;
     for (size_t i = 0; i < RANGE_BITS; ++i) {
         detail::build_circuit(prover, bit_data[i].ct_check,
@@ -327,6 +332,7 @@ inline AggregatedRangeProof make_aggregated_range_proof(
                           lc_data.A, lc_data.bases,
                           &lc_data.rinv, &sk);
 
+    // Phase 4: prove
     bp::Transcript transcript("pvac.range_proof.aggregated");
     detail::append_transcript_params(transcript, bit_data, lc_data);
 
@@ -341,6 +347,7 @@ inline bool verify_aggregated_range(
 ) {
     if (arp.ct_bit.size() != RANGE_BITS) return false;
 
+    // Reconstruct all ct_check (deterministic, no sk)
     std::vector<detail::BitPrepData> vdata(RANGE_BITS);
     for (size_t i = 0; i < RANGE_BITS; ++i) {
         auto ct_b_m1 = ct_sub_const(pk, arp.ct_bit[i], (uint64_t)1);
@@ -352,12 +359,14 @@ inline bool verify_aggregated_range(
         vdata[i].bases = base_layer_indices(vdata[i].ct_check);
     }
 
+    // Reconstruct LC diff
     auto ct_lc_diff = detail::compute_lc_diff(pk, arp.ct_bit, ct_value);
     detail::BitPrepData lc_data;
     lc_data.ct_check = ct_lc_diff;
     lc_data.A = compute_layer_coeffs(pk, ct_lc_diff);
     lc_data.bases = base_layer_indices(ct_lc_diff);
 
+    // Build dummy prover for constraint topology
     bp::R1CSProver dummy;
     for (size_t i = 0; i < RANGE_BITS; ++i) {
         detail::build_circuit(dummy, vdata[i].ct_check,
@@ -368,7 +377,7 @@ inline bool verify_aggregated_range(
                           lc_data.A, lc_data.bases,
                           nullptr, nullptr);
 
-    // validate V[] layout - each sub-circuit's commits must match ciphertext pcs
+    // Validate V[] layout: each sub-circuit's commits must match ciphertext PCs
     size_t expected_v = dummy.num_committed();
     if (arp.proof.V.size() != expected_v) return false;
 
@@ -402,11 +411,13 @@ inline bool verify_aggregated_range(
         }
     }
 
+    // Extract constraint system
     bp::ConstraintSystem cs;
     cs.num_gates = dummy.num_gates();
     cs.num_committed = dummy.num_committed();
     cs.constraints = dummy.get_constraints();
 
+    // Transcript must match prover
     bp::Transcript transcript("pvac.range_proof.aggregated");
     detail::append_transcript_params(transcript, vdata, lc_data);
 

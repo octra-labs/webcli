@@ -164,12 +164,12 @@ struct AesCtr256 {
     alignas(16) uint64_t buf[2] = {0, 0};
     bool has_buf = false;
 
-    static inline uint8x16_t aes_round(uint8x16_t state, uint8x16_t key) {
-        return vaesmcq_u8(vaeseq_u8(state, key));
+    static inline uint8x16_t aes_round(uint8x16_t state, uint8x16_t zero, uint8x16_t key) {
+        return veorq_u8(vaesmcq_u8(vaeseq_u8(state, zero)), key);
     }
 
-    static inline uint8x16_t aes_round_last(uint8x16_t state, uint8x16_t key, uint8x16_t final_key) {
-        return veorq_u8(vaeseq_u8(state, key), final_key);
+    static inline uint8x16_t aes_round_last(uint8x16_t state, uint8x16_t zero, uint8x16_t final_key) {
+        return veorq_u8(vaeseq_u8(state, zero), final_key);
     }
 
     static inline uint32_t sub_word(uint32_t w) {
@@ -207,21 +207,23 @@ struct AesCtr256 {
     inline void encrypt_ctr_block(uint8_t out[16]) {
         alignas(16) uint64_t ctr_block[2] = {ctr_val, 0};
         uint8x16_t state = vld1q_u8((const uint8_t*)ctr_block);
+        uint8x16_t zero = vdupq_n_u8(0);
 
         state = veorq_u8(state, rk[0]);
-        state = aes_round(state, rk[1]);
-        state = aes_round(state, rk[2]);
-        state = aes_round(state, rk[3]);
-        state = aes_round(state, rk[4]);
-        state = aes_round(state, rk[5]);
-        state = aes_round(state, rk[6]);
-        state = aes_round(state, rk[7]);
-        state = aes_round(state, rk[8]);
-        state = aes_round(state, rk[9]);
-        state = aes_round(state, rk[10]);
-        state = aes_round(state, rk[11]);
-        state = aes_round(state, rk[12]);
-        state = aes_round_last(state, rk[13], rk[14]);
+        state = aes_round(state, zero, rk[1]);
+        state = aes_round(state, zero, rk[2]);
+        state = aes_round(state, zero, rk[3]);
+        state = aes_round(state, zero, rk[4]);
+        state = aes_round(state, zero, rk[5]);
+        state = aes_round(state, zero, rk[6]);
+        state = aes_round(state, zero, rk[7]);
+        state = aes_round(state, zero, rk[8]);
+        state = aes_round(state, zero, rk[9]);
+        state = aes_round(state, zero, rk[10]);
+        state = aes_round(state, zero, rk[11]);
+        state = aes_round(state, zero, rk[12]);
+        state = aes_round(state, zero, rk[13]);
+        state = aes_round_last(state, zero, rk[14]);
 
         vst1q_u8(out, state);
         ++ctr_val;

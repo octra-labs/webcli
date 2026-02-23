@@ -56,7 +56,9 @@ inline void keygen(const Params & prm, PubKey & pk, SecKey & sk) {
 
     auto rand_fp = [&]() {
         for (;;) {
-            Fp x = fp_from_words(csprng_u64(), csprng_u64() & MASK63);
+            uint64_t lo = csprng_u64();
+            uint64_t hi = csprng_u64() & MASK63;
+            Fp x = fp_from_words(lo, hi);
 
             if (ct::fp_is_nonzero(x)) {
                 return x;
@@ -204,7 +206,9 @@ inline void keygen_from_seed(const Params& prm, PubKey& pk, SecKey& sk, const ui
 
     auto rand_fp_det = [&]() {
         for (;;) {
-            Fp x = fp_from_words(gen_rng.u64(), gen_rng.u64() & MASK63);
+            uint64_t lo = gen_rng.u64();
+            uint64_t hi = gen_rng.u64() & MASK63;
+            Fp x = fp_from_words(lo, hi);
             if (ct::fp_is_nonzero(x)) return x;
         }
     };

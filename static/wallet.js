@@ -32,11 +32,39 @@ var _refreshTimer = null;
 var _prevView = 'dashboard';
 var _cachedBal = null;
 var _encryptedBalanceRaw = 0;
+var _unclaimedCount = 0;
+var _pendingClaimIds = {};
+var _explorerUrl = 'https://devnet.octrascan.io';
 
 
 
 
 function $(id) { return document.getElementById(id); }
+
+function updateStealthBadge(count) {
+  _unclaimedCount = count;
+  var badge = $('stealth-badge');
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count;
+    badge.style.display = 'inline-block';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+async function bgStealthScan() {
+  try {
+    var res = await api('GET', '/stealth/scan');
+    var outputs = res.outputs || [];
+    var unclaimed = 0;
+    for (var i = 0; i < outputs.length; i++) {
+      if (outputs[i].claimed) { delete _pendingClaimIds[String(outputs[i].id)]; continue; }
+      if (!_pendingClaimIds[String(outputs[i].id)]) unclaimed++;
+    }
+    updateStealthBadge(unclaimed);
+  } catch (e) {}
+}
 
 async function fetchBalance() {
   try {
@@ -92,13 +120,8 @@ function switchView(name) {
   for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
   for (var i = 0; i < tabs.length; i++) {
     var t = tabs[i].textContent.trim();
-if ((name === 'dashboard' && t === 'dashboard') ||
-                (name === 'send' && t === 'send') ||
-                (name === 'encrypt' && t.indexOf('encrypt') >= 0) ||
-                (name === 'stealth' && t === 'stealth') ||
-                (name === 'history' && t === 'history') ||
-                (name === 'keys' && t === 'keys') ||
-                (name === 'settings' && t === 'settings')) {
+var tabId = tabs[i].getAttribute('data-view');
+    if (tabId === name) {
       tabs[i].classList.add('active');
       break;
     }
@@ -155,7 +178,8 @@ function short(s) {
 function addrLink(addr) {
   if (!addr || addr === 'stealth' || addr === 'coinbase') return '<span class="gray">' + (addr || '-') + '</span>';
   var display = short(addr);
-  return '<a class="mono addr" href="javascript:void(0)" onclick="navigator.clipboard.writeText(\'' + addr + '\')">' + display + '</a>';
+  var url = _explorerUrl + '/address.html?addr=' + addr;
+  return '<a class="mono addr" href="' + url + '" target="_blank" title="' + addr + '">' + display + '</a>';
 }
 
 function txLink(hash) {
@@ -268,11 +292,13 @@ async function showTx(hash) {
 
 
 
-    h += '<tr><td>hash</td><td class="mono">' + (res.hash || hash) + '</td></tr>';
+    var fullHash = res.hash || hash;
+    var explorerLink = _explorerUrl + '/tx.html?hash=' + fullHash;
+    h += '<tr><td>hash</td><td class="mono">' + fullHash + ' <a href="' + explorerLink + '" target="_blank" style="font-size:10px;color:#8C9DB6;margin-left:4px">explorer</a></td></tr>';
     h += '<tr><td>status</td><td>' + txStatusTag(st) + '</td></tr>';
     if (res.reject_reason) h += '<tr><td>reason</td><td class="result-error">' + escapeHtml(res.reject_reason) + '</td></tr>';
-      h += '<tr><td>from</td><td class="mono">' + (res.from || '') + '</td></tr>';
-      h += '<tr><td>to</td><td class="mono">' + (res.to || res.to_ || '') + '</td></tr>';
+      h += '<tr><td>from</td><td>' + addrLink(res.from || '') + '</td></tr>';
+      h += '<tr><td>to</td><td>' + addrLink(res.to || res.to_ || '') + '</td></tr>';
        var amtRaw = res.amount_raw || res.amount || '0';
       h += '<tr><td>amount</td><td class="mono">' + fmtOct(amtRaw) + '</td></tr>';
       h += '<tr><td>amount (raw)</td><td class="mono gray">' + addCommas(String(amtRaw)) + '</td></tr>';
@@ -443,8 +469,9 @@ async function doStealthScan() {
     for (var i = 0; i < outputs.length; i++) {
       var o = outputs[i];
       var amt = o.amount_raw ? fmtOctCompact(o.amount_raw) : '?';
-      var st = o.claimed ? '<span class="gray">claimed</span>' : '<span class="green">unclaimed</span>';
-      var chk = o.claimed ? '' : '<input type="checkbox" class="stealth-chk" data-id="' + o.id + '">';
+      var isPending = !o.claimed && _pendingClaimIds[String(o.id)];
+      var st = o.claimed ? '<span class="gray">claimed</span>' : (isPending ? '<span class="gray">claiming\u2026</span>' : '<span class="green">unclaimed</span>');
+      var chk = (o.claimed || isPending) ? '' : '<input type="checkbox" class="stealth-chk" data-id="' + o.id + '">';
       h += '<tr>';
       h += '<td>' + chk + '</td>';
       h += '<td class="mono">' + (o.id || '') + '</td>';
@@ -466,7 +493,15 @@ async function doStealthScan() {
     h += '</table>';
     cards += '</div>';
     h += cards;
-    h += '<div class="claim-row"><button class="action-btn" onclick="claimSelected()">claim selected</button></div>';
+    var unclaimed = 0;
+    for (var i = 0; i < outputs.length; i++) {
+      if (outputs[i].claimed) { delete _pendingClaimIds[String(outputs[i].id)]; continue; }
+      if (!_pendingClaimIds[String(outputs[i].id)]) unclaimed++;
+    }
+    updateStealthBadge(unclaimed);
+    if (unclaimed > 0) {
+      h += '<div class="claim-row"><button class="action-btn" onclick="claimSelected()">claim selected</button></div>';
+    }
     $('stealth-outputs').innerHTML = h;
   } catch (e) {
     $('stealth-outputs').innerHTML = '<div class="error-box">' + e.message + '</div>';
@@ -491,6 +526,7 @@ async function doStealthClaim(ids) {
       for (var i = 0; i < res.results.length; i++) {
         var r = res.results[i];
         logStealth(r.id + ': ' + (r.ok ? 'ok' : 'failed - ' + (r.error || '')), r.ok ? 'log-ok' : 'log-err');
+        if (r.ok) _pendingClaimIds[String(r.id)] = true;
       }
     }
     doStealthScan();
@@ -581,18 +617,41 @@ async function loadSettings() {
   try {
     var w = await api('GET', '/wallet');
     $('settings-rpc').value = w.rpc_url || 'http://165.227.225.79:8080';
+    $('settings-explorer').value = w.explorer_url || 'https://devnet.octrascan.io';
   } catch (e) {}
 }
 
 async function doSaveSettings() {
   clearResult('settings-result');
   var rpc = $('settings-rpc').value.trim();
+  var explorer = $('settings-explorer').value.trim();
   if (!rpc) { showResult('settings-result', false, 'rpc url required'); return; }
   try {
-    await api('POST', '/settings', { rpc_url: rpc });
+    await api('POST', '/settings', { rpc_url: rpc, explorer_url: explorer });
+    if (explorer) _explorerUrl = explorer.replace(/\/+$/, '');
     showResult('settings-result', true, 'saved');
   } catch (e) {
     showResult('settings-result', false, e.message);
+  }
+}
+
+async function doChangePin() {
+  clearResult('pin-change-result');
+  var cur = $('pin-current').value;
+  var np = $('pin-new').value;
+  var nc = $('pin-confirm-new').value;
+  if (!/^\d{6}$/.test(cur)) { showResult('pin-change-result', false, 'current PIN must be 6 digits'); return; }
+  if (!/^\d{6}$/.test(np)) { showResult('pin-change-result', false, 'new PIN must be 6 digits'); return; }
+  if (np !== nc) { showResult('pin-change-result', false, 'PINs do not match'); return; }
+  if (cur === np) { showResult('pin-change-result', false, 'new PIN must be different'); return; }
+  try {
+    await api('POST', '/wallet/change-pin', { current_pin: cur, new_pin: np });
+    showResult('pin-change-result', true, 'PIN changed successfully');
+    $('pin-current').value = '';
+    $('pin-new').value = '';
+    $('pin-confirm-new').value = '';
+  } catch (e) {
+    showResult('pin-change-result', false, e.message);
   }
 }
 
@@ -711,6 +770,7 @@ async function loadWalletInfo() {
   try {
     var w = await api('GET', '/wallet');
     _walletAddr = w.address || w.addr || '';
+    if (w.explorer_url) _explorerUrl = w.explorer_url.replace(/\/+$/, '');
     $('hdr-addr').innerHTML = '<span class="mono">' + _walletAddr + '</span>';
     $('hdr-logout').style.display = '';
     loadDashboard();
@@ -739,8 +799,10 @@ async function doLogout() {
 
 function startRefreshTimer() {
   if (_refreshTimer) return;
+  bgStealthScan();
   _refreshTimer = setInterval(function() {
     fetchBalance();
+    bgStealthScan();
     var dash = $('view-dashboard');
     if (dash && dash.classList.contains('active')) loadDashboard();
   }, 15000);

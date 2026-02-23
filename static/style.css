@@ -68,7 +68,7 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 38px;
+  min-height: 60px;
 }
 
 header .left {
@@ -143,7 +143,7 @@ header .logout-btn:hover { background: #7A8BA3; }
   flex: 1;
   text-align: center;
   min-width: 100px;
-  padding: 7px 12px;
+  padding: 10px 12px;
   font-size: 11px;
   color: #516E9A;
   border-bottom: none;
@@ -751,4 +751,19 @@ tr:hover { background: #E5E9EF; }
 .balance-strip .mono {
   color: #3B567F;
   font-weight: bold;
+}
+
+.badge {
+  display: inline-block;
+  background: #516E9A;
+  color: #fff;
+  font-size: 9px;
+  font-weight: bold;
+  min-width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  padding: 0 4px;
+  margin-left: 3px;
+  vertical-align: middle;
 }

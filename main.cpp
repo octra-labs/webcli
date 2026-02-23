@@ -34,6 +34,7 @@
 #include <set>
 #include <algorithm>
 #include <mutex>
+#include <thread>
 #include <atomic>
 #include <chrono>
 #ifdef _WIN32
@@ -430,6 +431,7 @@ int main(int argc, char** argv) {
         j["address"] = g_wallet.addr;
         j["public_key"] = g_wallet.pub_b64;
         j["rpc_url"] = g_wallet.rpc_url;
+        j["explorer_url"] = g_wallet.explorer_url;
         res.set_content(j.dump(), "application/json");
     });
 
@@ -587,14 +589,22 @@ int main(int argc, char** argv) {
         octra::random_bytes(seed, 32);
         pvac_cipher ct = g_pvac.encrypt((uint64_t)raw, seed);
         std::string cipher_str = g_pvac.encode_cipher(ct);
-        auto ct_hash = g_pvac.commit_ct(ct);
+
+        uint8_t blinding[32];
+        octra::random_bytes(blinding, 32);
+        auto amt_commit = g_pvac.pedersen_commit((uint64_t)raw, blinding);
+        std::string amt_commit_b64 = octra::base64_encode(amt_commit.data(), 32);
+        pvac_zero_proof zkp = g_pvac.make_zero_proof_bound(ct, (uint64_t)raw, blinding);
+        std::string zp_str = g_pvac.encode_zero_proof(zkp);
+        g_pvac.free_zero_proof(zkp);
         g_pvac.free_cipher(ct);
-        uint8_t bound_buf[40];
-        memcpy(bound_buf, ct_hash.data(), 32);
-        uint64_t amount_le = (uint64_t)raw;
-        memcpy(bound_buf + 32, &amount_le, 8);
-        auto bound = octra::sha256(bound_buf, 40);
-        std::string commitment_b64 = octra::base64_encode(bound.data(), 32);
+
+        json enc_data;
+        enc_data["cipher"] = cipher_str;
+        enc_data["amount_commitment"] = amt_commit_b64;
+        enc_data["zero_proof"] = zp_str;
+        enc_data["blinding"] = octra::base64_encode(blinding, 32);
+
         auto bi = get_nonce_balance(); int nonce = bi.nonce;
         octra::Transaction tx;
         tx.from = g_wallet.addr;
@@ -604,8 +614,7 @@ int main(int argc, char** argv) {
         tx.ou = "10000";
         tx.timestamp = now_ts();
         tx.op_type = "encrypt";
-        tx.encrypted_data = cipher_str;
-        tx.message = commitment_b64;
+        tx.encrypted_data = enc_data.dump();
         sign_tx_fields(tx);
         auto result = submit_tx(tx);
         if (result.contains("error")) res.status = 500;
@@ -646,14 +655,22 @@ int main(int argc, char** argv) {
         octra::random_bytes(seed, 32);
         pvac_cipher ct = g_pvac.encrypt((uint64_t)raw, seed);
         std::string cipher_str = g_pvac.encode_cipher(ct);
-        auto ct_hash = g_pvac.commit_ct(ct);
+
+        uint8_t blinding[32];
+        octra::random_bytes(blinding, 32);
+        auto amt_commit = g_pvac.pedersen_commit((uint64_t)raw, blinding);
+        std::string amt_commit_b64 = octra::base64_encode(amt_commit.data(), 32);
+        pvac_zero_proof zkp = g_pvac.make_zero_proof_bound(ct, (uint64_t)raw, blinding);
+        std::string zp_str = g_pvac.encode_zero_proof(zkp);
+        g_pvac.free_zero_proof(zkp);
         g_pvac.free_cipher(ct);
-        uint8_t bound_buf[40];
-        memcpy(bound_buf, ct_hash.data(), 32);
-        uint64_t amount_le = (uint64_t)raw;
-        memcpy(bound_buf + 32, &amount_le, 8);
-        auto bound = octra::sha256(bound_buf, 40);
-        std::string commitment_b64 = octra::base64_encode(bound.data(), 32);
+
+        json enc_data;
+        enc_data["cipher"] = cipher_str;
+        enc_data["amount_commitment"] = amt_commit_b64;
+        enc_data["zero_proof"] = zp_str;
+        enc_data["blinding"] = octra::base64_encode(blinding, 32);
+
         auto bi = get_nonce_balance(); int nonce = bi.nonce;
         octra::Transaction tx;
         tx.from = g_wallet.addr;
@@ -663,8 +680,7 @@ int main(int argc, char** argv) {
         tx.ou = "10000";
         tx.timestamp = now_ts();
         tx.op_type = "decrypt";
-        tx.encrypted_data = cipher_str;
-        tx.message = commitment_b64;
+        tx.encrypted_data = enc_data.dump();
         sign_tx_fields(tx);
         auto result = submit_tx(tx);
         if (result.contains("error")) res.status = 500;
@@ -743,17 +759,27 @@ int main(int argc, char** argv) {
         auto commitment = g_pvac.commit_ct(ct_delta);
         std::string commitment_b64 = octra::base64_encode(commitment.data(), 32);
 
-        steps.push_back("[5/7] range proof (amount) - Bulletproofs R1CS");
-        pvac_range_proof rp_delta = g_pvac.make_range_proof(ct_delta, (uint64_t)raw);
-        std::string rp_delta_str = g_pvac.encode_range_proof(rp_delta);
-        g_pvac.free_range_proof(rp_delta);
-
-        steps.push_back("[6/7] range proof (balance) - Bulletproofs R1CS");
+        steps.push_back("[5/7] range proofs (parallel) - Bulletproofs R1CS");
         pvac_cipher current_ct = g_pvac.decode_cipher(eb.cipher);
         pvac_cipher new_ct = g_pvac.ct_sub(current_ct, ct_delta);
         uint64_t new_val = (uint64_t)(eb.decrypted - raw);
-        pvac_range_proof rp_bal = g_pvac.make_range_proof(new_ct, new_val);
+
+        pvac_range_proof rp_delta = nullptr;
+        pvac_range_proof rp_bal = nullptr;
+
+        std::thread t_rp_delta([&]() {
+            rp_delta = pvac_make_range_proof(g_pvac.pk(), g_pvac.sk(), ct_delta, (uint64_t)raw);
+        });
+        std::thread t_rp_bal([&]() {
+            rp_bal = pvac_make_range_proof(g_pvac.pk(), g_pvac.sk(), new_ct, new_val);
+        });
+        t_rp_delta.join();
+        t_rp_bal.join();
+
+        steps.push_back("[6/7] encoding proofs");
+        std::string rp_delta_str = g_pvac.encode_range_proof(rp_delta);
         std::string rp_bal_str = g_pvac.encode_range_proof(rp_bal);
+        g_pvac.free_range_proof(rp_delta);
         g_pvac.free_range_proof(rp_bal);
         g_pvac.free_cipher(ct_delta);
         g_pvac.free_cipher(current_ct);
@@ -1012,12 +1038,14 @@ int main(int argc, char** argv) {
             return;
         }
         std::string new_rpc = body.value("rpc_url", "");
+        std::string new_explorer = body.value("explorer_url", "");
         if (new_rpc.empty()) {
             res.status = 400;
             res.set_content(err_json("rpc_url required").dump(), "application/json");
             return;
         }
         try {
+            if (!new_explorer.empty()) g_wallet.explorer_url = new_explorer;
             octra::save_settings(g_wallet_path, g_wallet, new_rpc, g_pin);
             g_rpc.set_url(g_wallet.rpc_url);
         } catch (const std::exception& e) {
@@ -1028,6 +1056,49 @@ int main(int argc, char** argv) {
         json j;
         j["ok"] = true;
         j["rpc_url"] = g_wallet.rpc_url;
+        j["explorer_url"] = g_wallet.explorer_url;
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Post("/api/wallet/change-pin", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        std::lock_guard<std::mutex> lock(g_mtx);
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string cur_pin = body.value("current_pin", "");
+        std::string new_pin = body.value("new_pin", "");
+        if (cur_pin.size() != 6 || !std::all_of(cur_pin.begin(), cur_pin.end(), ::isdigit)) {
+            res.status = 400;
+            res.set_content(err_json("current PIN must be 6 digits").dump(), "application/json");
+            return;
+        }
+        if (new_pin.size() != 6 || !std::all_of(new_pin.begin(), new_pin.end(), ::isdigit)) {
+            res.status = 400;
+            res.set_content(err_json("new PIN must be 6 digits").dump(), "application/json");
+            return;
+        }
+        if (cur_pin != g_pin) {
+            res.status = 403;
+            res.set_content(err_json("wrong current PIN").dump(), "application/json");
+            return;
+        }
+        try {
+            octra::save_wallet_encrypted(g_wallet_path, g_wallet, new_pin);
+            octra::secure_zero(&g_pin[0], g_pin.size());
+            g_pin = new_pin;
+            octra::try_mlock(&g_pin[0], g_pin.size());
+            fprintf(stderr, "PIN changed\n");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(err_json(e.what()).dump(), "application/json");
+            return;
+        }
+        json j;
+        j["ok"] = true;
         res.set_content(j.dump(), "application/json");
     });
 

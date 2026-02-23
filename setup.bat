@@ -29,7 +29,7 @@ if %errorlevel% equ 0 (
     echo Please download and install MSYS2 manually from:
     echo https://www.msys2.org/
     echo.
-    echo after installing, run this script again.
+    echo After installing, run this script again.
     pause
     exit /b 1
 )
@@ -37,7 +37,7 @@ if %errorlevel% equ 0 (
 if exist "C:\msys64\usr\bin\bash.exe" (
     set "MSYS2_DIR=C:\msys64"
 ) else (
-    echo MSYS2 installation failed. Please install manually from https://www.msys2.org/
+    echo MSYS2 installation failed, please install manually from https://www.msys2.org/
     pause
     exit /b 1
 )
@@ -54,13 +54,13 @@ set "WALLET_DIR=%~dp0"
 
 if not exist "%WALLET_DIR%octra_wallet.exe" (
     echo.
-    echo build failed, please check errors above.
+    echo build failed -please check errors above
     pause
     exit /b 1
 )
 
 echo.
-echo [3/3] done
+echo [3/3] done!
 echo.
 echo start the wallet:
 echo octra_wallet.exe

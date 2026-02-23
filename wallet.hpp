@@ -55,6 +55,7 @@ struct Wallet {
     std::string priv_b64;
     std::string addr;
     std::string rpc_url;
+    std::string explorer_url = "https://devnet.octrascan.io";
     uint8_t sk[64];
     uint8_t pk[32];
     std::string pub_b64;
@@ -99,6 +100,7 @@ inline void save_wallet_encrypted(const std::string& path,
     j["priv"] = w.priv_b64;
     j["addr"] = w.addr;
     j["rpc"] = w.rpc_url;
+    j["explorer"] = w.explorer_url;
     std::string plaintext = j.dump();
     auto enc = wallet_encrypt(
         reinterpret_cast<const uint8_t*>(plaintext.data()),
@@ -134,6 +136,7 @@ inline Wallet load_wallet_encrypted(const std::string& path,
     w.priv_b64 = j.at("priv").get<std::string>();
     w.addr = j.at("addr").get<std::string>();
     w.rpc_url = j.value("rpc", "http://165.227.225.79:8080");
+    w.explorer_url = j.value("explorer", "https://devnet.octrascan.io");
 
     auto raw = base64_decode(w.priv_b64);
     if (raw.size() >= 64) {
@@ -236,6 +239,11 @@ inline void save_settings(const std::string& path, Wallet& w,
                            const std::string& pin) {
     w.rpc_url = new_rpc;
     save_wallet_encrypted(path, w, pin);
+}
+
+inline void change_pin(const std::string& path, Wallet& w,
+                        const std::string& new_pin) {
+    save_wallet_encrypted(path, w, new_pin);
 }
 
 } // namespace octra

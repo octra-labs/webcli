@@ -1,8 +1,3 @@
-// lambda0xe
-// 3 feb 2026
-
-
-
 #pragma once
 
 #include <cstdint>

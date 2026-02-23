@@ -94,13 +94,13 @@
 </header>
 
 <div class="nav-tabs">
-  <a href="#" class="active" onclick="switchView('dashboard');return false">dashboard</a>
-  <a href="#" onclick="switchView('send');return false">send</a>
-  <a href="#" onclick="switchView('encrypt');return false">encrypt/decrypt</a>
-  <a href="#" onclick="switchView('stealth');return false">stealth</a>
-  <a href="#" onclick="switchView('history');return false">history</a>
-  <a href="#" onclick="switchView('keys');return false">keys</a>
-  <a href="#" onclick="switchView('settings');return false">settings</a>
+  <a href="#" class="active" data-view="dashboard" onclick="switchView('dashboard');return false">dashboard</a>
+  <a href="#" data-view="send" onclick="switchView('send');return false">send</a>
+  <a href="#" data-view="encrypt" onclick="switchView('encrypt');return false">encrypt/decrypt</a>
+  <a href="#" data-view="stealth" onclick="switchView('stealth');return false">stealth <span id="stealth-badge" class="badge" style="display:none"></span></a>
+  <a href="#" data-view="history" onclick="switchView('history');return false">history</a>
+  <a href="#" data-view="keys" onclick="switchView('keys');return false">keys</a>
+  <a href="#" data-view="settings" onclick="switchView('settings');return false">settings</a>
 </div>
 
 <div class="content-area">
@@ -221,10 +221,33 @@
         <label>rpc url</label>
         <input type="text" id="settings-rpc" placeholder="http://165.227.225.79:8080">
       </div>
+      <div class="form-row">
+        <label>explorer url</label>
+        <input type="text" id="settings-explorer" placeholder="https://devnet.octrascan.io">
+      </div>
       <div class="action-row">
         <button class="action-btn" onclick="doSaveSettings()">save</button>
       </div>
       <div id="settings-result"></div>
+    </div>
+    <div class="section-title">change PIN</div>
+    <div class="form-area">
+      <div class="form-row">
+        <label>current PIN</label>
+        <input type="password" id="pin-current" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="off">
+      </div>
+      <div class="form-row">
+        <label>new PIN</label>
+        <input type="password" id="pin-new" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="off">
+      </div>
+      <div class="form-row">
+        <label>confirm new PIN</label>
+        <input type="password" id="pin-confirm-new" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="off">
+      </div>
+      <div class="action-row">
+        <button class="action-btn" onclick="doChangePin()">change PIN</button>
+      </div>
+      <div id="pin-change-result"></div>
     </div>
   </div>
 
