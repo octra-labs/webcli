@@ -41,7 +41,8 @@ var _explorerUrl = 'https://devnet.octrascan.io';
 
 function $(id) { return document.getElementById(id); }
 
-function updateStealthBadge(count) {  _unclaimedCount = count;
+function updateStealthBadge(count) {
+  _unclaimedCount = count;
   var badge = $('stealth-badge');
   if (!badge) return;
   if (count > 0) {
@@ -172,6 +173,12 @@ function fmtDate(ts) {
 function short(s) {
   if (!s || s.length <= 25) return s || '';
   return s.slice(0, 11) + '...' + s.slice(-11);
+}
+
+function txLink(hash) {
+  if (!hash) return '';
+  var url = _explorerUrl + '/tx.html?hash=' + hash;
+  return '<a class="mono" href="' + url + '" target="_blank" title="' + hash + '">' + short(hash) + '</a>';
 }
 
 function addrLink(addr) {
@@ -367,7 +374,8 @@ async function doSend() {
     var body = { to: to, amount: amount };
     if (msg) body.message = msg;
     var res = await api('POST', '/send', body);
-    showResult('send-result', true, 'sent ' + amount + ' oct - tx: ' + short(res.hash || res.tx_hash || ''));
+    var txHash = res.hash || res.tx_hash || '';
+    showResult('send-result', true, 'sent ' + amount + ' oct - tx: ' + txLink(txHash));
     $('send-to').value = '';
     $('send-amount').value = '';
     if ($('send-msg')) $('send-msg').value = '';
@@ -392,7 +400,8 @@ async function doEncrypt() {
   if (!amount || !/^\d+(\.\d{1,6})?$/.test(amount) || parseFloat(amount) <= 0) { showResult('enc-result', false, 'invalid amount'); return; }
   try {
     var res = await api('POST', '/encrypt', { amount: amount });
-    showResult('enc-result', true, 'encrypted ' + amount + ' oct - tx: ' + short(res.hash || res.tx_hash || ''));
+    var txHash = res.hash || res.tx_hash || '';
+    showResult('enc-result', true, 'encrypted ' + amount + ' oct - tx: ' + txLink(txHash));
       $('enc-amount').value = '';
     loadDashboard();
     refreshEncryptBalances();
@@ -410,7 +419,8 @@ async function doDecrypt() {
     if (needRaw > _encryptedBalanceRaw) { showResult('dec-result', false, 'insufficient encrypted balance: have ' + fmtOct(_encryptedBalanceRaw) + ', need ' + amount + ' oct'); return; }
   try {
     var res = await api('POST', '/decrypt', { amount: amount });
-    showResult('dec-result', true, 'decrypted ' + amount + ' oct - tx: ' + short(res.hash || res.tx_hash || ''));
+    var txHash = res.hash || res.tx_hash || '';
+    showResult('dec-result', true, 'decrypted ' + amount + ' oct - tx: ' + txLink(txHash));
     $('dec-amount').value = '';
     loadDashboard();
     refreshEncryptBalances();
