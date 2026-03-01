@@ -1359,8 +1359,18 @@ int main(int argc, char** argv) {
         res.set_content(r.result.dump(), "application/json");
     });
 
+    static json g_token_cache;
+    static double g_token_cache_ts = 0;
+    static std::string g_token_cache_addr;
+
     svr.Get("/api/tokens", [](const httplib::Request&, httplib::Response& res) {
         WALLET_GUARD
+        double now = (double)time(nullptr);
+        if (!g_token_cache.empty() && g_token_cache_addr == g_wallet.addr
+            && (now - g_token_cache_ts) < 30.0) {
+            res.set_content(g_token_cache.dump(), "application/json");
+            return;
+        }
         auto lr = g_rpc.list_contracts();
         json tokens = json::array();
         if (lr.ok && lr.result.contains("contracts")) {
@@ -1371,17 +1381,18 @@ int main(int argc, char** argv) {
                 auto sr = g_rpc.contract_storage(addr, "symbol");
                 if (!sr.ok || !sr.result.contains("value") || sr.result["value"].is_null()) continue;
                 std::string sym = sr.result.value("value", "");
-                if (sym.empty()) continue;
+                if (sym.empty() || sym == "0") continue;
+                auto br = g_rpc.contract_call_view(addr, "balance_of",
+                    json::array({g_wallet.addr}), g_wallet.addr);
+                std::string bal = (br.ok && br.result.contains("result") && !br.result["result"].is_null())
+                    ? br.result.value("result", "0") : "0";
+                if (bal == "0" || bal.empty()) continue;
                 auto nr = g_rpc.contract_storage(addr, "name");
                 std::string name = (nr.ok && nr.result.contains("value") && !nr.result["value"].is_null())
                     ? nr.result.value("value", "") : sym;
                 auto tr = g_rpc.contract_storage(addr, "total_supply");
                 std::string supply = (tr.ok && tr.result.contains("value") && !tr.result["value"].is_null())
                     ? tr.result.value("value", "0") : "0";
-                auto br = g_rpc.contract_call_view(addr, "balance_of",
-                    json::array({g_wallet.addr}), g_wallet.addr);
-                std::string bal = (br.ok && br.result.contains("result") && !br.result["result"].is_null())
-                    ? br.result.value("result", "0") : "0";
                 json tok;
                 tok["address"] = addr;
                 tok["name"] = name;
@@ -1396,6 +1407,9 @@ int main(int argc, char** argv) {
         j["tokens"] = tokens;
         j["count"] = tokens.size();
         j["wallet_address"] = g_wallet.addr;
+        g_token_cache = j;
+        g_token_cache_ts = now;
+        g_token_cache_addr = g_wallet.addr;
         res.set_content(j.dump(), "application/json");
     });
 

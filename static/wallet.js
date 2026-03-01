@@ -247,14 +247,16 @@ function short(s) {
   return s.slice(0, 11) + '...' + s.slice(-11);
 }
 
-function txLink(hash) {
+function txLinkExt(hash) {
   if (!hash) return '';
+  if (!/^[a-f0-9]{64}$/.test(hash)) return '<span class="mono gray">' + escapeHtml(hash) + '</span>';
   var url = _explorerUrl + '/tx.html?hash=' + hash;
   return '<a class="mono" href="' + url + '" target="_blank" title="' + hash + '">' + short(hash) + '</a>';
 }
 
 function addrLink(addr) {
   if (!addr || addr === 'stealth' || addr === 'coinbase') return '<span class="gray">' + (addr || '-') + '</span>';
+  if (!validAddr(addr)) return '<span class="mono gray">' + escapeHtml(addr) + '</span>';
   var display = short(addr);
   var url = _explorerUrl + '/address.html?addr=' + addr;
   return '<a class="mono addr" href="' + url + '" target="_blank" title="' + addr + '">' + display + '</a>';
@@ -262,6 +264,7 @@ function addrLink(addr) {
 
 function txLink(hash) {
   if (!hash) return '<span class="gray">-</span>';
+  if (!/^[a-f0-9]{64}$/.test(hash)) return '<span class="mono gray">' + escapeHtml(hash) + '</span>';
   return '<a class="mono hash" href="javascript:void(0)" onclick="showTx(\'' + hash + '\')">' + short(hash) + '</a>';
 }
 
@@ -280,7 +283,7 @@ function statusTag(st) {
   if (st === 'confirmed') return '<span class="private-tag">confirmed</span>';
   if (st === 'rejected') return '<span class="stealth-tag">rejected</span>';
   if (st === 'pending') return '<span class="pending-tag">pending</span>';
-  return '<span class="pending-tag">' + (st || 'pending') + '</span>';
+  return '<span class="pending-tag">' + escapeHtml(st || 'pending') + '</span>';
 }
 
 function showResult(elId, ok, msg) {
@@ -321,7 +324,7 @@ function txStatusTag(st) {
   if (st === 'rejected') return '<span class="rejected-tag">rejected</span>';
   if (st === 'confirmed') return '<span class="confirmed-tag">confirmed</span>';
   if (st === 'pending') return '<span class="pending-tag">pending</span>';
-  return '<span class="pending-tag">' + (st || 'pending') + '</span>';
+  return '<span class="pending-tag">' + escapeHtml(st || 'pending') + '</span>';
 }
 
 function txAmt(tx) {
@@ -1125,7 +1128,7 @@ async function loadTokenTxs() {
 async function loadHistory() {
   $('history-list').innerHTML = '<div class="loading">loading...</div>';
     $('history-more').innerHTML = '';
-  await loadTokenSymbols();
+  loadTokenSymbols();
   try {
     var res = await api('GET', '/history?limit=' + _historyLimit + '&offset=' + _historyOffset);
     var txs = res.transactions || [];
