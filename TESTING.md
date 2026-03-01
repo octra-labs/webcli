@@ -10,15 +10,15 @@ Testing the `webcli` helps the project find bugs, stress-test the network, and g
 
 Before we download the wallet, you need a few tools installed on your computer.
 
-**For Windows (Detailed Setup):**
-Windows needs a bit of extra setup since we have to compile C++ code. We'll use MSYS2.
-1. Download and install [MSYS2](https://www.msys2.org/).
-2. Open the **MSYS2 UCRT64** terminal from your Start menu (make sure it's the UCRT64 one).
-3. Run the following command to install all necessary dependencies:
+**For Windows (WSL2):**
+Windows users should use WSL2 (Windows Subsystem for Linux) — it gives you a full Linux environment and makes building C++ projects painless.
+1. Install WSL2 by following Microsoft's official guide: [Install WSL](https://learn.microsoft.com/en-us/windows/wsl/install)
+2. Open your WSL terminal (Ubuntu is the default distro) and install dependencies:
    ```bash
-   pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-openssl mingw-w64-ucrt-x86_64-leveldb git make
+   sudo apt update
+   sudo apt install build-essential libssl-dev libleveldb-dev git
    ```
-4. Press `Y` when prompted to install. Keep this terminal open for the next steps!
+3. That's it — follow the Linux instructions from here on out.
 
 **For Linux (Ubuntu/Debian):**
 ```bash
@@ -37,7 +37,7 @@ brew install openssl leveldb git
 ## 🚀 Step 1: Clone & Build
 
 Now that your system is ready, let's grab the code and build it. 
-*(Windows users: do this inside your MSYS2 UCRT64 terminal).*
+*(Windows users: do this inside your WSL terminal).*
 
 ```bash
 git clone https://github.com/octra-labs/webcli.git
