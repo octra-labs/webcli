@@ -164,16 +164,10 @@ struct AesCtr256 {
     alignas(16) uint64_t buf[2] = {0, 0};
     bool has_buf = false;
 
-    // Emulate x86 _mm_aesenc_si128 semantics:
-    // ShiftRows → SubBytes → MixColumns → AddRoundKey
-    // ARM vaeseq_u8(state, zero) = SubBytes → ShiftRows (commutes with ShiftRows→SubBytes)
-    // then vaesmcq_u8 = MixColumns, then XOR round key
     static inline uint8x16_t aes_round(uint8x16_t state, uint8x16_t zero, uint8x16_t key) {
         return veorq_u8(vaesmcq_u8(vaeseq_u8(state, zero)), key);
     }
 
-    // Emulate x86 _mm_aesenclast_si128 semantics:
-    // ShiftRows → SubBytes → AddRoundKey  (no MixColumns)
     static inline uint8x16_t aes_round_last(uint8x16_t state, uint8x16_t zero, uint8x16_t final_key) {
         return veorq_u8(vaeseq_u8(state, zero), final_key);
     }
