@@ -65,17 +65,16 @@ By default, the wallet binds to `127.0.0.1` (localhost only) for security. Open 
 
 ## 💼 Step 3: Create or Import a Wallet
 
-You can manage your wallet either through the clean Web UI you just opened, or via the command line API.
+Everything here is done through the web UI — no command line needed.
 
-**To Create a New Wallet:**
-- **UI:** Click "Create Wallet" on the webpage.
-- **API:** `curl -X POST http://localhost:8420/api/wallet/create`
+1. Open **http://localhost:8420** in your browser
+2. You'll see a modal window with two options:
+   - **Create Wallet** — generates a brand new wallet for you
+   - **Import Wallet** — paste your existing private key (if you had funds from a previous testnet, they'll still be there!)
+3. Set a **6-digit PIN** — this encrypts your wallet with AES-256-GCM
+4. **Save your keys somewhere safe** — the wallet shows you your private key, public key, and address
 
-**To Import an Existing Wallet:**
-- **UI:** Click "Import Wallet" and paste your private key.
-- **API:** `curl -X POST -H "Content-Type: application/json" -d '{"private_key":"YOUR_KEY"}' http://localhost:8420/api/wallet/import`
-
-**Crucial Step:** You will be prompted to set a 6-digit PIN. *Write this down*, along with your generated keys. Keep them somewhere safe!
+That's it — your wallet is ready to use!
 
 ---
 
