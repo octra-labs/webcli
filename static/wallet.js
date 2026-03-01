@@ -35,6 +35,13 @@ var _encryptedBalanceRaw = 0;
 var _unclaimedCount = 0;
 var _pendingClaimIds = {};
 var _explorerUrl = 'https://devnet.octrascan.io';
+var _tokens = [];
+var _selectedToken = null;
+var _tokenSymbols = {};
+var _tokensLoaded = false;
+var _tokTxGen = 0;
+var _compiledAbi = null;
+var _fees = {};
 
 
 
@@ -53,11 +60,8 @@ function updateStealthBadge(count) {
   }
 }
 
-
-/// 
 async function bgStealthScan() {
   try {
-
     var res = await api('GET', '/stealth/scan');
     var outputs = res.outputs || [];
     var unclaimed = 0;
@@ -68,7 +72,6 @@ async function bgStealthScan() {
     updateStealthBadge(unclaimed);
   } catch (e) {}
 }
-//// 
 
 async function fetchBalance() {
   try {
@@ -85,6 +88,7 @@ async function fetchBalance() {
     if ($('enc-pub-bal')) $('enc-pub-bal').textContent = fmtOct(pub);
     if ($('enc-enc-bal')) $('enc-enc-bal').textContent = fmtOct(enc);
     if ($('st-enc-bal-info')) $('st-enc-bal-info').textContent = fmtOct(enc);
+    if ($('ct-bal')) $('ct-bal').textContent = fmtOct(pub);
     $('hdr-status').textContent = 'online';
     $('hdr-status').className = 'right online';
     return bal;
@@ -98,13 +102,7 @@ async function fetchBalance() {
 async function api(method, path, body) {
   var opts = { method: method, headers: {} };
 
-// test
 
-
-
-
-
-///   for the error log if there is one
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -118,9 +116,55 @@ async function api(method, path, body) {
   return j;
 }
 
+async function fetchFees() {
+  try {
+    _fees = await api('GET', '/fee');
+    applyFeeDefaults();
+  } catch (e) {}
+}
 
+function applyFeeDefaults() {
+  var map = {
+    'send-fee': 'standard',
+    'enc-fee': 'encrypt',
+    'dec-fee': 'decrypt',
+    'stealth-fee': 'stealth',
+    'ct-deploy-fee': 'deploy',
+    'ct-call-fee': 'call',
+    'tok-fee': 'call'
+  };
+  for (var id in map) {
+    var input = $(id);
+    var fee = _fees[map[id]];
+    if (input && fee) {
+      var rec = fee.recommended || fee.minimum || '';
+      if (!input.value || input.value === input.getAttribute('data-prev-default')) {
+        input.value = rec;
+        input.setAttribute('data-prev-default', rec);
+      }
+      input.placeholder = 'min: ' + (fee.minimum || '?');
+    }
+  }
+}
 
+function validateFee(inputId, opType) {
+  var input = $(inputId);
+  if (!input) return true;
+  var val = input.value.trim();
+  if (!val) return true;
+  var n = parseInt(val);
+  if (isNaN(n) || n <= 0 || String(n) !== val) return false;
+  var fee = _fees[opType];
+  if (fee && fee.minimum && n < parseInt(fee.minimum)) return false;
+  return true;
+}
 
+function feeError(resultId, inputId, opType) {
+  var fee = _fees[opType];
+  var minStr = (fee && fee.minimum) ? fee.minimum : '?';
+  showResult(resultId, false, 'invalid fee - must be integer >= ' + minStr);
+  if ($(inputId)) $(inputId).focus();
+}
 
 function switchView(name) {
   if (name !== 'tx') _prevView = name;
@@ -145,6 +189,10 @@ var tabId = tabs[i].getAttribute('data-view');
   if (name === 'send') refreshSendBalance();
   if (name === 'encrypt') refreshEncryptBalances();
   if (name === 'stealth') refreshStealthBalance();
+  if (name === 'tokens') loadTokens();
+  if (name === 'dev') refreshContractBalance();
+  var devBtn = $('hdr-dev');
+  if (devBtn) devBtn.style.background = (name === 'dev') ? '#3B567F' : '';
 }
 
 function goBack() {
@@ -165,14 +213,26 @@ function fmtOct(raw) {
   return addCommas(s) + ' oct';
 }
 
+function fmtTokenCompact(raw) {
+  var v = parseFloat(raw);
+  if (v === 0 || isNaN(v)) return '0';
+  if (v >= 1000000000) return (v / 1000000000).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (v >= 1000000) return (v / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (v >= 1000) return (v / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+  return String(v);
+}
+
 function fmtOctCompact(raw) {
   var v = parseFloat(raw);
   if (v === 0 || isNaN(v)) return '-';
   var n = v / 1000000;
   if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M oct';
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K oct';
-  var s = n.toFixed(6).replace(/\.?0+$/, '');
-  return s + ' oct';
+  if (n > 0 && n < 0.001) return '< 0.001 oct';
+  var s = n.toFixed(1);
+  if (s === '0.0' && n > 0) s = n.toFixed(3).replace(/\.?0+$/, '');
+  else s = s.replace(/\.0$/, '');
+  return addCommas(s) + ' oct';
 }
 
 function fmtDate(ts) {
@@ -211,6 +271,8 @@ function opTag(op) {
   if (op === 'encrypt') return '<span class="private-tag">encrypt</span>';
   if (op === 'decrypt') return '<span class="private-tag">decrypt</span>';
   if (op === 'private_transfer') return '<span class="private-tag">private</span>';
+  if (op === 'deploy') return '<span class="contract-tag">contract_deploy</span>';
+  if (op === 'call') return '<span class="contract-tag">contract_call</span>';
   return '';
 }
 
@@ -233,7 +295,7 @@ function clearResult(elId) {
 }
 
 function validAddr(addr) {
-  return /^oct[1-9A-HJ-NP-Za-km-z]{44}$/.test(addr);
+  return /^oct[1-9A-HJ-NP-Za-km-z]{43,45}$/.test(addr);
 }
 
 function logStealth(msg, cls) {
@@ -262,17 +324,36 @@ function txStatusTag(st) {
   return '<span class="pending-tag">' + (st || 'pending') + '</span>';
 }
 
+function txAmt(tx) {
+  var op = tx.op_type || '';
+  if (op === 'call' && tx.encrypted_data === 'transfer' && tx.message) {
+    var contract = tx.to_ || tx.to || '';
+    var sym = _tokenSymbols[contract] || '';
+    try {
+      var p = JSON.parse(tx.message);
+      if (Array.isArray(p) && p.length >= 2)
+        return { amt: fmtTokenCompact(p[1]) + (sym ? ' ' + sym : ''), cls: '', toOverride: String(p[0]) };
+    } catch(e) {}
+  }
+  var raw = tx.amount_raw ? parseFloat(tx.amount_raw) : 0;
+  if (raw > 0) {
+    var dir = '';
+    if (tx.from === _walletAddr) dir = ' red';
+    else if ((tx.to_ || tx.to) === _walletAddr) dir = ' green';
+    return { amt: fmtOctCompact(tx.amount_raw), cls: dir, toOverride: null };
+  }
+  return { amt: '-', cls: ' gray', toOverride: null };
+}
+
 function txRow(tx) {
-  var amt = tx.amount_raw ? fmtOctCompact(tx.amount_raw) : '';
-  var dir = '';
-  if (tx.from === _walletAddr) dir = ' red';
-  else if ((tx.to_ || tx.to) === _walletAddr) dir = ' green';
-    var st = tx.status || 'pending';
-    var h = '<tr>';
+  var a = txAmt(tx);
+  var toAddr = a.toOverride || (tx.to_ || tx.to);
+  var st = tx.status || 'pending';
+  var h = '<tr>';
   h += '<td>' + txLink(tx.hash) + '</td>';
   h += '<td>' + addrLink(tx.from) + '</td>';
-  h += '<td>' + addrLink(tx.to_ || tx.to) + '</td>';
-  h += '<td class="mono amount' + dir + '">' + amt + '</td>';
+  h += '<td>' + addrLink(toAddr) + '</td>';
+  h += '<td class="mono amount' + a.cls + '">' + a.amt + '</td>';
   h += '<td>' + txStatusTag(st) + '</td>';
   h += '<td class="gray">' + fmtDate(tx.timestamp) + '</td>';
   h += '</tr>';
@@ -280,22 +361,17 @@ function txRow(tx) {
 }
 
 function txCardHtml(tx) {
-  var amt = tx.amount_raw ? fmtOctCompact(tx.amount_raw) : '';
-  var dir = '';
-  if (tx.from === _walletAddr) dir = ' red';
-  else if ((tx.to_ || tx.to) === _walletAddr) dir = ' green';
+  var a = txAmt(tx);
+  var toAddr = a.toOverride || (tx.to_ || tx.to);
   var st = tx.status || 'pending';
   var c = '<div class="tx-card">';
   c += '<div class="card-row"><span class="card-label">tx</span><span class="card-val">' + txLink(tx.hash) + '</span></div>';
   c += '<div class="card-row"><span class="card-label">from</span><span class="card-val">' + addrLink(tx.from) + '</span></div>';
-  c += '<div class="card-row"><span class="card-label">to</span><span class="card-val">' + addrLink(tx.to_ || tx.to) + '</span></div>';
-  if (amt) c += '<div class="card-row"><span class="card-label">amount</span><span class="card-val mono amount' + dir + '">' + amt + '</span></div>';
+  c += '<div class="card-row"><span class="card-label">to</span><span class="card-val">' + addrLink(toAddr) + '</span></div>';
+  c += '<div class="card-row"><span class="card-label">amount</span><span class="card-val mono amount' + a.cls + '">' + a.amt + '</span></div>';
   c += '<div class="card-row"><span class="card-label">status</span><span class="card-val">' + txStatusTag(st) + '</span></div>';
   c += '<div class="card-row"><span class="card-label">time</span><span class="card-val gray">' + fmtDate(tx.timestamp) + '</span></div>';
   c += '</div>';
-
-
-
   return c;
 }
 
@@ -347,14 +423,24 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+function dashTxLimit() {
+  var h = window.innerHeight;
+  var overhead = 280;
+  var rowH = 26;
+  if (window.innerWidth < 700) { overhead = 300; rowH = 120; }
+  return Math.max(5, Math.min(Math.floor((h - overhead) / rowH), 100));
+}
+
 async function loadDashboard() {
   await fetchBalance();
+  await loadTokenSymbols();
   try {
-     var hist = await api('GET', '/history?limit=10&offset=0');
+    var lim = dashTxLimit();
+    var hist = await api('GET', '/history?limit=' + lim + '&offset=0');
     var txs = hist.transactions || [];
     if (txs.length === 0) {
-
-      $('dash-txs').innerHTML = '<div class="mempool-empty">no transactions yet</div>';
+      $('dash-txs').innerHTML = '<div class="staging-empty">no transactions yet</div>';
+      $('dash-more').innerHTML = '';
       return;
     }
     var h = '<table class="desktop-table"><tr><th>hash</th><th>from</th><th>to</th><th class="col-amount">amount</th><th class="col-status">status</th><th class="col-time">time</th></tr>';
@@ -364,10 +450,12 @@ async function loadDashboard() {
       cards += txCardHtml(txs[i]);
     }
     h += '</table>';
-        cards += '</div>';
+    cards += '</div>';
     $('dash-txs').innerHTML = h + cards;
+    $('dash-more').innerHTML = '<div class="dash-more-row"><a href="#" onclick="switchView(\'history\');return false">view full history</a></div>';
   } catch (e) {
-    $('dash-txs').innerHTML = '<div class="mempool-empty">no transactions yet</div>';
+    $('dash-txs').innerHTML = '<div class="staging-empty">no transactions yet</div>';
+    $('dash-more').innerHTML = '';
   }
 }
 
@@ -382,9 +470,12 @@ async function doSend() {
   var msg = $('send-msg') ? $('send-msg').value.trim() : '';
   if (!validAddr(to)) { showResult('send-result', false, 'invalid recipient address'); return; }
   if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) { showResult('send-result', false, 'invalid amount'); return; }
+  if (!validateFee('send-fee', 'standard')) { feeError('send-result', 'send-fee', 'standard'); return; }
   try {
     var body = { to: to, amount: amount };
     if (msg) body.message = msg;
+    var fee = $('send-fee') ? $('send-fee').value.trim() : '';
+    if (fee) body.ou = fee;
     var res = await api('POST', '/send', body);
     var txHash = res.hash || res.tx_hash || '';
     showResult('send-result', true, 'sent ' + amount + ' oct - tx: ' + txLink(txHash));
@@ -410,8 +501,12 @@ async function doEncrypt() {
   clearResult('enc-result');
   var amount = $('enc-amount').value.trim();
   if (!amount || !/^\d+(\.\d{1,6})?$/.test(amount) || parseFloat(amount) <= 0) { showResult('enc-result', false, 'invalid amount'); return; }
+  if (!validateFee('enc-fee', 'encrypt')) { feeError('enc-result', 'enc-fee', 'encrypt'); return; }
   try {
-    var res = await api('POST', '/encrypt', { amount: amount });
+    var encBody = { amount: amount };
+    var encFee = $('enc-fee') ? $('enc-fee').value.trim() : '';
+    if (encFee) encBody.ou = encFee;
+    var res = await api('POST', '/encrypt', encBody);
     var txHash = res.hash || res.tx_hash || '';
     showResult('enc-result', true, 'encrypted ' + amount + ' oct - tx: ' + txLink(txHash));
       $('enc-amount').value = '';
@@ -429,8 +524,12 @@ async function doDecrypt() {
     var needRaw = Math.round(parseFloat(amount) * 1000000);
     if (_encryptedBalanceRaw <= 0) { showResult('dec-result', false, 'no encrypted balance to decrypt'); return; }
     if (needRaw > _encryptedBalanceRaw) { showResult('dec-result', false, 'insufficient encrypted balance: have ' + fmtOct(_encryptedBalanceRaw) + ', need ' + amount + ' oct'); return; }
+    if (!validateFee('dec-fee', 'decrypt')) { feeError('dec-result', 'dec-fee', 'decrypt'); return; }
   try {
-    var res = await api('POST', '/decrypt', { amount: amount });
+    var decBody = { amount: amount };
+    var decFee = $('dec-fee') ? $('dec-fee').value.trim() : '';
+    if (decFee) decBody.ou = decFee;
+    var res = await api('POST', '/decrypt', decBody);
     var txHash = res.hash || res.tx_hash || '';
     showResult('dec-result', true, 'decrypted ' + amount + ' oct - tx: ' + txLink(txHash));
     $('dec-amount').value = '';
@@ -450,6 +549,7 @@ async function doStealthSend() {
   var needRaw = Math.round(parseFloat(amount) * 1000000);
   if (_encryptedBalanceRaw <= 0) { logStealth('error: no encrypted balance - encrypt funds first', 'log-err'); return; }
   if (needRaw > _encryptedBalanceRaw) { logStealth('error: insufficient encrypted balance: have ' + fmtOct(_encryptedBalanceRaw) + ', need ' + amount + ' oct', 'log-err'); return; }
+  if (!validateFee('stealth-fee', 'stealth')) { logStealth('error: invalid fee - must be integer >= ' + ((_fees.stealth && _fees.stealth.minimum) || '?'), 'log-err'); return; }
   logStealth('initiating stealth send...', 'log-info');
 
 
@@ -460,7 +560,10 @@ async function doStealthSend() {
   logStealth('amount: ' + amount + ' oct', 'log-info');
   logStealth('', '');
   try {
-    var res = await api('POST', '/stealth/send', { to: to, amount: amount });
+    var stBody = { to: to, amount: amount };
+    var stFee = $('stealth-fee') ? $('stealth-fee').value.trim() : '';
+    if (stFee) stBody.ou = stFee;
+    var res = await api('POST', '/stealth/send', stBody);
     if (res.steps) {
       for (var i = 0; i < res.steps.length; i++) logStealth(res.steps[i], 'log-info');
     }
@@ -482,7 +585,7 @@ async function doStealthScan() {
     var res = await api('GET', '/stealth/scan');
     var outputs = res.outputs || [];
     if (outputs.length === 0) {
-      $('stealth-outputs').innerHTML = '<div class="mempool-empty">no stealth outputs found</div>';
+      $('stealth-outputs').innerHTML = '<div class="staging-empty">no stealth outputs found</div>';
       return;
     }
     var h = '<table class="desktop-table stealth-table"><tr><th></th><th>id</th><th>amount</th><th>status</th></tr>';
@@ -529,11 +632,6 @@ async function doStealthScan() {
   }
 }
 
-
-
-
-
-
 function claimSelected() {
   var checks = document.querySelectorAll('.stealth-chk:checked');
   var ids = [];
@@ -562,14 +660,477 @@ async function doStealthClaim(ids) {
   }
 }
 
+async function refreshContractBalance() {
+  await fetchBalance();
+}
+
+var _editorErrorLine = -1;
+
+function escapeHtmlCode(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+var _amlRe = /(\/\*[\s\S]*?\*\/)|(\/\/[^\n]*)|("(?:[^"\\]|\\.)*")|(\b(?:contract|state|constructor|fn|view|let|if|else|while|for|in|return|assert|require|match|const|struct|enum|true|false)\b)|(\b(?:string|int|bool|address|bytes|cipher|pubkey|map|list)\b)|(\b(?:self_addr|transfer|call|to_int|checkpoint|rollback|commit|origin|caller|balance|emit|log|value|epoch|min|max|abs|concat|to_string|len)\b)|(\bself\b)|(\b[0-9]+\b)|([+\-*\/]=|[=!<>]=|&&|\|\||->|[+\-*\/%<>=!])/g;
+
+function highlightAml(src) {
+  _amlRe.lastIndex = 0;
+  var out = '';
+  var last = 0;
+  var m;
+  while ((m = _amlRe.exec(src)) !== null) {
+    if (m.index > last) out += escapeHtmlCode(src.slice(last, m.index));
+    var tok = escapeHtmlCode(m[0]);
+    if (m[1]) out += '<span class="aml-comment">' + tok + '</span>';
+    else if (m[2]) out += '<span class="aml-comment">' + tok + '</span>';
+    else if (m[3]) out += '<span class="aml-str">' + tok + '</span>';
+    else if (m[4]) out += '<span class="aml-kw">' + tok + '</span>';
+    else if (m[5]) out += '<span class="aml-type">' + tok + '</span>';
+    else if (m[6]) out += '<span class="aml-builtin">' + tok + '</span>';
+    else if (m[7]) out += '<span class="aml-self">' + tok + '</span>';
+    else if (m[8]) out += '<span class="aml-num">' + tok + '</span>';
+    else if (m[9]) out += '<span class="aml-op">' + tok + '</span>';
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) out += escapeHtmlCode(src.slice(last));
+  return out + '\n';
+}
+
+var _asmRe = /(;[^\n]*)|("(?:[^"\\]|\\.)*")|(\br[0-9]{1,2}\b)|(\b[A-Z_]{2,}\b)|(\b[0-9]+\b)/g;
+
+function highlightAsm(src) {
+  _asmRe.lastIndex = 0;
+  var out = '';
+  var last = 0;
+  var m;
+  while ((m = _asmRe.exec(src)) !== null) {
+    if (m.index > last) out += escapeHtmlCode(src.slice(last, m.index));
+    var tok = escapeHtmlCode(m[0]);
+    if (m[1]) out += '<span class="asm-comment">' + tok + '</span>';
+    else if (m[2]) out += '<span class="asm-str">' + tok + '</span>';
+    else if (m[3]) out += '<span class="asm-reg">' + tok + '</span>';
+    else if (m[4]) out += '<span class="asm-instr">' + tok + '</span>';
+    else if (m[5]) out += '<span class="asm-num">' + tok + '</span>';
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) out += escapeHtmlCode(src.slice(last));
+  return out + '\n';
+}
+
+function updateGutter(src) {
+  var g = $('ct-gutter');
+  if (!g) return;
+  var n = (src.match(/\n/g) || []).length + 1;
+  var lines = [];
+  for (var i = 1; i <= n; i++) {
+    if (i === _editorErrorLine) lines.push('<span class="gutter-error">' + i + '</span>');
+    else lines.push('' + i);
+  }
+  g.innerHTML = lines.join('\n');
+}
+
+function editorUpdate() {
+  var ta = $('ct-source');
+  var hl = $('ct-highlight');
+  if (!ta || !hl) return;
+  var src = ta.value;
+  var lang = $('ct-lang').value;
+  hl.innerHTML = lang === 'aml' ? highlightAml(src) : highlightAsm(src);
+  updateGutter(src);
+  editorSync();
+}
+
+function editorSync() {
+  var ta = $('ct-source');
+  var hl = $('ct-highlight');
+  var g = $('ct-gutter');
+  if (!ta || !hl) return;
+  hl.style.transform = 'translate(' + (-ta.scrollLeft) + 'px,' + (-ta.scrollTop) + 'px)';
+  if (g) g.scrollTop = ta.scrollTop;
+}
+
+function editorMarkError(lineNum) {
+  _editorErrorLine = lineNum;
+  var ta = $('ct-source');
+  if (ta) updateGutter(ta.value);
+}
+
+function editorClearError() {
+  _editorErrorLine = -1;
+  var ta = $('ct-source');
+  if (ta) updateGutter(ta.value);
+}
+
+function initEditor() {
+  var ta = $('ct-source');
+  if (!ta) return;
+  ta.addEventListener('keydown', function(e) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      var start = ta.selectionStart;
+      var end = ta.selectionEnd;
+      var val = ta.value;
+      ta.value = val.substring(0, start) + '  ' + val.substring(end);
+      ta.selectionStart = ta.selectionEnd = start + 2;
+      editorUpdate();
+    }
+  });
+  editorUpdate();
+}
+
+function onLangChange() {
+  var lang = $('ct-lang').value;
+  if (lang === 'aml') {
+    $('ct-source-label').textContent = 'AppliedML source (.aml)';
+    $('ct-source').placeholder = 'contract Token {\n  state { name: string }\n  constructor(n: string) {\n    self.name = n\n  }\n}';
+  } else {
+    $('ct-source-label').textContent = 'assembly source (.oasm)';
+    $('ct-source').placeholder = '; constructor\nCALLER r0\nSSTORE "owner", r0\nSTOP\n; dispatcher\nJDEST 100\n...';
+  }
+  editorUpdate();
+}
+
+async function doCompile() {
+  clearResult('ct-compile-result');
+  editorClearError();
+  _compiledAbi = null;
+  var abiDiv = $('ct-abi-display');
+  if (abiDiv) abiDiv.style.display = 'none';
+  var source = $('ct-source').value;
+  var lang = $('ct-lang').value;
+  if (!source.trim()) { showResult('ct-compile-result', false, 'source required'); return; }
+  try {
+    var endpoint = lang === 'aml' ? '/contract/compile-aml' : '/contract/compile';
+    var res = await api('POST', endpoint, { source: source });
+    var b64 = res.bytecode || '';
+    $('ct-bytecode').value = b64;
+    var ver = res.version ? ('AppliedML ' + res.version + ' - ') : '';
+    var msg = ver + 'compiled: ' + res.instructions + ' instructions, ' + res.size + ' bytes';
+    showResult('ct-compile-result', true, msg);
+    if (res.abi) {
+      _compiledAbi = res.abi;
+      if (abiDiv) {
+        $('ct-abi-json').textContent = JSON.stringify(res.abi, null, 2);
+        abiDiv.style.display = '';
+      }
+    }
+  } catch (e) {
+    var errMsg = e.message || '';
+    var lineMatch = errMsg.match(/line\s+(\d+)/i);
+    if (lineMatch) editorMarkError(parseInt(lineMatch[1], 10));
+    showResult('ct-compile-result', false, errMsg);
+  }
+}
+
+async function doPreviewDeploy() {
+  clearResult('ct-deploy-result');
+  var bytecode = $('ct-bytecode').value.trim();
+  if (!bytecode) { showResult('ct-deploy-result', false, 'bytecode required (compile first)'); return; }
+  try {
+    var res = await api('POST', '/contract/address', { bytecode: bytecode });
+    showResult('ct-deploy-result', true,
+      'predicted address: <span class="mono">' + escapeHtml(res.address) + '</span> (nonce ' + res.nonce + ')');
+  } catch (e) {
+    showResult('ct-deploy-result', false, e.message);
+  }
+}
+
+function verifySourceRetry(addr, source, attempts) {
+  if (attempts <= 0) return;
+  setTimeout(async function() {
+    try {
+      await api('POST', '/contract/verify', { address: addr, source: source });
+      showResult('ct-deploy-result', true,
+        'deployed to <span class="mono">' + escapeHtml(addr) + '</span> — <strong>source verified</strong>');
+    } catch (e) {
+      verifySourceRetry(addr, source, attempts - 1);
+    }
+  }, 12000);
+}
+
+async function doDeploy() {
+  clearResult('ct-deploy-result');
+  var bytecode = $('ct-bytecode').value.trim();
+  if (!bytecode) { showResult('ct-deploy-result', false, 'bytecode required (compile first)'); return; }
+  var params = $('ct-deploy-params').value.trim();
+  if (params && params !== '[]') {
+    try { JSON.parse(params); } catch (e) {
+      showResult('ct-deploy-result', false, 'invalid json params');
+      return;
+    }
+  }
+  if (!validateFee('ct-deploy-fee', 'deploy')) { feeError('ct-deploy-result', 'ct-deploy-fee', 'deploy'); return; }
+  try {
+    var body = { bytecode: bytecode };
+    if (params) body.params = params;
+    var deployFee = $('ct-deploy-fee') ? $('ct-deploy-fee').value.trim() : '';
+    if (deployFee) body.ou = deployFee;
+    var res = await api('POST', '/contract/deploy', body);
+    var addr = res.contract_address || '';
+    var hash = res.tx_hash || '';
+    showResult('ct-deploy-result', true,
+      'deployed to <span class="mono">' + escapeHtml(addr) + '</span> — tx: ' + txLink(hash) + ' (verifying source...)');
+    $('ct-call-addr').value = addr;
+    $('ct-info-addr').value = addr;
+    var source = $('ct-source').value || '';
+    if (source.trim()) verifySourceRetry(addr, source, 5);
+    loadDashboard();
+  } catch (e) {
+    showResult('ct-deploy-result', false, e.message);
+  }
+}
+
+async function doContractCall() {
+  clearResult('ct-call-result');
+  var addr = $('ct-call-addr').value.trim();
+  var method = $('ct-call-method').value.trim();
+  if (!addr) { showResult('ct-call-result', false, 'contract address required'); return; }
+  if (!method) { showResult('ct-call-result', false, 'method name required'); return; }
+  var params_str = $('ct-call-params').value.trim() || '[]';
+  var params;
+  try { params = JSON.parse(params_str); } catch (e) {
+    showResult('ct-call-result', false, 'invalid json params');
+    return;
+  }
+  var amount = $('ct-call-amount').value.trim() || '0';
+  var amount_raw = '0';
+  if (amount !== '0' && amount !== '') {
+    var f = parseFloat(amount);
+    if (isNaN(f) || f < 0) { showResult('ct-call-result', false, 'invalid amount'); return; }
+    amount_raw = String(Math.round(f * 1000000));
+  }
+  if (!validateFee('ct-call-fee', 'call')) { feeError('ct-call-result', 'ct-call-fee', 'call'); return; }
+  try {
+    var callBody = { address: addr, method: method, params: params, amount: amount_raw };
+    var callFee = $('ct-call-fee') ? $('ct-call-fee').value.trim() : '';
+    if (callFee) callBody.ou = callFee;
+    var res = await api('POST', '/contract/call', callBody);
+    var hash = res.tx_hash || '';
+    showResult('ct-call-result', true, 'call submitted — tx: ' + txLink(hash));
+    loadDashboard();
+  } catch (e) {
+    showResult('ct-call-result', false, e.message);
+  }
+}
+
+async function doContractView() {
+  clearResult('ct-call-result');
+  var addr = $('ct-call-addr').value.trim();
+  var method = $('ct-call-method').value.trim();
+  if (!addr) { showResult('ct-call-result', false, 'contract address required'); return; }
+  if (!method) { showResult('ct-call-result', false, 'method name required'); return; }
+  var params_str = $('ct-call-params').value.trim() || '[]';
+  try { JSON.parse(params_str); } catch (e) {
+    showResult('ct-call-result', false, 'invalid json params');
+    return;
+  }
+  try {
+    var url = '/contract/view?address=' + encodeURIComponent(addr) +
+      '&method=' + encodeURIComponent(method) +
+      '&params=' + encodeURIComponent(params_str);
+    var res = await api('GET', url);
+    var val = res.result;
+    if (val === null || val === undefined) val = 'null';
+    showResult('ct-call-result', true, 'result: <span class="mono">' + escapeHtml(String(val)) + '</span>');
+  } catch (e) {
+    showResult('ct-call-result', false, e.message);
+  }
+}
+
+async function doContractInfo() {
+  clearResult('ct-info-result');
+  var addr = $('ct-info-addr').value.trim();
+  if (!addr) { showResult('ct-info-result', false, 'address required'); return; }
+  try {
+    var res = await api('GET', '/contract/info?address=' + encodeURIComponent(addr));
+    var h = '<table class="detail-table">';
+    h += '<tr><td>address</td><td class="mono">' + escapeHtml(res.address || addr) + '</td></tr>';
+    h += '<tr><td>owner</td><td class="mono">' + escapeHtml(res.owner || '') + '</td></tr>';
+    h += '<tr><td>version</td><td>' + escapeHtml(res.version || '') + '</td></tr>';
+    h += '<tr><td>code hash</td><td class="mono">' + escapeHtml(res.code_hash || '') + '</td></tr>';
+    h += '<tr><td>balance</td><td class="mono">' + fmtOct(res.balance || '0') + '</td></tr>';
+    h += '</table>';
+    $('ct-info-result').innerHTML = h;
+  } catch (e) {
+    showResult('ct-info-result', false, e.message);
+  }
+}
+
+async function doContractReceipt() {
+  clearResult('ct-info-result');
+  var addr = $('ct-info-addr').value.trim();
+  if (!addr) { showResult('ct-info-result', false, 'enter a tx hash to lookup receipt'); return; }
+  try {
+    var res = await api('GET', '/contract/receipt?hash=' + encodeURIComponent(addr));
+    var h = '<table class="detail-table">';
+    var keys = Object.keys(res);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var v = res[k];
+      if (typeof v === 'object') v = JSON.stringify(v);
+      h += '<tr><td>' + escapeHtml(k) + '</td><td class="mono">' + escapeHtml(String(v)) + '</td></tr>';
+    }
+    h += '</table>';
+    $('ct-info-result').innerHTML = h;
+  } catch (e) {
+    showResult('ct-info-result', false, e.message);
+  }
+}
+
+async function doVerifyContract() {
+  clearResult('ct-verify-result');
+  var addr = $('ct-verify-addr').value.trim();
+  var source = $('ct-verify-source').value;
+  if (!addr) { showResult('ct-verify-result', false, 'contract address required'); return; }
+  if (!source.trim()) { showResult('ct-verify-result', false, 'source required'); return; }
+  try {
+    var res = await api('POST', '/contract/verify', { address: addr, source: source });
+    showResult('ct-verify-result', true,
+      'source verified — code_hash: <span class="mono">' + escapeHtml(res.code_hash || '') + '</span>');
+  } catch (e) {
+    showResult('ct-verify-result', false, e.message);
+  }
+}
+
+async function loadTokenSymbols() {
+  if (_tokensLoaded) return;
+  try {
+    var res = await api('GET', '/tokens');
+    _tokens = res.tokens || [];
+    _tokensLoaded = true;
+    for (var i = 0; i < _tokens.length; i++) {
+      _tokenSymbols[_tokens[i].address] = _tokens[i].symbol;
+    }
+  } catch(e) {}
+}
+
+async function loadTokens() {
+  $('tok-list').innerHTML = '<div class="loading">loading tokens...</div>';
+  try {
+    var res = await api('GET', '/tokens');
+    _tokens = res.tokens || [];
+    _tokensLoaded = true;
+    for (var i = 0; i < _tokens.length; i++) {
+      _tokenSymbols[_tokens[i].address] = _tokens[i].symbol;
+    }
+    renderTokenList();
+    loadTokenTxs();
+  } catch (e) {
+    $('tok-list').innerHTML = '<div class="error-box">' + e.message + '</div>';
+  }
+}
+
+function renderTokenList() {
+  if (_tokens.length === 0) {
+    $('tok-list').innerHTML = '<div class="staging-empty">no tokens found on this network</div>';
+    $('tok-count').textContent = '0';
+    return;
+  }
+  $('tok-count').textContent = _tokens.length;
+  var h = '';
+  for (var i = 0; i < _tokens.length; i++) {
+    var t = _tokens[i];
+    var bal = t.balance || '0';
+    var balCls = (bal === '0') ? 'token-zero' : 'token-balance';
+    h += '<div class="token-card">';
+    h += '<div class="token-header">';
+    h += '<div><span class="token-symbol">' + escapeHtml(t.symbol) + '</span>';
+    h += '<span class="token-name">' + escapeHtml(t.name) + '</span></div>';
+    h += '<div class="' + balCls + '">' + fmtTokenCompact(bal) + ' ' + escapeHtml(t.symbol) + '</div>';
+    h += '</div>';
+    h += '<div class="token-row">';
+    h += '<span class="mono gray">' + short(t.address) + '</span>';
+    h += '</div>';
+    h += '<div class="token-actions">';
+    h += '<button class="token-btn" onclick="openTokenTransfer(' + i + ')">transfer</button>';
+    h += '</div>';
+    h += '</div>';
+  }
+  $('tok-list').innerHTML = h;
+}
+
+function openTokenTransfer(idx) {
+  _selectedToken = _tokens[idx];
+  $('tok-transfer-sym').textContent = _selectedToken.symbol;
+  $('tok-to').value = '';
+  $('tok-amount').value = '';
+  clearResult('tok-transfer-result');
+  $('tok-transfer').style.display = '';
+  $('tok-to').focus();
+}
+
+function closeTokenTransfer() {
+  $('tok-transfer').style.display = 'none';
+  _selectedToken = null;
+}
+
+async function doTokenTransfer() {
+  clearResult('tok-transfer-result');
+  if (!_selectedToken) { showResult('tok-transfer-result', false, 'no token selected'); return; }
+  var to = $('tok-to').value.trim();
+  var amount = $('tok-amount').value.trim();
+  if (!validAddr(to)) { showResult('tok-transfer-result', false, 'invalid recipient address'); return; }
+  if (!amount || isNaN(parseInt(amount)) || parseInt(amount) <= 0) {
+    showResult('tok-transfer-result', false, 'invalid amount'); return;
+  }
+  if (!validateFee('tok-fee', 'call')) { feeError('tok-transfer-result', 'tok-fee', 'call'); return; }
+  try {
+    var tokBody = { token: _selectedToken.address, to: to, amount: amount };
+    var tokFee = $('tok-fee') ? $('tok-fee').value.trim() : '';
+    if (tokFee) tokBody.ou = tokFee;
+    var res = await api('POST', '/token/transfer', tokBody);
+    var txHash = res.hash || res.tx_hash || '';
+    showResult('tok-transfer-result', true,
+      'sent ' + fmtTokenCompact(amount) + ' ' + _selectedToken.symbol + ' - tx: ' + txLink(txHash));
+    $('tok-to').value = '';
+    $('tok-amount').value = '';
+    setTimeout(function() { loadTokens(); }, 2000);
+  } catch (e) {
+    showResult('tok-transfer-result', false, e.message);
+  }
+}
+
+async function loadTokenTxs() {
+  var el = $('tok-txs');
+  if (!el) return;
+  var gen = ++_tokTxGen;
+  try {
+    var tokenAddrs = {};
+    for (var i = 0; i < _tokens.length; i++) tokenAddrs[_tokens[i].address] = true;
+    var filtered = [];
+    var hist = await api('GET', '/history?limit=500&offset=0');
+    if (gen !== _tokTxGen) return;
+    var txs = hist.transactions || [];
+    for (var i = 0; i < txs.length; i++) {
+      var t = txs[i];
+      if (t.op_type === 'call' && t.encrypted_data === 'transfer' && tokenAddrs[t.to_ || t.to]) filtered.push(t);
+    }
+    if (filtered.length === 0) {
+      el.innerHTML = '<div class="staging-empty">no token transactions yet</div>';
+      return;
+    }
+    var h = '<table class="desktop-table"><tr><th>hash</th><th>from</th><th>to</th><th class="col-amount">amount</th><th class="col-status">status</th><th class="col-time">time</th></tr>';
+    var cards = '<div class="card-list">';
+    for (var i = 0; i < filtered.length; i++) {
+      h += txRow(filtered[i]);
+      cards += txCardHtml(filtered[i]);
+    }
+    h += '</table>';
+    cards += '</div>';
+    el.innerHTML = h + cards;
+  } catch(e) {
+    el.innerHTML = '<div class="staging-empty">no token transactions yet</div>';
+  }
+}
+
 async function loadHistory() {
   $('history-list').innerHTML = '<div class="loading">loading...</div>';
     $('history-more').innerHTML = '';
+  await loadTokenSymbols();
   try {
     var res = await api('GET', '/history?limit=' + _historyLimit + '&offset=' + _historyOffset);
     var txs = res.transactions || [];
     if (txs.length === 0 && _historyOffset === 0) {
-      $('history-list').innerHTML = '<div class="mempool-empty">no transactions yet</div>';
+      $('history-list').innerHTML = '<div class="staging-empty">no transactions yet</div>';
       return;
     }
     var h = '<table class="desktop-table"><tr><th>hash</th><th>from</th><th>to</th><th class="col-amount">amount</th><th class="col-status">status</th><th class="col-time">time</th></tr>';
@@ -601,7 +1162,7 @@ async function loadHistoryAppend() {
     var res = await api('GET', '/history?limit=' + _historyLimit + '&offset=' + _historyOffset);
     var txs = res.transactions || [];
     if (txs.length === 0) {
-      $('history-more').innerHTML = '<div class="mempool-empty">no more transactions</div>';
+      $('history-more').innerHTML = '<div class="staging-empty">no more transactions</div>';
       return;
     }
     var tbl = $('history-list').querySelector('.desktop-table');
@@ -718,11 +1279,6 @@ function modalBack() {
   $('modal-btns').style.display = 'flex';
 }
 
-
-
-
-
-
 function modalBackFromPin() {
   _pendingAction = null;
   _pendingPriv = '';
@@ -804,6 +1360,8 @@ async function loadWalletInfo() {
     if (w.explorer_url) _explorerUrl = w.explorer_url.replace(/\/+$/, '');
     $('hdr-addr').innerHTML = '<span class="mono">' + _walletAddr + '</span>';
     $('hdr-logout').style.display = '';
+    $('hdr-dev').style.display = '';
+    fetchFees();
     loadDashboard();
   } catch (e) {
     $('hdr-addr').textContent = 'error loading wallet';
@@ -819,6 +1377,7 @@ async function doLogout() {
   _cachedBal = null;
   _encryptedBalanceRaw = 0;
   $('hdr-logout').style.display = 'none';
+  $('hdr-dev').style.display = 'none';
   $('hdr-addr').textContent = 'locked';
   $('hdr-status').textContent = 'locked';
   $('hdr-status').className = 'right';
@@ -834,6 +1393,7 @@ function startRefreshTimer() {
   _refreshTimer = setInterval(function() {
     fetchBalance();
     bgStealthScan();
+    fetchFees();
     var dash = $('view-dashboard');
     if (dash && dash.classList.contains('active')) loadDashboard();
   }, 15000);
@@ -856,7 +1416,6 @@ async function init() {
         $('modal-sub').textContent = 'enter PIN to unlock';
         showPinEntry();
       }
-
       $('modal-overlay').style.display = 'flex';
       return;
     }
@@ -868,9 +1427,6 @@ async function init() {
   }
 }
 
-
-
-
 $('modal-pin-input').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') modalUnlock();
 });
@@ -878,4 +1434,5 @@ $('modal-pin-confirm').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') modalFinishSetup();
 });
 
+initEditor();
 init();

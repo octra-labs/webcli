@@ -9,12 +9,14 @@ case "$OS" in
             echo "homebrew not found. Installing..."
             /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
         fi
-        if ! brew list openssl@3 &>/dev/null; then
-            echo "installing OpenSSL..."
-            brew install openssl@3
-        else
-            echo "openSSL already installed"
-        fi
+        for pkg in openssl@3 leveldb; do
+            if ! brew list $pkg &>/dev/null; then
+                echo "installing $pkg..."
+                brew install $pkg
+            else
+                echo "$pkg already installed"
+            fi
+        done
         if ! command -v g++ &>/dev/null; then
             echo "installing Xcode command line tools..."
             xcode-select --install 2>/dev/null || true
@@ -25,18 +27,18 @@ case "$OS" in
         if command -v apt-get &>/dev/null; then
             echo "Installing dependencies (apt)..."
             sudo apt-get update -qq 2>/dev/null || true
-            sudo apt-get install -y -qq g++ libssl-dev make
+            sudo apt-get install -y -qq g++ libssl-dev libleveldb-dev make
         elif command -v dnf &>/dev/null; then
             echo "Installing dependencies (dnf)..."
-            sudo dnf install -y gcc-c++ openssl-devel make
+            sudo dnf install -y gcc-c++ openssl-devel leveldb-devel make
         elif command -v pacman &>/dev/null; then
             echo "Installing dependencies (pacman)..."
-            sudo pacman -S --noconfirm gcc openssl make
+            sudo pacman -S --noconfirm gcc openssl leveldb make
         elif command -v apk &>/dev/null; then
             echo "Installing dependencies (apk)..."
-            sudo apk add g++ openssl-dev make
+            sudo apk add g++ openssl-dev leveldb-dev make
         else
-            echo "Unknown package manager. Please install: g++, libssl-dev, make"
+            echo "Unknown package manager. Please install: g++, libssl-dev, libleveldb-dev, make"
             exit 1
         fi
         ;;

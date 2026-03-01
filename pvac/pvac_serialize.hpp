@@ -623,6 +623,8 @@ inline pvac::RangeProof deserialize_range_proof(const uint8_t* data, size_t len)
     return rp;
 }
 
+// ═══ Aggregated Range Proof ═══
+
 inline std::vector<uint8_t> serialize_agg_range_proof(const pvac::AggregatedRangeProof& arp) {
     Writer w;
     w.header(TAG_AGG_RANGE_PROOF);
@@ -650,6 +652,8 @@ inline pvac::AggregatedRangeProof deserialize_agg_range_proof(const uint8_t* dat
     if (r.failed) throw std::runtime_error(r.error);
     return arp;
 }
+
+// ═══ Unified Range Proof dispatch ═══
 
 enum RangeProofFormat { RP_OLD = 0, RP_AGGREGATED = 1 };
 

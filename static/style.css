@@ -358,10 +358,26 @@ tr:hover { background: #E5E9EF; }
   font-size: 11px;
 }
 
-.mempool-empty {
+.staging-empty {
   color: #8C9DB6;
   font-style: italic;
   padding: 10px 8px;
+}
+
+.dash-more-row {
+  text-align: center;
+  padding: 10px 0 4px;
+  padding-bottom: 10px;
+}
+
+.dash-more-row a {
+  color: #5A7BAA;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.dash-more-row a:hover {
+  text-decoration: underline;
 }
 
 .footer {
@@ -589,6 +605,8 @@ tr:hover { background: #E5E9EF; }
   text-align: right;
   white-space: nowrap;
   max-width: 72%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .card-val a { color: #3B567F; }
@@ -753,6 +771,120 @@ tr:hover { background: #E5E9EF; }
   font-weight: bold;
 }
 
+.contract-tag {
+  display: inline-block;
+  background: #3B567F;
+  color: #D0D7E2;
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.code-editor {
+  font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  line-height: 150%;
+  tab-size: 4;
+  white-space: pre;
+  resize: vertical;
+  min-height: 100px;
+  background: #F6F7F9;
+  color: #3B567F;
+}
+
+.editor-wrap {
+  display: flex;
+  border: 1px solid #C0C6D0;
+  background: #F6F7F9;
+  height: 400px;
+  overflow: hidden;
+}
+
+.editor-gutter {
+  min-width: 32px;
+  padding: 4px 6px 4px 4px;
+  text-align: right;
+  font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  line-height: 150%;
+  color: #C0C6D0;
+  background: #E5E9EF;
+  border-right: 1px solid #D0D7E2;
+  user-select: none;
+  overflow: hidden;
+  white-space: pre;
+}
+
+.editor-body {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-height: 100px;
+}
+
+.editor-highlight {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  margin: 0;
+  padding: 4px 8px;
+  font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  line-height: 150%;
+  white-space: pre;
+  pointer-events: none;
+  color: #3B567F;
+  tab-size: 4;
+  overflow: hidden;
+  word-wrap: normal;
+  z-index: 0;
+}
+
+.editor-body textarea.code-editor {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  padding: 4px 8px;
+  margin: 0;
+  border: none;
+  resize: none;
+  font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  line-height: 150%;
+  tab-size: 4;
+  background: transparent;
+  color: transparent;
+  caret-color: #3B567F;
+  outline: none;
+  white-space: pre;
+  overflow: auto;
+}
+
+.editor-body textarea.code-editor::selection {
+  background: rgba(59, 86, 127, 0.2);
+}
+
+.editor-body textarea.code-editor::placeholder {
+  color: #C0C6D0;
+}
+
+.aml-kw { color: #3B567F; font-weight: bold; }
+.aml-type { color: #516E9A; }
+.aml-str { color: #8C9DB6; }
+.aml-num { color: #516E9A; font-weight: bold; }
+.aml-comment { color: #C0C6D0; font-style: italic; }
+.aml-builtin { color: #516E9A; font-weight: bold; }
+.aml-self { color: #3B567F; }
+.aml-op { color: #8C9DB6; }
+
+.asm-instr { color: #3B567F; font-weight: bold; }
+.asm-reg { color: #516E9A; }
+.asm-comment { color: #C0C6D0; font-style: italic; }
+.asm-str { color: #8C9DB6; }
+.asm-num { color: #516E9A; font-weight: bold; }
+
+.editor-error-line { background: rgba(140, 157, 182, 0.15); }
+.gutter-error { color: #3B567F; font-weight: bold; }
+
 .badge {
   display: inline-block;
   background: #516E9A;
@@ -767,3 +899,50 @@ tr:hover { background: #E5E9EF; }
   margin-left: 3px;
   vertical-align: middle;
 }
+
+.token-card {
+  border-bottom: 1px solid #D0D7E2;
+  padding: 8px 10px;
+  background: #fff;
+}
+.token-card:hover { background: #E5E9EF; }
+
+.token-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.token-symbol { font-weight: bold; color: #3B567F; font-size: 12px; }
+.token-name { color: #8C9DB6; font-size: 11px; margin-left: 6px; }
+.token-balance { font-weight: bold; font-size: 12px; }
+.token-zero { color: #8C9DB6; font-weight: normal; }
+
+.token-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  font-size: 11px;
+}
+
+.token-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.token-btn {
+  background: #3B567F;
+  color: #fff;
+  border: none;
+  padding: 3px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: Tahoma, arial, sans-serif;
+  letter-spacing: 1px;
+}
+.token-btn:hover { background: #516E9A; }
+.token-btn-sec {
+  background: #E5E9EF;
+  color: #3B567F;
+  border: 1px solid #C0C6D0;
+}
+.token-btn-sec:hover { background: #D0D7E2; }

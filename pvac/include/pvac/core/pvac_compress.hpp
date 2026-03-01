@@ -2,7 +2,6 @@
 // mini public key arith compressor for pub key 
 // (17 megabytes packed into 3 megabytes)
 
-
 #pragma once
 
 #include <cstdint>

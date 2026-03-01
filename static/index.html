@@ -89,6 +89,7 @@
   </div>
   <div class="hdr-right-group">
     <div class="right" id="hdr-status">connecting...</div>
+    <button class="right logout-btn" id="hdr-dev" onclick="switchView('dev')" style="display:none">dev tools</button>
     <button class="right logout-btn" id="hdr-logout" onclick="doLogout()" style="display:none">logout</button>
   </div>
 </header>
@@ -96,8 +97,9 @@
 <div class="nav-tabs">
   <a href="#" class="active" data-view="dashboard" onclick="switchView('dashboard');return false">dashboard</a>
   <a href="#" data-view="send" onclick="switchView('send');return false">send</a>
-  <a href="#" data-view="encrypt" onclick="switchView('encrypt');return false">encrypt/decrypt</a>
+  <a href="#" data-view="encrypt" onclick="switchView('encrypt');return false">encryption</a>
   <a href="#" data-view="stealth" onclick="switchView('stealth');return false">stealth <span id="stealth-badge" class="badge" style="display:none"></span></a>
+  <a href="#" data-view="tokens" onclick="switchView('tokens');return false">tokens</a>
   <a href="#" data-view="history" onclick="switchView('history');return false">history</a>
   <a href="#" data-view="keys" onclick="switchView('keys');return false">keys</a>
   <a href="#" data-view="settings" onclick="switchView('settings');return false">settings</a>
@@ -115,6 +117,7 @@
     <div class="section">
       <div class="section-title">recent transactions</div>
       <div id="dash-txs"><div class="loading">loading...</div></div>
+      <div id="dash-more"></div>
     </div>
   </div>
 
@@ -136,6 +139,10 @@
         <label>message (optional)</label>
         <input type="text" id="send-msg" placeholder="">
       </div>
+      <div class="form-row">
+        <label>fee (ou) - recommended by default</label>
+        <input type="text" id="send-fee" placeholder="...">
+      </div>
       <div class="action-row">
         <button class="action-btn" onclick="doSend()">send</button>
       </div>
@@ -156,6 +163,10 @@
           <label>amount to encrypt (oct)</label>
           <input type="text" id="enc-amount" placeholder="0.000000">
         </div>
+        <div class="form-row">
+          <label>fee (ou) - recommended by default</label>
+          <input type="text" id="enc-fee" placeholder="...">
+        </div>
         <div class="action-row">
           <button class="action-btn" onclick="doEncrypt()">encrypt</button>
         </div>
@@ -166,6 +177,10 @@
         <div class="form-row">
           <label>amount to decrypt (oct)</label>
           <input type="text" id="dec-amount" placeholder="0.000000">
+        </div>
+        <div class="form-row">
+          <label>fee (ou) - recommended by default</label>
+          <input type="text" id="dec-fee" placeholder="...">
         </div>
         <div class="action-row">
           <button class="action-btn" onclick="doDecrypt()">decrypt</button>
@@ -189,6 +204,10 @@
         <label>amount (oct)</label>
         <input type="text" id="stealth-amount" placeholder="0.000000">
       </div>
+      <div class="form-row">
+        <label>fee (ou) - recommended by default</label>
+        <input type="text" id="stealth-fee" placeholder="...">
+      </div>
       <div class="action-row">
         <button class="action-btn" onclick="doStealthSend()">stealth send</button>
       </div>
@@ -198,7 +217,168 @@
       <button class="action-btn" onclick="doStealthScan()">scan</button>
     </div>
     <div class="stealth-outputs-area">
-      <div id="stealth-outputs"><div class="mempool-empty">no outputs scanned yet</div></div>
+      <div id="stealth-outputs"><div class="staging-empty">no outputs scanned yet</div></div>
+    </div>
+  </div>
+
+  <div class="view" id="view-tokens">
+    <div class="balance-strip">
+      <span class="bal-label">tokens:</span> <span id="tok-count" class="mono">-</span>
+    </div>
+    <div class="section-title">your tokens</div>
+    <div id="tok-list"><div class="loading">loading tokens...</div></div>
+
+    <div id="tok-transfer" style="display:none">
+      <div class="section-title">transfer <span id="tok-transfer-sym"></span></div>
+      <div class="form-area">
+        <div class="form-row">
+          <label>recipient</label>
+          <input type="text" id="tok-to" placeholder="oct...">
+        </div>
+        <div class="form-row">
+          <label>amount</label>
+          <input type="text" id="tok-amount" placeholder="0">
+        </div>
+        <div class="form-row">
+          <label>fee (ou) - recommended by default</label>
+          <input type="text" id="tok-fee" placeholder="...">
+        </div>
+        <div class="action-row">
+          <button class="action-btn" onclick="doTokenTransfer()">send</button>
+          <button class="action-btn" style="background:#8C9DB6" onclick="closeTokenTransfer()">cancel</button>
+        </div>
+        <div id="tok-transfer-result"></div>
+      </div>
+    </div>
+
+    <div class="section-title">token transactions</div>
+    <div id="tok-txs"><div class="staging-empty">switch to a token to see transactions</div></div>
+  </div>
+
+  <div class="view" id="view-dev">
+    <div class="balance-strip">
+      <span class="bal-label">balance:</span> <span id="ct-bal" class="mono">-</span>
+    </div>
+
+    <div class="section-title">compile contract</div>
+    <div class="form-area">
+      <div class="form-row">
+        <label>language</label>
+        <select id="ct-lang" onchange="onLangChange()">
+          <option value="aml" selected>AppliedML (.aml)</option>
+          <option value="asm">Assembly (.oasm)</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label id="ct-source-label">AppliedML source (.aml)</label>
+        <div class="editor-wrap">
+          <div class="editor-gutter" id="ct-gutter">1</div>
+          <div class="editor-body">
+            <pre class="editor-highlight" id="ct-highlight"></pre>
+            <textarea id="ct-source" class="code-editor" rows="14" oninput="editorUpdate()" onscroll="editorSync()" placeholder="contract Token {
+  state { name: string, balances: map[address]int }
+  constructor(n: string, supply: int) {
+    self.name = n
+    self.balances[origin] = supply
+  }
+  fn transfer(to: address, amt: int): bool {
+    let bal = self.balances[caller]
+    assert bal >= amt
+    self.balances[caller] = bal - amt
+    self.balances[to] = self.balances[to] + amt
+    return true
+  }
+}" spellcheck="false"></textarea>
+          </div>
+        </div>
+      </div>
+      <div class="action-row">
+        <button class="action-btn" onclick="doCompile()">compile</button>
+      </div>
+      <div id="ct-compile-result"></div>
+      <div id="ct-abi-display" style="display:none">
+        <div class="section-title" style="margin-top:8px">ABI</div>
+        <pre id="ct-abi-json" class="code-editor" style="font-size:11px;max-height:200px;overflow:auto;padding:8px"></pre>
+      </div>
+    </div>
+
+    <div class="section-title">deploy contract</div>
+    <div class="form-area">
+      <div class="form-row">
+        <label>bytecode (base64, from compile)</label>
+        <textarea id="ct-bytecode" rows="3" class="code-editor" placeholder="compiled bytecode..." spellcheck="false"></textarea>
+      </div>
+      <div class="form-row">
+        <label>constructor params (json array, optional)</label>
+        <input type="text" id="ct-deploy-params" placeholder='["MyToken", "MTK", 1000000]'>
+      </div>
+      <div class="form-row">
+        <label>fee (ou) - recommended by default</label>
+        <input type="text" id="ct-deploy-fee" placeholder="...">
+      </div>
+      <div class="action-row">
+        <button class="action-btn" onclick="doPreviewDeploy()">preview address</button>
+        <button class="action-btn" onclick="doDeploy()">deploy (50 oct)</button>
+      </div>
+      <div id="ct-deploy-result"></div>
+    </div>
+
+    <div class="section-title">call contract</div>
+    <div class="form-area">
+      <div class="form-row">
+        <label>contract address</label>
+        <input type="text" id="ct-call-addr" placeholder="oct...">
+      </div>
+      <div class="form-row">
+        <label>method name</label>
+        <input type="text" id="ct-call-method" placeholder="transfer">
+      </div>
+      <div class="form-row">
+        <label>params (json array)</label>
+        <input type="text" id="ct-call-params" placeholder='["oct...", 100]'>
+      </div>
+      <div class="form-row">
+        <label>amount (oct, optional)</label>
+        <input type="text" id="ct-call-amount" placeholder="0">
+      </div>
+      <div class="form-row">
+        <label>fee (ou) - recommended by default</label>
+        <input type="text" id="ct-call-fee" placeholder="...">
+      </div>
+      <div class="action-row">
+        <button class="action-btn" onclick="doContractCall()">send call tx</button>
+        <button class="action-btn" onclick="doContractView()">view (read-only)</button>
+      </div>
+      <div id="ct-call-result"></div>
+    </div>
+
+    <div class="section-title">contract info</div>
+    <div class="form-area">
+      <div class="form-row">
+        <label>contract address</label>
+        <input type="text" id="ct-info-addr" placeholder="oct...">
+      </div>
+      <div class="action-row">
+        <button class="action-btn" onclick="doContractInfo()">lookup</button>
+        <button class="action-btn" onclick="doContractReceipt()">last receipt</button>
+      </div>
+      <div id="ct-info-result"></div>
+    </div>
+
+    <div class="section-title">verify contract source</div>
+    <div class="form-area">
+      <div class="form-row">
+        <label>contract address</label>
+        <input type="text" id="ct-verify-addr" placeholder="oct...">
+      </div>
+      <div class="form-row">
+        <label>AppliedML source (.aml)</label>
+        <textarea id="ct-verify-source" class="code-editor" rows="8" placeholder="paste contract source code..." spellcheck="false"></textarea>
+      </div>
+      <div class="action-row">
+        <button class="action-btn" onclick="doVerifyContract()">verify source</button>
+      </div>
+      <div id="ct-verify-result"></div>
     </div>
   </div>
 
@@ -259,7 +439,7 @@
 
 </div>
 
-<div class="footer">octra_wallet | 2026 | alpha ver. - 0.03.12</div>
+<div class="footer">octra_wallet | 2026 | alpha ver. - 0.04.01</div>
 
 </div>
 <script src="wallet.js"></script>

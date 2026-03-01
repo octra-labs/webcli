@@ -153,8 +153,57 @@ public:
         return call("octra_stealthOutputs", {from_epoch});
     }
 
-    RpcResult pool_view() {
-        return call("pool_view", nlohmann::json::array(), 5);
+    RpcResult staging_view() {
+        return call("staging_view", nlohmann::json::array(), 5);
+    }
+
+    RpcResult compile_assembly(const std::string& source) {
+        return call("octra_compileAssembly", {source}, 10);
+    }
+
+    RpcResult compile_aml(const std::string& source) {
+        return call("octra_compileAml", {source}, 10);
+    }
+
+    RpcResult compute_contract_address(const std::string& bytecode_b64,
+                                        const std::string& deployer,
+                                        int nonce = 0) {
+        return call("octra_computeContractAddress", {bytecode_b64, deployer, nonce});
+    }
+
+    RpcResult vm_contract(const std::string& addr) {
+        return call("vm_contract", {addr});
+    }
+
+    RpcResult contract_receipt(const std::string& hash) {
+        return call("contract_receipt", {hash});
+    }
+
+    RpcResult contract_call_view(const std::string& addr,
+                                  const std::string& method,
+                                  const nlohmann::json& params,
+                                  const std::string& caller) {
+        return call("contract_call", {addr, method, params, caller}, 15);
+    }
+
+    RpcResult list_contracts() {
+        return call("octra_listContracts", nlohmann::json::array(), 10);
+    }
+
+    RpcResult contract_storage(const std::string& addr, const std::string& key) {
+        return call("octra_contractStorage", {addr, key});
+    }
+
+    RpcResult contract_abi(const std::string& addr) {
+        return call("octra_contractAbi", {addr});
+    }
+
+    RpcResult save_abi(const std::string& addr, const std::string& abi) {
+        return call("contract_saveAbi", {addr, abi});
+    }
+
+    RpcResult get_txs_by_address(const std::string& addr, int limit = 50, int offset = 0) {
+        return call("octra_transactionsByAddress", {addr, limit, offset}, 15);
     }
 
 private:

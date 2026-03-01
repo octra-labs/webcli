@@ -43,6 +43,9 @@ inline RangeProof make_range_proof(
         for (size_t i = 0; i < RANGE_BITS; ++i) {
             uint64_t b_i = (value >> i) & 1;
             rp.ct_bit[i] = enc_value(pk, sk, b_i);
+
+
+            //!!
             auto ct_b_m1 = ct_sub_const(pk, rp.ct_bit[i], (uint64_t)1);
             uint8_t mul_seed[32];
             for (int k = 0; k < 32; ++k)
@@ -57,6 +60,8 @@ inline RangeProof make_range_proof(
                 rp.ct_bit[i] = enc_value(pk, sk, b_i);
                 auto ct_b_m1 = ct_sub_const(pk, rp.ct_bit[i], (uint64_t)1);
                 uint8_t mul_seed[32];
+
+                // !
                 for (int k = 0; k < 32; ++k)
                     mul_seed[k] = (uint8_t)((i * 37 + k * 13 + 0xA0) & 0xFF);
                 auto ct_check = ct_mul_seeded(pk, rp.ct_bit[i], ct_b_m1, mul_seed);
@@ -109,6 +114,9 @@ inline bool verify_range(
     if (rp.bit_proofs.size() != RANGE_BITS) return false;
 
     unsigned hw = std::thread::hardware_concurrency();
+
+
+    // !
     unsigned n_threads = (hw > 1) ? std::min(hw, (unsigned)RANGE_BITS) : 1;
     std::vector<bool> results(RANGE_BITS, false);
 
@@ -154,6 +162,7 @@ inline bool verify_range(
 
     for (size_t i = 1; i < RANGE_BITS; ++i) {
         Fp power_of_two;
+
         if (i < 64) {
             power_of_two = fp_from_u64(1ULL << i);
         } else {
@@ -174,8 +183,8 @@ inline bool verify_range(
 }
 
 struct AggregatedRangeProof {
-    std::vector<Cipher> ct_bit;
-    bp::R1CSProof proof; 
+    std::vector<Cipher> ct_bit;// 64 encrypted bits (needed by verifier)
+    bp::R1CSProof proof; // single R1CS proof covering all 65 circuits
 };
 
 namespace detail {
@@ -325,7 +334,6 @@ inline AggregatedRangeProof make_aggregated_range_proof(
                           lc_data.A, lc_data.bases,
                           &lc_data.rinv, &sk);
 
-    // Phase 4: prove
     bp::Transcript transcript("pvac.range_proof.aggregated");
     detail::append_transcript_params(transcript, bit_data, lc_data);
 
@@ -350,6 +358,7 @@ inline bool verify_aggregated_range(
         vdata[i].A = compute_layer_coeffs(pk, vdata[i].ct_check);
         vdata[i].bases = base_layer_indices(vdata[i].ct_check);
     }
+
     auto ct_lc_diff = detail::compute_lc_diff(pk, arp.ct_bit, ct_value);
     detail::BitPrepData lc_data;
     lc_data.ct_check = ct_lc_diff;
@@ -385,7 +394,6 @@ inline bool verify_aggregated_range(
         }
         v_offset += nB * S;
     }
-
     {
         size_t nB = lc_data.bases.size();
         size_t S = ct_lc_diff.slots;
@@ -399,12 +407,10 @@ inline bool verify_aggregated_range(
         }
     }
 
-
     bp::ConstraintSystem cs;
     cs.num_gates = dummy.num_gates();
     cs.num_committed = dummy.num_committed();
     cs.constraints = dummy.get_constraints();
-
 
     bp::Transcript transcript("pvac.range_proof.aggregated");
     detail::append_transcript_params(transcript, vdata, lc_data);

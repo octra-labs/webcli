@@ -299,6 +299,8 @@ pvac_range_proof pvac_deserialize_range_proof(const uint8_t* data, size_t len) {
     }
 }
 
+// ═══ Aggregated Range Proof ═══
+
 pvac_agg_range_proof pvac_make_aggregated_range_proof(pvac_pubkey pk, pvac_seckey sk,
                                                        pvac_cipher ct, uint64_t value) {
     auto* arp = new pvac::AggregatedRangeProof();

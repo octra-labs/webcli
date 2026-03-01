@@ -62,6 +62,7 @@ extern "C" {
 #include "lib/tx_builder.hpp"
 #include "lib/pvac_bridge.hpp"
 #include "lib/stealth.hpp"
+#include "lib/txcache.hpp"
 
 using json = nlohmann::json;
 
@@ -74,6 +75,7 @@ static bool g_pvac_ok = false;
 static std::atomic<bool> g_wallet_loaded{false};
 static std::string g_wallet_path = "data/wallet.oct";
 static std::string g_pin;
+static TxCache g_txcache;
 
 static void handle_signal(int) {
     octra::secure_zero(g_wallet.sk, 64);
@@ -93,6 +95,16 @@ static double now_ts() {
 
 static json err_json(const std::string& msg) {
     return {{"error", msg}};
+}
+
+static std::string parse_ou(const json& body, const std::string& fallback) {
+    std::string val = body.value("ou", "");
+    if (val.empty()) return fallback;
+    try {
+        long long v = std::stoll(val);
+        if (v > 0) return val;
+    } catch (...) {}
+    return fallback;
 }
 
 static int64_t parse_amount_raw(const json& body) {
@@ -128,7 +140,7 @@ struct BalanceInfo {
 static BalanceInfo get_nonce_balance() {
     auto r = g_rpc.get_balance(g_wallet.addr);
     if (!r.ok) return {0, "0"};
-    int nonce = r.result.value("nonce", 0);
+    int nonce = r.result.value("pending_nonce", r.result.value("nonce", 0));
     std::string raw = "0";
     if (r.result.contains("balance_raw")) {
         auto& v = r.result["balance_raw"];
@@ -142,7 +154,7 @@ static BalanceInfo get_nonce_balance() {
             raw = std::to_string((int64_t)(v.get<double>() * 1000000));
         }
     }
-    auto pr = g_rpc.pool_view();
+    auto pr = g_rpc.staging_view();
     if (pr.ok && pr.result.contains("transactions")) {
         for (auto& tx : pr.result["transactions"]) {
             if (tx.value("from", "") == g_wallet.addr) {
@@ -192,8 +204,10 @@ static void ensure_pvac_registered() {
             return;
         }
     }
+    auto pk_raw = g_pvac.serialize_pubkey();
+    std::string pk_blob(pk_raw.begin(), pk_raw.end());
     std::string pk_b64 = g_pvac.serialize_pubkey_b64();
-    std::string reg_sig = octra::sign_register_request(g_wallet.addr, g_wallet.sk);
+    std::string reg_sig = octra::sign_register_request(g_wallet.addr, pk_blob, g_wallet.sk);
     auto rr = g_rpc.register_pvac_pubkey(g_wallet.addr, pk_b64, reg_sig, g_wallet.pub_b64);
     if (rr.ok) fprintf(stderr, "pvac pubkey registered\n");
     else fprintf(stderr, "pvac pubkey register failed: %s\n", rr.error.c_str());
@@ -223,6 +237,12 @@ static void init_wallet_subsystems() {
     } else {
         fprintf(stderr, "pvac init failed (libpvac not loaded?)\n");
     }
+    g_txcache.close();
+    std::string cache_path = "data/txcache_" + g_wallet.addr.substr(3, 8);
+    if (g_txcache.open(cache_path))
+        fprintf(stderr, "txcache opened: %s\n", cache_path.c_str());
+    else
+        fprintf(stderr, "txcache open failed: %s\n", cache_path.c_str());
     g_wallet_loaded = true;
 }
 
@@ -267,6 +287,14 @@ int main(int argc, char** argv) {
     });
 
     svr.set_mount_point("/", "static");
+
+    svr.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
+        if (req.path.rfind("/api/", 0) == 0 && res.body.empty()) {
+            json j;
+            j["error"] = "unknown endpoint: " + req.method + " " + req.path;
+            res.set_content(j.dump(), "application/json");
+        }
+    });
 
     svr.Get("/api/wallet/status", [](const httplib::Request&, httplib::Response& res) {
         json j;
@@ -334,6 +362,7 @@ int main(int argc, char** argv) {
         g_pvac_ok = false;
         g_pvac_confirmed = false;
         g_pvac.reset();
+        g_txcache.close();
         octra::secure_zero(g_wallet.sk, 64);
         octra::secure_zero(g_wallet.pk, 32);
         if (!g_pin.empty()) octra::secure_zero(&g_pin[0], g_pin.size());
@@ -462,68 +491,87 @@ int main(int argc, char** argv) {
         int limit = 20, offset = 0;
         if (req.has_param("limit")) limit = std::stoi(req.get_param_value("limit"));
         if (req.has_param("offset")) offset = std::stoi(req.get_param_value("offset"));
-        auto r = g_rpc.get_account(g_wallet.addr, limit + offset);
+
+        auto convert_row = [](const json& row, const std::string& status) -> json {
+            json tx;
+            tx["hash"] = row.value("hash", "");
+            tx["from"] = row.value("from", "");
+            tx["to_"] = row.value("to", row.value("to_", ""));
+            tx["amount_raw"] = row.value("amount", row.value("amount_raw", "0"));
+            tx["op_type"] = row.value("op_type", "standard");
+            tx["status"] = status;
+            if (row.contains("timestamp")) tx["timestamp"] = row["timestamp"];
+            if (row.contains("encrypted_data") && row["encrypted_data"].is_string())
+                tx["encrypted_data"] = row["encrypted_data"];
+            if (row.contains("message") && row["message"].is_string())
+                tx["message"] = row["message"];
+            if (row.contains("reason") && row["reason"].is_string())
+                tx["reject_reason"] = row["reason"];
+            return tx;
+        };
+
         json txs = json::array();
-        if (r.ok && r.result.is_object()) {
-            std::set<std::string> seen;
-            json hashes = json::array();
-            if (r.result.contains("recent_txs")) {
-                auto& rt = r.result["recent_txs"];
-                for (int i = 0; i < (int)rt.size(); i++) {
-                    std::string h = rt[i].value("hash", "");
-                    if (!h.empty() && seen.find(h) == seen.end()) {
-                        hashes.push_back(h);
-                        seen.insert(h);
+
+        if (g_txcache.is_open()) {
+            auto r = g_rpc.get_txs_by_address(g_wallet.addr, 1, 0);
+            int node_total = 0;
+            json rejected_buf = json::array();
+            if (r.ok && r.result.is_object()) {
+                node_total = r.result.value("total", 0);
+                if (r.result.contains("rejected"))
+                    for (auto& row : r.result["rejected"])
+                        rejected_buf.push_back(convert_row(row, "rejected"));
+            }
+            int cached = g_txcache.get_total(g_wallet.addr);
+            if (node_total > cached) {
+                int delta = node_total - cached;
+                auto dr = g_rpc.get_txs_by_address(g_wallet.addr, delta, 0);
+                if (dr.ok && dr.result.is_object() && dr.result.contains("transactions")) {
+                    json to_store = json::array();
+                    for (auto& row : dr.result["transactions"]) {
+                        std::string h = row.value("hash", "");
+                        if (!h.empty() && !g_txcache.has_tx(h))
+                            to_store.push_back(convert_row(row, "confirmed"));
                     }
+                    if (!to_store.empty()) {
+                        g_txcache.store_txs(to_store);
+                        g_txcache.set_total(g_wallet.addr, cached + (int)to_store.size());
+                    }
+                    rejected_buf = json::array();
+                    if (dr.result.contains("rejected"))
+                        for (auto& row : dr.result["rejected"])
+                            rejected_buf.push_back(convert_row(row, "rejected"));
                 }
             }
-            if (r.result.contains("rejected_txs")) {
-                auto& rj = r.result["rejected_txs"];
-                for (int i = 0; i < (int)rj.size(); i++) {
-                    std::string h = rj[i].value("hash", "");
-                    if (!h.empty() && seen.find(h) == seen.end()) {
-                        hashes.push_back(h);
-                        seen.insert(h);
-                    }
-                }
+            json cached_txs = g_txcache.load_page(limit, offset);
+            for (auto& tx : cached_txs) txs.push_back(tx);
+            for (auto& tx : rejected_buf) txs.push_back(tx);
+        } else {
+            auto r = g_rpc.get_txs_by_address(g_wallet.addr, limit, offset);
+            if (r.ok && r.result.is_object()) {
+                if (r.result.contains("transactions"))
+                    for (auto& row : r.result["transactions"])
+                        txs.push_back(convert_row(row, "confirmed"));
+                if (r.result.contains("rejected"))
+                    for (auto& row : r.result["rejected"])
+                        txs.push_back(convert_row(row, "rejected"));
             }
-            struct TxEntry { json tx; double ts; };
-            std::vector<TxEntry> entries;
-            for (auto& h : hashes) {
-                std::string hash = h.get<std::string>();
-                if (hash.empty()) continue;
-                auto tr = g_rpc.get_transaction(hash);
-                if (!tr.ok) continue;
-                auto& t = tr.result;
-                json tx;
-                tx["hash"] = t.value("tx_hash", hash);
-                tx["from"] = t.value("from", "");
-                tx["to_"] = t.value("to", t.value("to_", ""));
-                tx["amount_raw"] = t.value("amount_raw", t.value("amount", "0"));
-                tx["op_type"] = t.value("op_type", "standard");
-                std::string status = t.value("status", "pending");
-                tx["status"] = status;
-                double ts = 0.0;
-                if (t.contains("timestamp") && t["timestamp"].is_number())
-                    ts = t["timestamp"].get<double>();
-                else if (t.contains("rejected_at") && t["rejected_at"].is_number())
-                    ts = t["rejected_at"].get<double>();
-                tx["timestamp"] = ts;
-                if (t.contains("error") && t["error"].is_object())
-                    tx["reject_reason"] = t["error"].value("reason", "");
-                if (t.contains("message") && t["message"].is_string() && !t["message"].get<std::string>().empty())
-                    tx["message"] = t["message"];
-                entries.push_back({tx, ts});
-            }
-            std::sort(entries.begin(), entries.end(), [](const TxEntry& a, const TxEntry& b) {
-                return a.ts > b.ts;
-            });
-            for (int i = offset; i < (int)entries.size() && i < offset + limit; i++)
-                txs.push_back(entries[i].tx);
         }
+
         json j;
         j["transactions"] = txs;
         res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Get("/api/fee", [](const httplib::Request&, httplib::Response& res) {
+        json fees;
+        std::vector<std::string> ops = {"standard", "encrypt", "decrypt", "stealth", "claim", "deploy", "call"};
+        for (auto& op : ops) {
+            auto r = g_rpc.call("octra_recommendedFee", nlohmann::json::array({op}), 5);
+            if (r.ok) fees[op] = r.result;
+            else fees[op] = {{"minimum", "1000"}, {"recommended", "1000"}, {"fast", "2000"}};
+        }
+        res.set_content(fees.dump(), "application/json");
     });
 
     svr.Post("/api/send", [](const httplib::Request& req, httplib::Response& res) {
@@ -553,7 +601,7 @@ int main(int argc, char** argv) {
         tx.to_ = to;
         tx.amount = std::to_string(raw);
         tx.nonce = nonce + 1;
-        tx.ou = (raw < 1000000000) ? "10000" : "30000";
+        tx.ou = parse_ou(body, (raw < 1000000000) ? "10000" : "30000");
         tx.timestamp = now_ts();
         tx.op_type = "standard";
         std::string msg = body.value("message", "");
@@ -611,7 +659,7 @@ int main(int argc, char** argv) {
         tx.to_ = g_wallet.addr;
         tx.amount = std::to_string(raw);
         tx.nonce = nonce + 1;
-        tx.ou = "10000";
+        tx.ou = parse_ou(body, "10000");
         tx.timestamp = now_ts();
         tx.op_type = "encrypt";
         tx.encrypted_data = enc_data.dump();
@@ -677,7 +725,7 @@ int main(int argc, char** argv) {
         tx.to_ = g_wallet.addr;
         tx.amount = std::to_string(raw);
         tx.nonce = nonce + 1;
-        tx.ou = "10000";
+        tx.ou = parse_ou(body, "10000");
         tx.timestamp = now_ts();
         tx.op_type = "decrypt";
         tx.encrypted_data = enc_data.dump();
@@ -810,7 +858,7 @@ int main(int argc, char** argv) {
         tx.to_ = "stealth";
         tx.amount = "0";
         tx.nonce = nonce + 1;
-        tx.ou = "5000";
+        tx.ou = parse_ou(body, "5000");
         tx.timestamp = now_ts();
         tx.op_type = "stealth";
         tx.encrypted_data = stealth_data.dump();
@@ -961,7 +1009,7 @@ int main(int argc, char** argv) {
                 tx.to_ = g_wallet.addr;
                 tx.amount = "0";
                 tx.nonce = nonce;
-                tx.ou = "3000";
+                tx.ou = parse_ou(body, "3000");
                 tx.timestamp = now_ts();
                 tx.op_type = "claim";
                 tx.encrypted_data = claim_data.dump();
@@ -1038,6 +1086,364 @@ int main(int argc, char** argv) {
         j["view_pubkey"] = octra::base64_encode(view_pk, 32);
         octra::secure_zero(view_sk, 32);
         res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Post("/api/contract/compile", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string source = body.value("source", "");
+        if (source.empty()) {
+            res.status = 400;
+            res.set_content(err_json("source required").dump(), "application/json");
+            return;
+        }
+        auto r = g_rpc.compile_assembly(source);
+        if (!r.ok) {
+            res.status = 400;
+            res.set_content(err_json(r.error).dump(), "application/json");
+            return;
+        }
+        json j;
+        j["bytecode"] = r.result.value("bytecode", "");
+        j["size"] = r.result.value("size", 0);
+        j["instructions"] = r.result.value("instructions", 0);
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Post("/api/contract/compile-aml", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        try {
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string source = body.value("source", "");
+        if (source.empty()) {
+            res.status = 400;
+            res.set_content(err_json("source required").dump(), "application/json");
+            return;
+        }
+        auto r = g_rpc.compile_aml(source);
+        if (!r.ok) {
+            res.status = 400;
+            std::string safe_err = r.error;
+            for (auto& ch : safe_err) { if ((unsigned char)ch > 127) ch = '?'; }
+            res.set_content(err_json(safe_err).dump(), "application/json");
+            return;
+        }
+        json j;
+        j["bytecode"] = r.result.value("bytecode", "");
+        j["size"] = r.result.value("size", 0);
+        j["instructions"] = r.result.value("instructions", 0);
+        j["version"] = r.result.value("version", "");
+        if (r.result.contains("abi")) j["abi"] = r.result["abi"];
+        res.set_content(j.dump(), "application/json");
+        } catch (const std::exception& ex) {
+            res.status = 500;
+            res.set_content(err_json(std::string("internal error: ") + ex.what()).dump(), "application/json");
+        } catch (...) {
+            res.status = 500;
+            res.set_content(err_json("internal error").dump(), "application/json");
+        }
+    });
+
+    svr.Post("/api/contract/address", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string bytecode = body.value("bytecode", "");
+        if (bytecode.empty()) {
+            res.status = 400;
+            res.set_content(err_json("bytecode required").dump(), "application/json");
+            return;
+        }
+        int nonce_val = 0;
+        auto bi = get_nonce_balance();
+        nonce_val = bi.nonce + 1;
+        auto r = g_rpc.compute_contract_address(bytecode, g_wallet.addr, nonce_val);
+        if (!r.ok) {
+            res.status = 400;
+            res.set_content(err_json(r.error).dump(), "application/json");
+            return;
+        }
+        json j;
+        j["address"] = r.result.value("address", "");
+        j["deployer"] = r.result.value("deployer", "");
+        j["nonce"] = r.result.value("nonce", 0);
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Post("/api/contract/deploy", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        std::lock_guard<std::mutex> lock(g_mtx);
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string bytecode = body.value("bytecode", "");
+        if (bytecode.empty()) {
+            res.status = 400;
+            res.set_content(err_json("bytecode required").dump(), "application/json");
+            return;
+        }
+        auto bi = get_nonce_balance();
+        int nonce = bi.nonce;
+        auto ar = g_rpc.compute_contract_address(bytecode, g_wallet.addr, nonce + 1);
+        if (!ar.ok) {
+            res.status = 400;
+            res.set_content(err_json(ar.error).dump(), "application/json");
+            return;
+        }
+        std::string contract_addr = ar.result.value("address", "");
+        octra::Transaction tx;
+        tx.from = g_wallet.addr;
+        tx.to_ = contract_addr;
+        tx.amount = "0";
+        tx.nonce = nonce + 1;
+        tx.ou = parse_ou(body, "50000000");
+        tx.timestamp = now_ts();
+        tx.op_type = "deploy";
+        tx.encrypted_data = bytecode;
+        std::string params_str = body.value("params", "");
+        if (!params_str.empty()) tx.message = params_str;
+        std::string source_text = body.value("source", "");
+        std::string abi_text = body.value("abi", "");
+        sign_tx_fields(tx);
+        auto result = submit_tx(tx);
+        if (result.contains("error")) {
+            res.status = 500;
+        } else {
+            result["contract_address"] = contract_addr;
+        }
+        res.set_content(result.dump(), "application/json");
+    });
+
+    svr.Post("/api/contract/verify", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        try {
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string addr = body.value("address", "");
+        std::string source = body.value("source", "");
+        if (addr.empty() || source.empty()) {
+            res.status = 400;
+            res.set_content(err_json("address and source required").dump(), "application/json");
+            return;
+        }
+        auto r = g_rpc.call("contract_verify", nlohmann::json::array({addr, source}), 15);
+        if (!r.ok) {
+            res.status = 400;
+            std::string safe_err = r.error;
+            for (auto& ch : safe_err) { if ((unsigned char)ch > 127) ch = '?'; }
+            res.set_content(err_json(safe_err).dump(), "application/json");
+            return;
+        }
+        res.set_content(r.result.dump(), "application/json");
+        } catch (const std::exception& ex) {
+            res.status = 500;
+            res.set_content(err_json(std::string("internal error: ") + ex.what()).dump(), "application/json");
+        } catch (...) {
+            res.status = 500;
+            res.set_content(err_json("internal error").dump(), "application/json");
+        }
+    });
+
+    svr.Post("/api/contract/call", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        std::lock_guard<std::mutex> lock(g_mtx);
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string addr = body.value("address", "");
+        std::string method = body.value("method", "");
+        if (addr.empty() || method.empty()) {
+            res.status = 400;
+            res.set_content(err_json("address and method required").dump(), "application/json");
+            return;
+        }
+        std::string params_str = "[]";
+        if (body.contains("params")) params_str = body["params"].dump();
+        std::string amount_str = body.value("amount", "0");
+        auto bi = get_nonce_balance();
+        int nonce = bi.nonce;
+        octra::Transaction tx;
+        tx.from = g_wallet.addr;
+        tx.to_ = addr;
+        tx.amount = amount_str;
+        tx.nonce = nonce + 1;
+        tx.ou = parse_ou(body, "1000");
+        tx.timestamp = now_ts();
+        tx.op_type = "call";
+        tx.encrypted_data = method;
+        tx.message = params_str;
+        sign_tx_fields(tx);
+        auto result = submit_tx(tx);
+        if (result.contains("error")) res.status = 500;
+        res.set_content(result.dump(), "application/json");
+    });
+
+    svr.Get("/api/contract/view", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        std::string addr = req.get_param_value("address");
+        std::string method = req.get_param_value("method");
+        if (addr.empty() || method.empty()) {
+            res.status = 400;
+            res.set_content(err_json("address and method required").dump(), "application/json");
+            return;
+        }
+        std::string params_str = req.get_param_value("params");
+        json params = json::array();
+        if (!params_str.empty()) {
+            try { params = json::parse(params_str); } catch (...) {}
+        }
+        auto r = g_rpc.contract_call_view(addr, method, params, g_wallet.addr);
+        if (!r.ok) {
+            res.status = 400;
+            res.set_content(err_json(r.error).dump(), "application/json");
+            return;
+        }
+        res.set_content(r.result.dump(), "application/json");
+    });
+
+    svr.Get("/api/contract/info", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        std::string addr = req.get_param_value("address");
+        if (addr.empty()) {
+            res.status = 400;
+            res.set_content(err_json("address required").dump(), "application/json");
+            return;
+        }
+        auto r = g_rpc.vm_contract(addr);
+        if (!r.ok) {
+            res.status = 404;
+            res.set_content(err_json(r.error).dump(), "application/json");
+            return;
+        }
+        res.set_content(r.result.dump(), "application/json");
+    });
+
+    svr.Get("/api/contract/receipt", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        std::string hash = req.get_param_value("hash");
+        if (hash.empty()) {
+            res.status = 400;
+            res.set_content(err_json("hash required").dump(), "application/json");
+            return;
+        }
+        auto r = g_rpc.contract_receipt(hash);
+        if (!r.ok) {
+            res.status = 404;
+            res.set_content(err_json(r.error).dump(), "application/json");
+            return;
+        }
+        res.set_content(r.result.dump(), "application/json");
+    });
+
+    svr.Get("/api/tokens", [](const httplib::Request&, httplib::Response& res) {
+        WALLET_GUARD
+        auto lr = g_rpc.list_contracts();
+        json tokens = json::array();
+        if (lr.ok && lr.result.contains("contracts")) {
+            auto& contracts = lr.result["contracts"];
+            for (auto& c : contracts) {
+                std::string addr = c.value("address", "");
+                if (addr.empty()) continue;
+                auto sr = g_rpc.contract_storage(addr, "symbol");
+                if (!sr.ok || !sr.result.contains("value") || sr.result["value"].is_null()) continue;
+                std::string sym = sr.result.value("value", "");
+                if (sym.empty()) continue;
+                auto nr = g_rpc.contract_storage(addr, "name");
+                std::string name = (nr.ok && nr.result.contains("value") && !nr.result["value"].is_null())
+                    ? nr.result.value("value", "") : sym;
+                auto tr = g_rpc.contract_storage(addr, "total_supply");
+                std::string supply = (tr.ok && tr.result.contains("value") && !tr.result["value"].is_null())
+                    ? tr.result.value("value", "0") : "0";
+                auto br = g_rpc.contract_call_view(addr, "balance_of",
+                    json::array({g_wallet.addr}), g_wallet.addr);
+                std::string bal = (br.ok && br.result.contains("result") && !br.result["result"].is_null())
+                    ? br.result.value("result", "0") : "0";
+                json tok;
+                tok["address"] = addr;
+                tok["name"] = name;
+                tok["symbol"] = sym;
+                tok["total_supply"] = supply;
+                tok["balance"] = bal;
+                tok["owner"] = c.value("owner", "");
+                tokens.push_back(tok);
+            }
+        }
+        json j;
+        j["tokens"] = tokens;
+        j["count"] = tokens.size();
+        j["wallet_address"] = g_wallet.addr;
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Post("/api/token/transfer", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        std::lock_guard<std::mutex> lock(g_mtx);
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string token = body.value("token", "");
+        std::string to = body.value("to", "");
+        std::string amount_str = body.value("amount", "");
+        if (token.empty() || to.empty() || amount_str.empty()) {
+            res.status = 400;
+            res.set_content(err_json("token, to, and amount required").dump(), "application/json");
+            return;
+        }
+        long long amount_val = 0;
+        try { amount_val = std::stoll(amount_str); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid amount").dump(), "application/json");
+            return;
+        }
+        if (amount_val <= 0) {
+            res.status = 400;
+            res.set_content(err_json("amount must be positive").dump(), "application/json");
+            return;
+        }
+        auto bi = get_nonce_balance();
+        int nonce = bi.nonce;
+        octra::Transaction tx;
+        tx.from = g_wallet.addr;
+        tx.to_ = token;
+        tx.amount = "0";
+        tx.nonce = nonce + 1;
+        tx.ou = parse_ou(body, "1000");
+        tx.timestamp = now_ts();
+        tx.op_type = "call";
+        tx.encrypted_data = "transfer";
+        json params = json::array({to, amount_val});
+        tx.message = params.dump();
+        sign_tx_fields(tx);
+        auto result = submit_tx(tx);
+        if (result.contains("error")) res.status = 500;
+        res.set_content(result.dump(), "application/json");
     });
 
     svr.Post("/api/settings", [](const httplib::Request& req, httplib::Response& res) {

@@ -21,7 +21,7 @@ echo.
 
 where winget >nul 2>&1
 if %errorlevel% equ 0 (
-    echo installing MSYS2 via winget...
+    echo Installing MSYS2 via winget...
     winget install --id MSYS2.MSYS2 --accept-source-agreements --accept-package-agreements -e
 ) else (
     echo winget not available.
@@ -37,24 +37,24 @@ if %errorlevel% equ 0 (
 if exist "C:\msys64\usr\bin\bash.exe" (
     set "MSYS2_DIR=C:\msys64"
 ) else (
-    echo MSYS2 installation failed, please install manually from https://www.msys2.org/
+    echo MSYS2 installation failed. Please install manually from https://www.msys2.org/
     pause
     exit /b 1
 )
 
 :install_deps
-echo installing compiler and OpenSSL...
-"!MSYS2_DIR!\usr\bin\bash.exe" -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl make"
+echo Installing compiler and OpenSSL...
+"!MSYS2_DIR!\usr\bin\bash.exe" -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl mingw-w64-x86_64-leveldb make"
 
 echo.
-echo [2/3] building octra wallet...
+echo [2/3] Building Octra Wallet...
 
 set "WALLET_DIR=%~dp0"
 "!MSYS2_DIR!\usr\bin\bash.exe" -lc "export PATH=/mingw64/bin:$PATH && cd '%WALLET_DIR:\=/%' && make clean 2>/dev/null; make"
 
 if not exist "%WALLET_DIR%octra_wallet.exe" (
     echo.
-    echo build failed -please check errors above
+    echo Build failed. Please check errors above.
     pause
     exit /b 1
 )

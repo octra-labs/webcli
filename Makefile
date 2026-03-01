@@ -45,8 +45,9 @@ ifeq ($(UNAME_S),Darwin)
 SHARED_EXT:=dylib
 SHARED_FLAGS:=-dynamiclib
 SSL_PREFIX:=$(shell brew --prefix openssl 2>/dev/null || echo /usr/local/opt/openssl)
-CXXFLAGS+=-I$(SSL_PREFIX)/include -DCPPHTTPLIB_OPENSSL_SUPPORT
-LDFLAGS:=-L$(SSL_PREFIX)/lib -lssl -lcrypto -L$(PVAC_BUILD) -lpvac -Wl,-rpath,@executable_path/$(PVAC_BUILD)
+LDB_PREFIX:=$(shell brew --prefix leveldb 2>/dev/null || echo /opt/homebrew/opt/leveldb)
+CXXFLAGS+=-I$(SSL_PREFIX)/include -I$(LDB_PREFIX)/include -DCPPHTTPLIB_OPENSSL_SUPPORT
+LDFLAGS:=-L$(SSL_PREFIX)/lib -lssl -lcrypto -L$(LDB_PREFIX)/lib -lleveldb -L$(PVAC_BUILD) -lpvac -Wl,-rpath,@executable_path/$(PVAC_BUILD)
 TARGET:=octra_wallet
 
 else ifneq ($(IS_WIN),)
@@ -55,7 +56,7 @@ SHARED_EXT:=a
 SHARED_FLAGS:=
 SSL_PREFIX:=$(shell echo $$MINGW_PREFIX)
 CXXFLAGS+=-I$(SSL_PREFIX)/include -DCPPHTTPLIB_OPENSSL_SUPPORT
-LDFLAGS:=-static -L$(SSL_PREFIX)/lib -L$(PVAC_BUILD) -lpvac -lssl -lcrypto -lws2_32 -lbcrypt -lcrypt32 -lgdi32 -lz
+LDFLAGS:=-static -L$(SSL_PREFIX)/lib -L$(PVAC_BUILD) -lpvac -lleveldb -lssl -lcrypto -lws2_32 -lbcrypt -lcrypt32 -lgdi32 -lz
 TARGET:=octra_wallet.exe
 
 else
@@ -63,7 +64,7 @@ else
 SHARED_EXT:=so
 SHARED_FLAGS:=-shared
 CXXFLAGS+=-DCPPHTTPLIB_OPENSSL_SUPPORT
-LDFLAGS:=-lssl -lcrypto -L$(PVAC_BUILD) -lpvac -Wl,-rpath,'$$ORIGIN/$(PVAC_BUILD)'
+LDFLAGS:=-lssl -lcrypto -lleveldb -L$(PVAC_BUILD) -lpvac -Wl,-rpath,'$$ORIGIN/$(PVAC_BUILD)'
 TARGET:=octra_wallet
 
 endif

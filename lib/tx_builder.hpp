@@ -31,6 +31,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <openssl/evp.h>
 #include "json.hpp"
 
 extern "C" {
@@ -68,7 +69,7 @@ inline std::string json_escape(const std::string& s) {
             case '\n': r += "\\n";  break;
             case '\r': r += "\\r";  break;
             case '\t': r += "\\t";  break;
-            default:   r += c;
+            default: r += c;
         }
     }
     return r;
@@ -133,9 +134,25 @@ inline std::string sign_balance_request(const std::string& addr,
         reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), sk);
 }
 
+inline std::string sha256_hex(const std::string& data) {
+    unsigned char hash[32];
+    unsigned int len = 0;
+    EVP_Digest(data.data(), data.size(), hash, &len, EVP_sha256(), nullptr);
+    std::string hex;
+    hex.reserve(64);
+    for (unsigned i = 0; i < 32; i++) {
+        char buf[3];
+        std::snprintf(buf, sizeof(buf), "%02x", hash[i]);
+        hex += buf;
+    }
+    return hex;
+}
+
 inline std::string sign_register_request(const std::string& addr,
+                                         const std::string& pk_blob,
                                          const uint8_t sk[64]) {
-    std::string msg = "register_pvac|" + addr;
+    std::string pk_hash = sha256_hex(pk_blob);
+    std::string msg = "register_pvac|" + addr + "|" + pk_hash;
     return ed25519_sign_detached(
         reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), sk);
 }
