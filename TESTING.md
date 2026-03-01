@@ -40,7 +40,7 @@ Now that your system is ready, let's grab the code and build it.
 *(Windows users: do this inside your WSL terminal).*
 
 ```bash
-git clone https://github.com/octra-labs/webcli.git
+git clone https://github.com/0xAJPanda/webcli.git
 cd webcli
 make
 ```
@@ -121,6 +121,6 @@ Check the "History" tab to see a list of your recent transactions.
 
 - **Devnet Explorer:** [https://devnet.octrascan.io](https://devnet.octrascan.io) (to look up transactions)
 - **Devnet Faucet:** [https://faucet-devnet.octra.com/](https://faucet-devnet.octra.com/) (to get test tokens)
-- **GitHub Repository:** [https://github.com/octra-labs/webcli](https://github.com/octra-labs/webcli)
+- **GitHub Repository:** [https://github.com/0xAJPanda/webcli](https://github.com/0xAJPanda/webcli)
 
 Happy testing! 🐙
