@@ -1,92 +1,16 @@
-# octra wallet (webcli)
-![Version](https://img.shields.io/badge/version-0.04.01--alpha-blue)
+This is a fork of [Octra WebCLI](https://github.com/octra-labs/webcli) with passkey (WebAuthn) support and multi-account wallet management. This is only tested with latest Chrome 145.0.7632.160 (64-bit).
+Full structure of the fork is described in STRUCTURE.md.
 
+## TLDR:
+1. Added passkey support via user.id being used as a seed (yes, the private key is sitting in the tab's memory, it is a temporary problem that needs to be addressed at protocol level to accept native secp256r1 curve and webAuthn rich signatures).
+2. Added the management of multiple accounts (both imported via private keys and passkeys) so you can test transactions between accounts
+3. Optimized logout to be instant. The rpc was being called every 15 seconds or tab switching for the balance checks, and the user had to wait untill its finished. Plus leveldb had to finish the compaction in the same thread so the user had to wait for it too untill he gets the response from backend.
 
-a full-fledged web client based on a local server for working with the octra network (currently available only for **DEVNET** and not compatible with the main network for RPC calls, but will be merged soon).
-
-you can send txs, encrypt and decrypt balances, conduct stealth txs, and much more
-
-## requirements
-
-- c++17 compiler (GCC/Clang)
-- openSSL 3.x
-- libpvac (from `pvac/` directory)
-
-
-### macOS (homebrew)
-
-```
-brew install openssl@3
-```
-
-### linux (debian or ubuntu)
-
-```
-sudo apt install g++ libssl-dev make
-```
-
-then (valid for both)
-
-```
-chmod +x setup.sh
-./setup.sh
-./octra_wallet
-```
-
-### windows
-
-double click `setup.bat` or run it from command prompt
-it will install everything automatically and then:
-
-```
-octra_wallet.exe
-```
-
-open `http://127.0.0.1:8420` in your browser
-
-
-### windows (MSYS2)
-
-install [MSYS2](https://www.msys2.org/), open MinGW64 shell:
-
-```
-pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl make
-```
-
-## build
-
-```
-make
-```
-
-## run
-
-```
-./octra_wallet # default port 8420
-./octra_wallet 9000 # custom port
-```
-
-on windows:
-
-```
-octra_wallet.exe
-octra_wallet.exe 9000
-```
-
-open `http://127.0.0.1:8420` in your browser
-
-## launch
-
-0. after opening the web interface in your browser, import your private key or create a new one directly in the modal window
-1. enter a 6 digit PIN code to encrypt (AES 256 GCM) your wallet 
-2. your wallet file is stored in `data/wallet.oct` 
-3. the PIN is required on every startup to unlock
-
-
-we adhere to a policy of completely eliminating third-party software where possible, we have zero tolerance for vendor dependencies, we only included well-known libs and point implementations in the build, the rest was completely written from scratch by hand to avoid the use of third-party code for security reasons
-
-## vendor libraries
-
-- [cpp-httplib](https://github.com/yhirose/cpp-httplib) (MIT)
-- [nlohmann/json](https://github.com/nlohmann/json) (MIT)
-- [TweetNaCl](https://tweetnacl.cr.yp.to/) (public domain)
+## Changes:
+- **Account manifest** (`data/accounts.json`): every imported/created account is recorded (addr, type, file) and upserted on every unlock/import/create. Each account gets its own wallet file (`data/wallet_<addr>.oct`).
+- **Account selection screen**: `GET /api/wallet/status` returns the manifest as an `accounts` array; if non-empty, the frontend shows a picker instead of a PIN prompt. `GET /api/wallet/accounts` and `DELETE /api/wallet/account` added; `/unlock` and `/unlock-passkey` accept an optional `addr` field to target a specific account.
+- **Backward compatibility**: existing `wallet.oct` and legacy `wallet.json` migration still work; first unlock of a pre-existing wallet auto-registers it in the manifest.
+- **Per-account TX confirmation**: PIN accounts are prompted for their 6-digit PIN before every transaction (`POST /api/wallet/confirm-pin`); passkey accounts use the WebAuthn popup. `GET /api/wallet` returns `is_passkey` so the frontend routes correctly.
+- **Passkey key derivation**: random 32-byte seed stored as the WebAuthn `user.id`, recovered via `userHandle` on unlock. Private key never written to disk. Each credential is labeled with the wallet address in the OS passkey manager. Removes PRF extension requirement.
+- **Per-account credential map**: `octra_cred_map` in localStorage ensures unlocking account A always uses account A's specific credential, not the last-registered one.
+- **Logout optimization**: UI flushes instantly, txcache closes in a background thread, `/api/balance` releases `g_mtx` before RPC calls — eliminates 1-20s stall caused by background refresh requests holding the mutex.

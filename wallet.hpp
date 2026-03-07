@@ -246,4 +246,164 @@ inline void change_pin(const std::string& path, Wallet& w,
     save_wallet_encrypted(path, w, new_pin);
 }
 
+// Passkey wallet support
+
+struct PasskeyWallet {
+    std::string addr;
+    std::string pub_b64;
+    std::string rpc_url;
+    std::string explorer_url;
+};
+
+inline bool has_passkey_wallet() {
+    std::ifstream f(WALLET_FILE, std::ios::binary);
+    if (!f) return false;
+    char c = 0;
+    f.read(&c, 1);
+    return c == '{';
+}
+
+inline void save_passkey_wallet(const std::string& path,
+                                 const std::string& addr,
+                                 const std::string& pub_b64,
+                                 const std::string& rpc_url,
+                                 const std::string& explorer_url) {
+    ensure_data_dir();
+    nlohmann::json j;
+    j["type"]     = "passkey";
+    j["addr"]     = addr;
+    j["pub"]      = pub_b64;
+    j["rpc"]      = rpc_url;
+    j["explorer"] = explorer_url;
+    std::ofstream f(path);
+    if (!f) throw std::runtime_error("cannot write wallet file");
+    f << j.dump();
+    f.close();
+    chmod(path.c_str(), 0600);
+}
+
+inline PasskeyWallet load_passkey_wallet_meta(const std::string& path) {
+    std::ifstream f(path);
+    if (!f) throw std::runtime_error("cannot open wallet file");
+    nlohmann::json j;
+    f >> j;
+    if (j.value("type", "") != "passkey")
+        throw std::runtime_error("not a passkey wallet");
+    PasskeyWallet w;
+    w.addr         = j.at("addr").get<std::string>();
+    w.pub_b64      = j.at("pub").get<std::string>();
+    w.rpc_url      = j.value("rpc",      "http://165.227.225.79:8080");
+    w.explorer_url = j.value("explorer", "https://devnet.octrascan.io");
+    return w;
+}
+
+inline Wallet import_wallet_from_seed(const std::string& path,
+                                       const uint8_t seed[32],
+                                       const std::string& rpc_url,
+                                       const std::string& explorer_url) {
+    Wallet w;
+    keypair_from_seed(seed, w.sk, w.pk);
+    w.addr = derive_address(w.pk);
+    if (w.addr.size() != 47 || w.addr.substr(0, 3) != "oct")
+        throw std::runtime_error("derived address is invalid");
+    w.priv_b64     = base64_encode(w.sk, 32);
+    w.pub_b64      = base64_encode(w.pk, 32);
+    w.rpc_url      = rpc_url;
+    w.explorer_url = explorer_url;
+    save_passkey_wallet(path, w.addr, w.pub_b64, w.rpc_url, w.explorer_url);
+    try_mlock(w.sk, 64);
+    try_mlock(w.pk, 32);
+    return w;
+}
+
+inline Wallet unlock_wallet_from_seed(const uint8_t seed[32],
+                                       const PasskeyWallet& meta) {
+    Wallet w;
+    keypair_from_seed(seed, w.sk, w.pk);
+    std::string derived_pub = base64_encode(w.pk, 32);
+    if (derived_pub != meta.pub_b64)
+        throw std::runtime_error("passkey does not match this wallet");
+    w.addr         = meta.addr;
+    w.pub_b64      = meta.pub_b64;
+    w.priv_b64     = base64_encode(w.sk, 32);
+    w.rpc_url      = meta.rpc_url;
+    w.explorer_url = meta.explorer_url;
+    try_mlock(w.sk, 64);
+    try_mlock(w.pk, 32);
+    return w;
+}
+
+inline void save_passkey_settings(const std::string& path, Wallet& w,
+                                   const std::string& new_rpc,
+                                   const std::string& new_explorer) {
+    w.rpc_url      = new_rpc;
+    w.explorer_url = new_explorer;
+    save_passkey_wallet(path, w.addr, w.pub_b64, w.rpc_url, w.explorer_url);
+}
+
+// ── Account manifest ──────────────────────────────────────────────────────────
+
+constexpr const char* ACCOUNTS_FILE = "data/accounts.json";
+
+struct AccountEntry {
+    std::string addr;
+    std::string type; // "pin" or "passkey"
+    std::string file;
+};
+
+inline std::string wallet_path_for(const std::string& addr) {
+    return std::string(WALLET_DIR) + "/wallet_" + addr.substr(3, 8) + ".oct";
+}
+
+inline std::vector<AccountEntry> load_manifest() {
+    std::vector<AccountEntry> entries;
+    std::ifstream f(ACCOUNTS_FILE);
+    if (!f) return entries;
+    nlohmann::json j;
+    try { f >> j; } catch (...) { return entries; }
+    if (!j.is_array()) return entries;
+    for (auto& item : j) {
+        AccountEntry e;
+        e.addr = item.value("addr", "");
+        e.type = item.value("type", "pin");
+        e.file = item.value("file", "");
+        if (!e.addr.empty() && !e.file.empty())
+            entries.push_back(e);
+    }
+    return entries;
+}
+
+inline void save_manifest(const std::vector<AccountEntry>& entries) {
+    ensure_data_dir();
+    nlohmann::json j = nlohmann::json::array();
+    for (auto& e : entries) {
+        nlohmann::json item;
+        item["addr"] = e.addr;
+        item["type"] = e.type;
+        item["file"] = e.file;
+        j.push_back(item);
+    }
+    std::ofstream f(ACCOUNTS_FILE);
+    if (!f) throw std::runtime_error("cannot write accounts manifest");
+    f << j.dump();
+}
+
+inline void manifest_upsert(const AccountEntry& entry) {
+    auto entries = load_manifest();
+    for (auto& e : entries) {
+        if (e.addr == entry.addr) { e = entry; save_manifest(entries); return; }
+    }
+    entries.push_back(entry);
+    save_manifest(entries);
+}
+
+inline void manifest_remove(const std::string& addr) {
+    auto entries = load_manifest();
+    entries.erase(
+        std::remove_if(entries.begin(), entries.end(),
+            [&](const AccountEntry& e) { return e.addr == addr; }),
+        entries.end());
+    save_manifest(entries);
+}
+
 } // namespace octra

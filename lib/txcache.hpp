@@ -48,6 +48,13 @@ public:
     void close() { delete db_; db_ = nullptr; path_.clear(); }
     ~TxCache() { close(); }
 
+    leveldb::DB* detach() {
+        leveldb::DB* db = db_;
+        db_ = nullptr;
+        path_.clear();
+        return db;
+    }
+
     void put(const std::string& key, const std::string& val) {
         if (db_) db_->Put(leveldb::WriteOptions(), key, val);
     }

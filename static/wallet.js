@@ -45,7 +45,203 @@ var _compiledAbi = null;
 var _fees = {};
 
 
+function bufToB64(buf) {
+  return btoa(String.fromCharCode.apply(null, new Uint8Array(buf)));
+}
+function b64ToB64url(b64) {
+  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+function b64urlToBuf(str) {
+  var b64 = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (b64.length % 4) b64 += '=';
+  var raw = atob(b64);
+  var buf = new Uint8Array(raw.length);
+  for (var i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+  return buf.buffer;
+}
+function webauthnAvailable() {
+  return !!(window.PublicKeyCredential && navigator.credentials);
+}
 
+function _assertWebauthnDomain() {
+  if (!webauthnAvailable()) throw new Error('WebAuthn not supported in this browser');
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(location.hostname))
+    throw new Error('WebAuthn requires a hostname, not an IP address — open http://localhost:' + location.port + '/ instead of ' + location.origin + '/');
+}
+
+function _base58Encode(bytes) {
+  var A = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  var zeroes = 0;
+  while (zeroes < bytes.length && bytes[zeroes] === 0) zeroes++;
+  var buf = Array.from(bytes);
+  var result = '';
+  while (buf.length > 0) {
+    var carry = 0, next = [];
+    for (var i = 0; i < buf.length; i++) {
+      var val = carry * 256 + buf[i];
+      var digit = Math.floor(val / 58);
+      carry = val % 58;
+      if (next.length > 0 || digit > 0) next.push(digit);
+    }
+    result += A[carry];
+    buf = next;
+  }
+  for (var i = 0; i < zeroes; i++) result += '1';
+  return result.split('').reverse().join('');
+}
+
+async function deriveAddressFromSeed(seed) {
+  var pkcs8 = new Uint8Array(48);
+  pkcs8.set([0x30,0x2e,0x02,0x01,0x00,0x30,0x05,0x06,0x03,0x2b,0x65,0x70,0x04,0x22,0x04,0x20], 0);
+  pkcs8.set(seed, 16);
+  var privKey = await crypto.subtle.importKey('pkcs8', pkcs8.buffer, { name: 'Ed25519' }, true, ['sign']);
+  var jwk = await crypto.subtle.exportKey('jwk', privKey);
+  var pubBytes = new Uint8Array(b64urlToBuf(jwk.x));
+  var hashBuf = await crypto.subtle.digest('SHA-256', pubBytes);
+  return 'oct' + _base58Encode(new Uint8Array(hashBuf));
+}
+
+async function webauthnRegisterPasskey() {
+  _assertWebauthnDomain();
+  var seed = crypto.getRandomValues(new Uint8Array(32));
+  var seed_b64 = bufToB64(seed);
+  var addr = await deriveAddressFromSeed(seed);
+  var challenge = crypto.getRandomValues(new Uint8Array(32));
+  var cred = await navigator.credentials.create({
+    publicKey: {
+      rp:        { name: 'Octra Wallet' },
+      user:      { id: seed.buffer, name: addr, displayName: addr },
+      challenge: challenge,
+      pubKeyCredParams: [
+        { type: 'public-key', alg: -8 },
+        { type: 'public-key', alg: -7 },
+        { type: 'public-key', alg: -257 }
+      ],
+      authenticatorSelection: {
+        userVerification: 'required',
+        residentKey: 'required'
+      },
+      timeout: 120000
+    }
+  });
+  seed.fill(0);
+  var credId = b64ToB64url(bufToB64(cred.rawId));
+  return { seed_b64: seed_b64, cred_id: credId };
+}
+
+async function webauthnUnlockPasskey(addr) {
+  _assertWebauthnDomain();
+  var credIdStr = null;
+  if (addr) {
+    var map = JSON.parse(localStorage.getItem('octra_cred_map') || '{}');
+    credIdStr = map[addr] || null;
+  }
+  if (!credIdStr) {
+    credIdStr = localStorage.getItem('octra_cred_id');
+  }
+  var allowCreds = credIdStr ? [{ type: 'public-key', id: b64urlToBuf(credIdStr) }] : [];
+  var challenge = crypto.getRandomValues(new Uint8Array(32));
+  var assertion = await navigator.credentials.get({
+    publicKey: {
+      challenge: challenge,
+      allowCredentials: allowCreds,
+      userVerification: 'required',
+      timeout: 120000
+    }
+  });
+  var handle = assertion.response.userHandle;
+  if (!handle || handle.byteLength !== 32)
+    throw new Error('credential does not contain a valid wallet seed — please re-register this passkey');
+  var seed = new Uint8Array(handle);
+  var seed_b64 = bufToB64(seed);
+  seed.fill(0);
+  var usedCredId = b64ToB64url(bufToB64(assertion.rawId));
+  return { seed_b64: seed_b64, cred_id: usedCredId };
+}
+
+async function webauthnGetExistingPasskey() {
+  _assertWebauthnDomain();
+  var challenge = crypto.getRandomValues(new Uint8Array(32));
+  var assertion = await navigator.credentials.get({
+    publicKey: {
+      challenge: challenge,
+      allowCredentials: [],
+      userVerification: 'required',
+      timeout: 120000
+    }
+  });
+  var handle = assertion.response.userHandle;
+  if (!handle || handle.byteLength !== 32)
+    throw new Error('credential does not contain a valid wallet seed — please re-register this passkey');
+  var seed = new Uint8Array(handle);
+  var seed_b64 = bufToB64(seed);
+  seed.fill(0);
+  var credId = b64ToB64url(bufToB64(assertion.rawId));
+  return { seed_b64: seed_b64, cred_id: credId };
+}
+
+async function webauthnConfirm() {
+  var credIdStr = localStorage.getItem('octra_cred_id');
+  if (!credIdStr) return;
+  var challenge = crypto.getRandomValues(new Uint8Array(32));
+  await navigator.credentials.get({
+    publicKey: {
+      challenge: challenge,
+      allowCredentials: [{ type: 'public-key', id: b64urlToBuf(credIdStr) }],
+      userVerification: 'required',
+      timeout: 60000
+    }
+  });
+}
+
+async function confirmTx() {
+  if (_isPasskey) {
+    await webauthnConfirm();
+    return;
+  }
+  return new Promise(function(resolve, reject) {
+    var overlay = $('pin-confirm-overlay');
+    var input = $('pin-confirm-input');
+    var errDiv = $('pin-confirm-error');
+    input.value = '';
+    errDiv.textContent = '';
+    overlay.style.display = 'flex';
+    input.focus();
+
+    function cleanup() {
+      overlay.style.display = 'none';
+      input.removeEventListener('keydown', onKey);
+      $('pin-confirm-ok').onclick = null;
+      $('pin-confirm-cancel').onclick = null;
+    }
+
+    function onKey(e) {
+      if (e.key === 'Enter') doConfirm();
+      if (e.key === 'Escape') { cleanup(); reject(new Error('cancelled')); }
+    }
+
+    async function doConfirm() {
+      var pin = input.value;
+      if (!/^\d{6}$/.test(pin)) {
+        errDiv.textContent = 'PIN must be 6 digits';
+        return;
+      }
+      try {
+        await api('POST', '/wallet/confirm-pin', { pin: pin });
+        cleanup();
+        resolve();
+      } catch (e) {
+        errDiv.textContent = e.message;
+        input.value = '';
+        input.focus();
+      }
+    }
+
+    input.addEventListener('keydown', onKey);
+    $('pin-confirm-ok').onclick = doConfirm;
+    $('pin-confirm-cancel').onclick = function() { cleanup(); reject(new Error('cancelled')); };
+  });
+}
 
 function $(id) { return document.getElementById(id); }
 
@@ -499,6 +695,12 @@ async function doSend() {
   if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) { showResult('send-result', false, 'invalid amount'); return; }
   if (!validateFee('send-fee', 'standard')) { feeError('send-result', 'send-fee', 'standard'); return; }
   try {
+    await confirmTx();
+  } catch (e) {
+    showResult('send-result', false, 'confirmation cancelled');
+    return;
+  }
+  try {
     var body = { to: to, amount: amount };
     if (msg) body.message = msg;
     var fee = $('send-fee') ? $('send-fee').value.trim() : '';
@@ -530,6 +732,12 @@ async function doEncrypt() {
   if (!amount || !/^\d+(\.\d{1,6})?$/.test(amount) || parseFloat(amount) <= 0) { showResult('enc-result', false, 'invalid amount'); return; }
   if (!validateFee('enc-fee', 'encrypt')) { feeError('enc-result', 'enc-fee', 'encrypt'); return; }
   try {
+    await confirmTx();
+  } catch (e) {
+    showResult('enc-result', false, 'confirmation cancelled');
+    return;
+  }
+  try {
     var encBody = { amount: amount };
     var encFee = $('enc-fee') ? $('enc-fee').value.trim() : '';
     if (encFee) encBody.ou = encFee;
@@ -552,6 +760,12 @@ async function doDecrypt() {
     if (_encryptedBalanceRaw <= 0) { showResult('dec-result', false, 'no encrypted balance to decrypt'); return; }
     if (needRaw > _encryptedBalanceRaw) { showResult('dec-result', false, 'insufficient encrypted balance: have ' + fmtOct(_encryptedBalanceRaw) + ', need ' + amount + ' oct'); return; }
     if (!validateFee('dec-fee', 'decrypt')) { feeError('dec-result', 'dec-fee', 'decrypt'); return; }
+  try {
+    await confirmTx();
+  } catch (e) {
+    showResult('dec-result', false, 'confirmation cancelled');
+    return;
+  }
   try {
     var decBody = { amount: amount };
     var decFee = $('dec-fee') ? $('dec-fee').value.trim() : '';
@@ -578,11 +792,12 @@ async function doStealthSend() {
   if (needRaw > _encryptedBalanceRaw) { logStealth('error: insufficient encrypted balance: have ' + fmtOct(_encryptedBalanceRaw) + ', need ' + amount + ' oct', 'log-err'); return; }
   if (!validateFee('stealth-fee', 'stealth')) { logStealth('error: invalid fee - must be integer >= ' + ((_fees.stealth && _fees.stealth.minimum) || '?'), 'log-err'); return; }
   logStealth('initiating stealth send...', 'log-info');
-
-
-
-
-  
+  try {
+    await confirmTx();
+  } catch (e) {
+    logStealth('confirmation cancelled', 'log-err');
+    return;
+  }
   logStealth('to: ' + to, 'log-info');
   logStealth('amount: ' + amount + ' oct', 'log-info');
   logStealth('', '');
@@ -670,6 +885,12 @@ function claimSelected() {
 async function doStealthClaim(ids) {
   clearStealthLog();
   logStealth('claiming ' + ids.length + ' output(s)...', 'log-info');
+  try {
+    await confirmTx();
+  } catch (e) {
+    logStealth('confirmation cancelled', 'log-err');
+    return;
+  }
   try {
     var res = await api('POST', '/stealth/claim', { ids: ids });
     logStealth('claim complete', 'log-ok');
@@ -887,6 +1108,12 @@ async function doDeploy() {
   }
   if (!validateFee('ct-deploy-fee', 'deploy')) { feeError('ct-deploy-result', 'ct-deploy-fee', 'deploy'); return; }
   try {
+    await confirmTx();
+  } catch (e) {
+    showResult('ct-deploy-result', false, 'confirmation cancelled');
+    return;
+  }
+  try {
     var body = { bytecode: bytecode };
     if (params) body.params = params;
     var deployFee = $('ct-deploy-fee') ? $('ct-deploy-fee').value.trim() : '';
@@ -926,6 +1153,12 @@ async function doContractCall() {
     amount_raw = String(Math.round(f * 1000000));
   }
   if (!validateFee('ct-call-fee', 'call')) { feeError('ct-call-result', 'ct-call-fee', 'call'); return; }
+  try {
+    await confirmTx();
+  } catch (e) {
+    showResult('ct-call-result', false, 'confirmation cancelled');
+    return;
+  }
   try {
     var callBody = { address: addr, method: method, params: params, amount: amount_raw };
     var callFee = $('ct-call-fee') ? $('ct-call-fee').value.trim() : '';
@@ -1207,6 +1440,12 @@ async function doTokenTransfer() {
   if (!rawAmount) { showResult('tok-transfer-result', false, 'invalid amount'); return; }
   if (!validateFee('tok-fee', 'call')) { feeError('tok-transfer-result', 'tok-fee', 'call'); return; }
   try {
+    await confirmTx();
+  } catch (e) {
+    showResult('tok-transfer-result', false, 'confirmation cancelled');
+    return;
+  }
+  try {
     var tokBody = { token: _selectedToken.address, to: to, amount: rawAmount };
     var tokFee = $('tok-fee') ? $('tok-fee').value.trim() : '';
     if (tokFee) tokBody.ou = tokFee;
@@ -1381,13 +1620,172 @@ async function doChangePin() {
 
 var _pendingAction = null;
 var _pendingPriv = '';
+var _pendingUnlockAddr = '';
+var _hasAccounts = false;
+var _isPasskey = false;
 
 function hideAllModalPanels() {
   $('modal-btns').style.display = 'none';
-  $('modal-import').style.display = 'none';
+  if ($('modal-accounts')) $('modal-accounts').style.display = 'none';
+  if ($('modal-import-choice')) $('modal-import-choice').style.display = 'none';
+  if ($('modal-passkey-choice')) $('modal-passkey-choice').style.display = 'none';
+  if ($('modal-import')) $('modal-import').style.display = 'none';
+  if ($('modal-create-choice')) $('modal-create-choice').style.display = 'none';
   $('modal-pin').style.display = 'none';
   $('modal-pin-setup').style.display = 'none';
+  if ($('modal-webauthn-unlock')) $('modal-webauthn-unlock').style.display = 'none';
   $('modal-result').innerHTML = '';
+}
+
+function showAccountList(accounts) {
+  _hasAccounts = accounts.length > 0;
+  hideAllModalPanels();
+  if (accounts.length === 0) {
+    $('modal-sub').textContent = 'no wallet found';
+    $('modal-btns').style.display = 'flex';
+    return;
+  }
+  $('modal-sub').textContent = 'select account';
+  var h = '';
+  for (var i = 0; i < accounts.length; i++) {
+    var a = accounts[i];
+    var dispAddr = a.addr === '__legacy__' ? 'existing wallet' : short(a.addr);
+    var typeTag = a.type === 'passkey' ? 'passkey' : 'pin';
+    var addrEsc = a.addr.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    h += '<div class="account-item" onclick="selectAccount(\'' + addrEsc + '\',\'' + a.type + '\')">';
+    h += '<span class="mono account-addr">' + dispAddr + '</span>';
+    h += '<span class="account-badge ' + typeTag + '">' + typeTag + '</span>';
+    h += '<button class="acct-remove-btn" title="remove" onclick="removeAccount(event,\'' + addrEsc + '\')">&times;</button>';
+    h += '</div>';
+  }
+  $('modal-accounts-list').innerHTML = h;
+  $('modal-accounts').style.display = 'block';
+}
+
+function selectAccount(addr, type) {
+  _pendingUnlockAddr = addr;
+  if (type === 'passkey') {
+    $('modal-sub').textContent = 'authenticate with passkey';
+    var back = $('modal-webauthn-back');
+    if (back) back.style.display = '';
+    showWebauthnUnlock();
+  } else {
+    var label = addr === '__legacy__' ? 'existing wallet' : short(addr);
+    $('modal-sub').textContent = 'enter PIN for ' + label;
+    var back = $('modal-pin-back');
+    if (back) back.style.display = '';
+    showPinEntry();
+  }
+}
+
+function modalPinBack() {
+  _pendingUnlockAddr = '';
+  api('GET', '/wallet/accounts').then(function(r) {
+    showAccountList(r.accounts || []);
+  }).catch(function() { $('modal-btns').style.display = 'flex'; });
+}
+
+function modalPasskeyBack() {
+  _pendingUnlockAddr = '';
+  api('GET', '/wallet/accounts').then(function(r) {
+    showAccountList(r.accounts || []);
+  }).catch(function() { $('modal-btns').style.display = 'flex'; });
+}
+
+function modalShowAdd() {
+  hideAllModalPanels();
+  $('modal-import-choice').style.display = 'block';
+  $('modal-sub').textContent = 'add account';
+}
+
+function modalShowPasskeyChoice() {
+  hideAllModalPanels();
+  $('modal-passkey-choice').style.display = 'block';
+  $('modal-sub').textContent = 'passkey account';
+}
+
+async function modalDoImportPasskeyExisting() {
+  hideAllModalPanels();
+  $('modal-result').innerHTML = '<div class="loading">waiting for authenticator...</div>';
+  try {
+    var result = await webauthnGetExistingPasskey();
+    var r = await api('POST', '/wallet/import-passkey', { seed_b64: result.seed_b64 });
+    result.seed_b64 = '';
+    var map = JSON.parse(localStorage.getItem('octra_cred_map') || '{}');
+    map[r.address] = result.cred_id;
+    localStorage.setItem('octra_cred_map', JSON.stringify(map));
+    localStorage.setItem('octra_cred_id', result.cred_id);
+    flushWalletState();
+    $('modal-overlay').style.display = 'none';
+    await loadWalletInfo();
+    startRefreshTimer();
+  } catch (e) {
+    $('modal-result').innerHTML = '<div class="result-msg result-error">' + e.message + '</div>' +
+      '<div class="action-row" style="margin-top:8px"><button class="action-btn" style="background:#8C9DB6" onclick="modalShowPasskeyChoice()">back</button></div>';
+  }
+}
+
+function removeAccount(e, addr) {
+  e.stopPropagation();
+  api('DELETE', '/wallet/account', { addr: addr }).then(function() {
+    return api('GET', '/wallet/accounts');
+  }).then(function(r) {
+    showAccountList(r.accounts || []);
+  }).catch(function(err) {
+    $('modal-result').innerHTML = '<div class="result-msg result-error">' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function showWebauthnUnlock() {
+  hideAllModalPanels();
+  $('modal-webauthn-unlock').style.display = 'block';
+  $('modal-sub').textContent = 'authenticate with your passkey to unlock';
+}
+
+async function doWebauthnUnlock() {
+  $('modal-result').innerHTML = '<div class="loading">waiting for authenticator...</div>';
+  try {
+    var result = await webauthnUnlockPasskey(_pendingUnlockAddr);
+    var body = { seed_b64: result.seed_b64 };
+    if (_pendingUnlockAddr) body.addr = _pendingUnlockAddr;
+    await api('POST', '/wallet/unlock-passkey', body);
+    result.seed_b64 = '';
+    if (_pendingUnlockAddr) {
+      var map = JSON.parse(localStorage.getItem('octra_cred_map') || '{}');
+      map[_pendingUnlockAddr] = result.cred_id;
+      localStorage.setItem('octra_cred_map', JSON.stringify(map));
+    }
+    localStorage.setItem('octra_cred_id', result.cred_id);
+    _pendingUnlockAddr = '';
+    flushWalletState();
+    $('modal-overlay').style.display = 'none';
+    await loadWalletInfo();
+    startRefreshTimer();
+  } catch (e) {
+    $('modal-result').innerHTML = '<div class="result-msg result-error">' + e.message + '</div>';
+  }
+}
+
+async function modalDoImportPasskey(caller) {
+  hideAllModalPanels();
+  $('modal-result').innerHTML = '<div class="loading">waiting for authenticator...</div>';
+  try {
+    var result = await webauthnRegisterPasskey();
+    var r = await api('POST', '/wallet/import-passkey', { seed_b64: result.seed_b64 });
+    result.seed_b64 = '';
+    var map = JSON.parse(localStorage.getItem('octra_cred_map') || '{}');
+    map[r.address] = result.cred_id;
+    localStorage.setItem('octra_cred_map', JSON.stringify(map));
+    localStorage.setItem('octra_cred_id', result.cred_id);
+    flushWalletState();
+    $('modal-overlay').style.display = 'none';
+    await loadWalletInfo();
+    startRefreshTimer();
+  } catch (e) {
+    var backFn = caller === 'create' ? 'modalShowCreate()' : 'modalShowPasskeyChoice()';
+    $('modal-result').innerHTML = '<div class="result-msg result-error">' + e.message + '</div>' +
+      '<div class="action-row" style="margin-top:8px"><button class="action-btn" style="background:#8C9DB6" onclick="' + backFn + '">back</button></div>';
+  }
 }
 
 function showPinEntry() {
@@ -1408,20 +1806,54 @@ function showPinSetup(action) {
 
 function modalShowImport() {
   hideAllModalPanels();
+  $('modal-import-choice').style.display = 'block';
+  $('modal-sub').textContent = 'choose import method';
+}
+
+function modalShowImportPrivkey() {
+  hideAllModalPanels();
   $('modal-import').style.display = 'block';
+  $('modal-sub').textContent = 'import private key';
 }
 
 function modalBack() {
   hideAllModalPanels();
-  $('modal-btns').style.display = 'flex';
+  if (_hasAccounts) {
+    api('GET', '/wallet/accounts').then(function(r) {
+      showAccountList(r.accounts || []);
+    }).catch(function() { $('modal-btns').style.display = 'flex'; });
+  } else {
+    $('modal-btns').style.display = 'flex';
+  }
 }
 
 function modalBackFromPin() {
   _pendingAction = null;
   _pendingPriv = '';
+  _pendingUnlockAddr = '';
   hideAllModalPanels();
-  $('modal-btns').style.display = 'flex';
-  $('modal-sub').textContent = 'no wallet found';
+  if (_hasAccounts) {
+    api('GET', '/wallet/accounts').then(function(r) {
+      showAccountList(r.accounts || []);
+    }).catch(function() {
+      $('modal-sub').textContent = 'no wallet found';
+      $('modal-btns').style.display = 'flex';
+    });
+  } else {
+    $('modal-sub').textContent = 'no wallet found';
+    $('modal-btns').style.display = 'flex';
+  }
+}
+
+function modalShowCreate() {
+  hideAllModalPanels();
+  $('modal-create-choice').style.display = 'block';
+  $('modal-sub').textContent = 'choose wallet creation method';
+}
+
+function modalCreateWithPin() {
+  showPinSetup('create');
+  $('modal-sub').textContent = 'set a 6-digit PIN for your new wallet';
 }
 
 function modalCreate() {
@@ -1449,7 +1881,11 @@ async function modalUnlock() {
   }
   $('modal-result').innerHTML = '<div class="loading">unlocking...</div>';
   try {
-    await api('POST', '/wallet/unlock', { pin: pin });
+    var body = { pin: pin };
+    if (_pendingUnlockAddr) body.addr = _pendingUnlockAddr;
+    await api('POST', '/wallet/unlock', body);
+    _pendingUnlockAddr = '';
+    flushWalletState();
     $('modal-overlay').style.display = 'none';
     await loadWalletInfo();
     startRefreshTimer();
@@ -1482,6 +1918,7 @@ async function modalFinishSetup() {
     } else if (_pendingAction === 'migrate') {
       await api('POST', '/wallet/unlock', { pin: pin });
     }
+    flushWalletState();
     $('modal-overlay').style.display = 'none';
     await loadWalletInfo();
     startRefreshTimer();
@@ -1494,6 +1931,7 @@ async function loadWalletInfo() {
   try {
     var w = await api('GET', '/wallet');
     _walletAddr = w.address || w.addr || '';
+    _isPasskey = !!w.is_passkey;
     if (w.explorer_url) _explorerUrl = w.explorer_url.replace(/\/+$/, '');
     $('hdr-addr').innerHTML = '<span class="mono">' + _walletAddr + '</span>';
     $('hdr-logout').style.display = '';
@@ -1507,21 +1945,49 @@ async function loadWalletInfo() {
   }
 }
 
-async function doLogout() {
-  try { await api('POST', '/wallet/lock', {}); } catch (e) {}
+function flushWalletState() {
   if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
   _walletAddr = '';
+  _isPasskey = false;
   _cachedBal = null;
   _encryptedBalanceRaw = 0;
+  _unclaimedCount = 0;
+  _pendingClaimIds = {};
+  _tokens = [];
+  _selectedToken = null;
+  _tokenSymbols = {};
+  _tokenDecimals = {};
+  _tokensLoaded = false;
+  _tokTxGen++;
+  _fees = {};
+  $('hdr-addr').innerHTML = '<span class="mono">loading...</span>';
+  $('hdr-status').textContent = 'connecting...';
+  $('hdr-status').className = 'right';
+  if ($('st-balance')) $('st-balance').textContent = '-';
+  if ($('st-enc-balance')) $('st-enc-balance').textContent = '-';
+  if ($('st-nonce')) $('st-nonce').textContent = '-';
+  if ($('st-staging')) $('st-staging').textContent = '-';
+  if ($('send-bal')) $('send-bal').textContent = '-';
+  if ($('enc-pub-bal')) $('enc-pub-bal').textContent = '-';
+  if ($('enc-enc-bal')) $('enc-enc-bal').textContent = '-';
+  if ($('st-enc-bal-info')) $('st-enc-bal-info').textContent = '-';
+  if ($('ct-bal')) $('ct-bal').textContent = '-';
+  if ($('dash-txs')) $('dash-txs').innerHTML = '<div class="loading">loading...</div>';
+  if ($('dash-more')) $('dash-more').innerHTML = '';
+  updateStealthBadge(0);
+}
+
+async function doLogout() {
+  flushWalletState();
+  try { await api('POST', '/wallet/lock', {}); } catch (e) {}
   $('hdr-logout').style.display = 'none';
   $('hdr-dev').style.display = 'none';
   $('hdr-addr').textContent = 'locked';
   $('hdr-status').textContent = 'locked';
   $('hdr-status').className = 'right';
-  $('modal-sub').textContent = 'enter PIN to unlock';
   hideAllModalPanels();
-  showPinEntry();
   $('modal-overlay').style.display = 'flex';
+  init();
 }
 
 function startRefreshTimer() {
@@ -1543,6 +2009,18 @@ async function init() {
     if (st.loaded) {
       await loadWalletInfo();
       startRefreshTimer();
+      return;
+    }
+    var accounts = st.accounts || [];
+    _hasAccounts = accounts.length > 0;
+    if (accounts.length > 0) {
+      showAccountList(accounts);
+      $('modal-overlay').style.display = 'flex';
+      return;
+    }
+    if (st.needs_webauthn) {
+      showWebauthnUnlock();
+      $('modal-overlay').style.display = 'flex';
       return;
     }
     if (st.needs_pin) {

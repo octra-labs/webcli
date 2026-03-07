@@ -946,3 +946,86 @@ tr:hover { background: #E5E9EF; }
   border: 1px solid #C0C6D0;
 }
 .token-btn-sec:hover { background: #D0D7E2; }
+
+.account-item {
+  display: flex;
+  align-items: center;
+  padding: 7px 10px;
+  margin: 3px 0;
+  background: #F6F7F9;
+  border: 1px solid #E5E9EF;
+  cursor: pointer;
+  gap: 8px;
+}
+.account-item:hover { background: #E5E9EF; border-color: #C0C6D0; }
+.account-addr { flex: 1; font-size: 11px; color: #3B567F; }
+.account-badge {
+  font-size: 9px;
+  font-weight: bold;
+  padding: 1px 5px;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+.account-badge.pin { background: #D0D7E2; color: #516E9A; }
+.account-badge.passkey { background: #516E9A; color: #fff; }
+.acct-remove-btn {
+  background: none;
+  border: none;
+  color: #C0C6D0;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+.acct-remove-btn:hover { color: #8C9DB6; }
+
+#pin-confirm-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(182, 192, 208, 0.85);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#pin-confirm-box {
+  background: #fff;
+  border: 1px solid #C0C6D0;
+  padding: 24px 28px;
+  min-width: 280px;
+  max-width: 360px;
+  width: 90%;
+}
+
+#pin-confirm-title {
+  font-size: 13px;
+  font-weight: bold;
+  color: #3B567F;
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+
+#pin-confirm-sub {
+  font-size: 11px;
+  color: #8C9DB6;
+  margin-bottom: 16px;
+  letter-spacing: 1px;
+}
+
+#pin-confirm-box input {
+  text-align: center;
+  letter-spacing: 8px;
+  font-size: 16px;
+  font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+  padding: 8px;
+}
+
+#pin-confirm-error {
+  font-size: 11px;
+  color: #c0392b;
+  min-height: 16px;
+  margin-bottom: 8px;
+  letter-spacing: 0.5px;
+}

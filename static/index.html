@@ -39,9 +39,31 @@
   <div id="modal-box">
     <div id="modal-title">octra_wallet</div>
     <div id="modal-sub">no wallet found</div>
+    <div id="modal-accounts" style="display:none">
+      <div id="modal-accounts-list"></div>
+      <div class="action-row" style="margin-top:10px">
+        <button class="action-btn" onclick="modalShowAdd()">add account</button>
+      </div>
+    </div>
     <div id="modal-btns">
       <button class="action-btn" onclick="modalShowImport()">import</button>
-      <button class="action-btn" onclick="modalCreate()">create new</button>
+      <button class="action-btn" onclick="modalShowCreate()">create new</button>
+    </div>
+    <div id="modal-import-choice" style="display:none">
+      <p style="color:#8C9DB6;font-size:13px;margin:8px 0">Choose how to import your wallet.</p>
+      <div class="action-row">
+        <button class="action-btn" onclick="modalShowImportPrivkey()">private key</button>
+        <button class="action-btn" onclick="modalShowPasskeyChoice()">passkey</button>
+        <button class="action-btn" style="background:#8C9DB6" onclick="modalBack()">back</button>
+      </div>
+    </div>
+    <div id="modal-passkey-choice" style="display:none">
+      <p style="color:#8C9DB6;font-size:13px;margin:8px 0">Create a new passkey wallet or recover an existing one using a previously registered passkey.</p>
+      <div class="action-row">
+        <button class="action-btn" onclick="modalDoImportPasskey()">create new</button>
+        <button class="action-btn" onclick="modalDoImportPasskeyExisting()">import existing</button>
+        <button class="action-btn" style="background:#8C9DB6" onclick="modalShowAdd()">back</button>
+      </div>
     </div>
     <div id="modal-import" style="display:none">
       <div class="form-row">
@@ -50,7 +72,22 @@
       </div>
       <div class="action-row">
         <button class="action-btn" onclick="modalDoImport()">import</button>
+        <button class="action-btn" style="background:#8C9DB6" onclick="modalShowImport()">back</button>
+      </div>
+    </div>
+    <div id="modal-create-choice" style="display:none">
+      <p style="color:#8C9DB6;font-size:13px;margin:8px 0">Choose how to create your wallet.</p>
+      <div class="action-row">
+        <button class="action-btn" onclick="modalCreateWithPin()">create with PIN</button>
+        <button class="action-btn" onclick="modalDoImportPasskey('create')">create with passkey</button>
         <button class="action-btn" style="background:#8C9DB6" onclick="modalBack()">back</button>
+      </div>
+    </div>
+    <div id="modal-webauthn-unlock" style="display:none">
+      <p style="color:#8C9DB6;font-size:13px;margin:8px 0">Use your registered passkey to unlock this wallet.</p>
+      <div class="action-row">
+        <button class="action-btn" onclick="doWebauthnUnlock()">unlock with passkey</button>
+        <button class="action-btn" style="background:#8C9DB6;display:none" id="modal-webauthn-back" onclick="modalPasskeyBack()">back</button>
       </div>
     </div>
     <div id="modal-pin" style="display:none">
@@ -60,6 +97,7 @@
       </div>
       <div class="action-row">
         <button class="action-btn" onclick="modalUnlock()">unlock</button>
+        <button class="action-btn" style="background:#8C9DB6;display:none" id="modal-pin-back" onclick="modalPinBack()">back</button>
       </div>
     </div>
     <div id="modal-pin-setup" style="display:none">
@@ -77,6 +115,21 @@
       </div>
     </div>
     <div id="modal-result"></div>
+  </div>
+</div>
+
+<div id="pin-confirm-overlay" style="display:none">
+  <div id="pin-confirm-box">
+    <div id="pin-confirm-title">confirm transaction</div>
+    <div id="pin-confirm-sub">enter your 6-digit PIN to confirm</div>
+    <div class="form-row">
+      <input type="password" id="pin-confirm-input" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="off">
+    </div>
+    <div id="pin-confirm-error"></div>
+    <div class="action-row">
+      <button class="action-btn" id="pin-confirm-ok">confirm</button>
+      <button class="action-btn" id="pin-confirm-cancel" style="background:#8C9DB6">cancel</button>
+    </div>
   </div>
 </div>
 
