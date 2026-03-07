@@ -2,7 +2,7 @@ This is a fork of [Octra WebCLI](https://github.com/octra-labs/webcli) with pass
 Full structure of the fork is described in STRUCTURE.md.
 
 ## TLDR:
-1. Added passkey support via user.id being used as a seed (yes, the private key is sitting in the tab's memory, it is a temporary problem that needs to be addressed at protocol level to accept native secp256r1 curve and webAuthn rich signatures).
+1. Added passkey support via user.id being used as a seed (yes, the private key is sitting in the tab's memory, it is a temporary problem that needs to be addressed at protocol level to accept native webAuthn rich signatures).
 2. Added the management of multiple accounts (both imported via private keys and passkeys) so you can test transactions between accounts
 3. Optimized logout to be instant. The rpc was being called every 15 seconds or tab switching for the balance checks, and the user had to wait untill its finished. Plus leveldb had to finish the compaction in the same thread so the user had to wait for it too untill he gets the response from backend.
 
