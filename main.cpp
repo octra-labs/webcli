@@ -291,7 +291,16 @@ int main(int argc, char** argv) {
     svr.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
         if (req.path.rfind("/api/", 0) == 0 && res.body.empty()) {
             json j;
-            j["error"] = "unknown endpoint: " + req.method + " " + req.path;
+            if (res.status == 404) {
+                j["error"] = "unknown endpoint: " + req.method + " " + req.path;
+            } else {
+                j["error"] = "internal error on: " + req.method + " " + req.path +
+                             " (status " + std::to_string(res.status) + ")";
+                auto it = res.headers.find("EXCEPTION_WHAT");
+                if (it != res.headers.end()) {
+                    j["detail"] = it->second;
+                }
+            }
             res.set_content(j.dump(), "application/json");
         }
     });
