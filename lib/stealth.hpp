@@ -45,7 +45,9 @@ inline std::array<uint8_t, 32> ecdh_shared_secret(const uint8_t our_sk[32],
                                                    const uint8_t their_pub[32]) {
     uint8_t raw[32];
     crypto_scalarmult(raw, our_sk, their_pub);
-    return sha256(raw, 32);
+    auto result = sha256(raw, 32);
+    secure_zero(raw, 32);
+    return result;
 }
 
 inline std::array<uint8_t, 16> compute_stealth_tag(const std::array<uint8_t, 32>& shared) {

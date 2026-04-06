@@ -72,6 +72,10 @@ struct Wallet {
     ~Wallet() {
         secure_zero(sk, 64);
         secure_zero(pk, 32);
+        if (!priv_b64.empty()) secure_zero(&priv_b64[0], priv_b64.size());
+        if (!pub_b64.empty()) secure_zero(&pub_b64[0], pub_b64.size());
+        if (!master_seed_b64.empty()) secure_zero(&master_seed_b64[0], master_seed_b64.size());
+        if (!mnemonic.empty()) secure_zero(&mnemonic[0], mnemonic.size());
     }
 };
 
@@ -274,6 +278,16 @@ inline Wallet load_wallet_encrypted(const std::string& path,
     w.hd_index = j.value("hd_index", 0);
     w.hd_version = j.value("hd_version", 1);
 
+    // Zero sensitive fields inside the JSON object before it is destroyed,
+    // so the allocator doesn't leave secrets in freed heap memory.
+    for (auto& key : {"priv", "master_seed", "mnemonic"}) {
+        if (j.contains(key) && j[key].is_string()) {
+            auto& s = j[key].get_ref<std::string&>();
+            if (!s.empty()) secure_zero(&s[0], s.size());
+        }
+    }
+    j.clear();
+
     auto raw = base64_decode(w.priv_b64);
     if (raw.size() >= 64) {
         memcpy(w.sk, raw.data(), 64);
@@ -281,8 +295,10 @@ inline Wallet load_wallet_encrypted(const std::string& path,
     } else if (raw.size() >= 32) {
         keypair_from_seed(raw.data(), w.sk, w.pk);
     } else {
+        secure_zero(raw.data(), raw.size());
         throw std::runtime_error("invalid private key");
     }
+    secure_zero(raw.data(), raw.size());
     w.pub_b64 = base64_encode(w.pk, 32);
     chmod(path.c_str(), 0600);
     try_mlock(w.sk, 64);
@@ -302,8 +318,12 @@ inline int recover_hd_index(const std::string& master_seed_b64,
         secure_zero(hd_seed.data(), 32);
         std::string addr = derive_address(pk);
         secure_zero(sk, 64);
-        if (addr == target_addr) return i;
+        if (addr == target_addr) {
+            secure_zero(master_raw.data(), master_raw.size());
+            return i;
+        }
     }
+    secure_zero(master_raw.data(), master_raw.size());
     return -1;
 }
 
@@ -372,8 +392,10 @@ inline Wallet load_wallet_legacy(const std::string& path) {
     } else if (raw.size() >= 32) {
         keypair_from_seed(raw.data(), w.sk, w.pk);
     } else {
+        secure_zero(raw.data(), raw.size());
         throw std::runtime_error("invalid private key");
     }
+    secure_zero(raw.data(), raw.size());
     w.pub_b64 = base64_encode(w.pk, 32);
     try_mlock(w.sk, 64);
     try_mlock(w.pk, 32);
@@ -383,7 +405,7 @@ inline Wallet load_wallet_legacy(const std::string& path) {
 inline Wallet migrate_wallet(const std::string& pin) {
     Wallet w = load_wallet_legacy(WALLET_LEGACY);
     save_wallet_encrypted(WALLET_FILE, w, pin);
-    std::remove(WALLET_LEGACY);
+    secure_remove(WALLET_LEGACY);
     return w;
 }
 
@@ -436,6 +458,7 @@ inline Wallet import_wallet(const std::string& path,
             clean += c;
     }
     auto raw = base64_decode(clean);
+    secure_zero(&clean[0], clean.size());
     Wallet w;
     if (raw.size() >= 64) {
         memcpy(w.sk, raw.data(), 64);
@@ -443,8 +466,10 @@ inline Wallet import_wallet(const std::string& path,
     } else if (raw.size() >= 32) {
         keypair_from_seed(raw.data(), w.sk, w.pk);
     } else {
+        secure_zero(raw.data(), raw.size());
         throw std::runtime_error("invalid private key length");
     }
+    secure_zero(raw.data(), raw.size());
     w.addr = derive_address(w.pk);
     if (w.addr.size() != 47 || w.addr.substr(0, 3) != "oct")
         throw std::runtime_error("derived address is invalid");

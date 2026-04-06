@@ -79,6 +79,8 @@ public:
         pvac_params prm = pvac_default_params();
         pvac_keygen_from_seed(prm, seed, &pk_, &sk_);
         pvac_free_params(prm);
+        secure_zero(seed, 32);
+        secure_zero(raw.data(), raw.size());
         return pk_ != nullptr && sk_ != nullptr;
     }
 

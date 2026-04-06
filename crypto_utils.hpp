@@ -28,10 +28,12 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
+#include <string.h>
 #include <string>
 #include <vector>
 #include <array>
 #include <algorithm>
+#include <fstream>
 #ifndef _WIN32
 #include <sys/mman.h>
 #else
@@ -251,6 +253,18 @@ inline void random_bytes(uint8_t* out, size_t len) {
     randombytes(out, len);
 }
 
+// Inspired by https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/support/cleanse.h
+inline void secure_zero(void* ptr, size_t len) {
+#if defined(_WIN32)
+    SecureZeroMemory(ptr, len);
+#elif defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25))
+    explicit_bzero(ptr, len);
+#else
+    memset(ptr, 0, len);
+    __asm__ __volatile__("" : : "r"(ptr) : "memory");
+#endif
+}
+
 inline void ed25519_sk_to_curve25519(const uint8_t ed_sk[64], uint8_t x_sk[32]) {
     uint8_t h[64];
     crypto_hash(h, ed_sk, 32);
@@ -258,17 +272,39 @@ inline void ed25519_sk_to_curve25519(const uint8_t ed_sk[64], uint8_t x_sk[32]) 
     h[31] &= 127;
     h[31] |= 64;
     memcpy(x_sk, h, 32);
+    secure_zero(h, 64);
 }
 
 inline void ed25519_pk_to_curve25519(const uint8_t ed_sk[64], uint8_t x_pk[32]) {
     uint8_t x_sk[32];
     ed25519_sk_to_curve25519(ed_sk, x_sk);
     crypto_scalarmult_base(x_pk, x_sk);
+    secure_zero(x_sk, 32);
 }
 
-inline void secure_zero(void* ptr, size_t len) {
-    volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
-    while (len--) *p++ = 0;
+// Best-effort secure file removal: overwrites contents before unlinking.
+// May not fully erase data on CoW filesystems, journaled FS, or SSDs with wear leveling.
+// Returns true if overwrite succeeded; false if the file could not be opened or written.
+// The file is always unlinked regardless.
+inline bool secure_remove(const std::string& path) {
+    bool overwritten = false;
+    std::fstream fs(path, std::ios::in | std::ios::out | std::ios::binary);
+    if (fs) {
+        fs.seekg(0, std::ios::end);
+        auto size = fs.tellg();
+        if (size > 0) {
+            fs.seekp(0, std::ios::beg);
+            std::vector<uint8_t> zeros((size_t)size, 0);
+            fs.write(reinterpret_cast<const char*>(zeros.data()), size);
+            fs.flush();
+            overwritten = fs.good();
+        } else {
+            overwritten = true;
+        }
+        fs.close();
+    }
+    std::remove(path.c_str());
+    return overwritten;
 }
 
 inline bool try_mlock(void* ptr, size_t len) {

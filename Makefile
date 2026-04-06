@@ -35,8 +35,8 @@ ARCH:=-march=armv8-a+crypto
 else
 ARCH:=-march=native
 endif
-CXXFLAGS:=-std=c++17 -O2 $(ARCH) -Wall -pthread
-CFLAGS:=-O2 $(ARCH) -Wall
+CXXFLAGS:=-std=c++17 -O2 $(ARCH) -Wall -Wextra -Werror=format-security -Wshadow -pthread
+CFLAGS:=-O2 $(ARCH) -Wall -Wextra -Werror=format-security -Wshadow
 PVAC_DIR:=pvac
 PVAC_BUILD:=$(PVAC_DIR)/build
 
@@ -79,17 +79,17 @@ $(PVAC_BUILD):
 
 $(LIBPVAC): $(PVAC_DIR)/pvac_c_api.cpp | $(PVAC_BUILD)
 ifneq ($(IS_WIN),)
-	$(CXX) $(CXXFLAGS) -c -I$(PVAC_DIR)/include -o $(PVAC_BUILD)/pvac_c_api.o $<
+	$(CXX) $(CXXFLAGS) -Wno-unused-parameter -c -I$(PVAC_DIR)/include -o $(PVAC_BUILD)/pvac_c_api.o $<
 	ar rcs $@ $(PVAC_BUILD)/pvac_c_api.o
 else
-	$(CXX) $(CXXFLAGS) -fPIC $(SHARED_FLAGS) -I$(PVAC_DIR)/include -o $@ $<
+	$(CXX) $(CXXFLAGS) -Wno-unused-parameter -fPIC $(SHARED_FLAGS) -I$(PVAC_DIR)/include -o $@ $<
 ifeq ($(UNAME_S),Darwin)
 	install_name_tool -id @rpath/libpvac.$(SHARED_EXT) $@
 endif
 endif
 
 lib/tweetnacl.o: lib/tweetnacl.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -Wno-sign-compare -Wno-unterminated-string-initialization -c -o $@ $<
 
 lib/randombytes.o: lib/randombytes.c
 	$(CC) $(CFLAGS) -c -o $@ $<
