@@ -177,19 +177,29 @@ inline std::string base64_encode(const uint8_t* data, size_t len) {
 }
 
 inline std::vector<uint8_t> base64_decode(const std::string& s) {
-    static int D[256];
-    static bool init = false;
-    if (!init) {
-        memset(D, -1, sizeof(D));
-        const char* T =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        for (int i = 0; T[i]; i++) D[(uint8_t)T[i]] = i;
-        D[(uint8_t)'='] = 0;
-        init = true;
-    }
+    // Thread-safe: use a constexpr lookup table instead of lazy-initialized static
+    static const int D[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1, 0,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
     std::vector<uint8_t> r;
     r.reserve(s.size() * 3 / 4);
     for (size_t i = 0; i + 3 < s.size(); i += 4) {
+        if (D[(uint8_t)s[i]] < 0 || D[(uint8_t)s[i+1]] < 0) continue;
         uint32_t n = (D[(uint8_t)s[i]] << 18) | (D[(uint8_t)s[i + 1]] << 12) |
                      (D[(uint8_t)s[i + 2]] << 6) | D[(uint8_t)s[i + 3]];
         r.push_back((n >> 16) & 0xFF);
@@ -310,9 +320,17 @@ inline std::vector<uint8_t> wallet_encrypt(
     EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.data(), nonce);
 
     int outlen = 0;
-    EVP_EncryptUpdate(ctx, out.data() + 44, &outlen, plaintext, (int)len);
+    if (EVP_EncryptUpdate(ctx, out.data() + 44, &outlen, plaintext, (int)len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        secure_zero(key.data(), 32);
+        throw std::runtime_error("wallet encryption failed (update)");
+    }
     int finlen = 0;
-    EVP_EncryptFinal_ex(ctx, out.data() + 44 + outlen, &finlen);
+    if (EVP_EncryptFinal_ex(ctx, out.data() + 44 + outlen, &finlen) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        secure_zero(key.data(), 32);
+        throw std::runtime_error("wallet encryption failed (final)");
+    }
     EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, out.data() + 44 + len);
     EVP_CIPHER_CTX_free(ctx);
 
@@ -338,13 +356,19 @@ inline std::vector<uint8_t> wallet_decrypt(
     EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.data(), nonce);
 
     int outlen = 0;
-    EVP_DecryptUpdate(ctx, plain.data(), &outlen, ct, (int)ct_len);
+    if (EVP_DecryptUpdate(ctx, plain.data(), &outlen, ct, (int)ct_len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        secure_zero(key.data(), 32);
+        return {};
+    }
     EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void*)tag);
-    int ret = EVP_DecryptFinal_ex(ctx, plain.data() + outlen, &outlen);
+    int finlen = 0;
+    int ret = EVP_DecryptFinal_ex(ctx, plain.data() + outlen, &finlen);
     EVP_CIPHER_CTX_free(ctx);
     secure_zero(key.data(), 32);
 
     if (ret <= 0) return {};
+    plain.resize(outlen + finlen);
     return plain;
 }
 
@@ -361,23 +385,25 @@ inline std::array<uint8_t, 32> derive_hd_seed(const uint8_t master_seed[64],
                                                 uint32_t index,
                                                 int hd_version = 2) {
     std::array<uint8_t, 32> result;
+    const char* key = "Octra seed";
+    const size_t key_len = 10;
+
     if (hd_version == 1 && index == 0) {
-        memcpy(result.data(), master_seed, 32);
+        // Legacy v1: derive via HMAC instead of raw copy for better key separation
+        auto mac = hmac_sha512((const uint8_t*)key, key_len, master_seed, 64);
+        memcpy(result.data(), mac.data(), 32);
     } else if (hd_version == 2 && index == 0) {
-        const char* key = "Octra seed";
-        
-        auto mac = hmac_sha512((const uint8_t*)key, 10, master_seed, 64);
+        auto mac = hmac_sha512((const uint8_t*)key, key_len, master_seed, 64);
         memcpy(result.data(), mac.data(), 32);
     } else {
-
+        // Indexed derivation: append 4-byte little-endian index to master seed
         uint8_t data[68];
         memcpy(data, master_seed, 64);
         data[64] = (uint8_t)(index & 0xFF);
         data[65] = (uint8_t)((index >> 8) & 0xFF);
         data[66] = (uint8_t)((index >> 16) & 0xFF);
         data[67] = (uint8_t)((index >> 24) & 0xFF);
-        const char* key = "Octra seed";
-        auto mac = hmac_sha512((const uint8_t*)key, 10, data, 68);
+        auto mac = hmac_sha512((const uint8_t*)key, key_len, data, 68);
         memcpy(result.data(), mac.data(), 32);
         secure_zero(data, 68);
     }
@@ -429,18 +455,19 @@ inline bool validate_mnemonic(const std::string& mnemonic) {
         if (c == ' ' || c == '\n' || c == '\t') {
             if (!w.empty()) { words.push_back(w); w.clear(); }
         } else {
-            w += (char)tolower(c);
+            w += (char)tolower((unsigned char)c);
         }
     }
     if (!w.empty()) words.push_back(w);
     if (words.size() != 12 && words.size() != 15 &&
         words.size() != 18 && words.size() != 21 && words.size() != 24)
         return false;
+    // Use binary search (O(log n)) instead of linear scan (O(n)) -- wordlist is sorted
     for (auto& word : words) {
-        bool found = false;
-        for (int i = 0; i < 2048; i++) {
-            if (bip39::wordlist[i] == word) { found = true; break; }
-        }
+        bool found = std::binary_search(
+            bip39::wordlist, bip39::wordlist + 2048, word,
+            [](const char* a, const std::string& b) { return std::string(a) < b; }
+        );
         if (!found) return false;
     }
     return true;
