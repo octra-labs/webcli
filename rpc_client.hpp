@@ -76,7 +76,8 @@ class RpcClient {
     }
 
 public:
-    RpcClient() : path_("/rpc"), ssl_(true), port_(443) {}
+    // Default constructor uses the standard Octra RPC endpoint
+    RpcClient() : host_("rpc.octra.io"), path_("/rpc"), ssl_(true), port_(443) {}
     explicit RpcClient(const std::string& url) { parse_url(url); }
     void set_url(const std::string& url) { parse_url(url); }
 
@@ -173,8 +174,7 @@ public:
     }
 
 
-    // rpc compl 
-
+    // Compile AML with multiple source files (multi-file project support)
     RpcResult compile_aml_multi(const nlohmann::json& files, const std::string& main_path) {
         nlohmann::json payload;
         payload["files"] = files;

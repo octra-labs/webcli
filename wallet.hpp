@@ -100,7 +100,17 @@ inline void ensure_data_dir() {
 }
 
 inline std::string wallet_path_for(const std::string& addr) {
-    std::string prefix = addr.size() > 11 ? addr.substr(3, 8) : "unknown";
+    // Require at least "oct" prefix + 8 chars for the file prefix slice
+    // Also sanitize: only allow alphanumeric chars to prevent path traversal
+    std::string prefix = "unknown";
+    if (addr.size() > 11 && addr.substr(0, 3) == "oct") {
+        std::string raw = addr.substr(3, 8);
+        bool safe = true;
+        for (char c : raw) {
+            if (!isalnum((unsigned char)c)) { safe = false; break; }
+        }
+        if (safe) prefix = raw;
+    }
     return std::string(WALLET_DIR) + "/wallet_" + prefix + ".oct";
 }
 
