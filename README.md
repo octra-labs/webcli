@@ -90,9 +90,3 @@ we adhere to a policy of completely eliminating third-party software where possi
 - [cpp-httplib](https://github.com/yhirose/cpp-httplib) (MIT)
 - [nlohmann/json](https://github.com/nlohmann/json) (MIT)
 - [TweetNaCl](https://tweetnacl.cr.yp.to/) (public domain)
-
-## fork notes
-
-this is a fork of [octra-labs/webcli](https://github.com/octra-labs/webcli) maintained by [@0xgetz](https://github.com/0xgetz).
-
-upstream changes are tracked and merged periodically. contributions and issues are welcome via pull request.
