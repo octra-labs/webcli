@@ -107,6 +107,67 @@ header .subtitle .mono {
   margin-left: 10px;
 }
 
+.hdr-status-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+header button.hdr-net-toggle {
+  border: none;
+  cursor: pointer;
+  font-family: Tahoma, arial, sans-serif;
+  letter-spacing: 1px;
+}
+
+.hdr-network-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 2px;
+  min-width: 140px;
+  background: #fff;
+  border: 1px solid #D0D7E2;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  z-index: 50;
+}
+
+.hdr-network-item {
+  display: block;
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid #E5E9EF;
+  background: #fff;
+  padding: 8px 12px;
+  font-family: Tahoma, arial, sans-serif;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-align: left;
+  text-transform: lowercase;
+  color: #3B567F;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+.hdr-network-item:last-child {
+  border-bottom: none;
+}
+
+.hdr-network-item:hover {
+  background: #E5E9EF;
+}
+
+.hdr-network-item.hdr-network-item-current {
+  color: #B0B8C4;
+  background: #F6F7F9;
+  font-weight: normal;
+  cursor: default;
+  pointer-events: none;
+}
+
+.hdr-network-item.hdr-network-item-current:hover {
+  background: #F6F7F9;
+}
+
 header .right {
   display: flex;
   align-items: center;

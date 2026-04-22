@@ -109,7 +109,11 @@ var _cachedBal = null;
 var _encryptedBalanceRaw = 0;
 var _unclaimedCount = 0;
 var _pendingClaimIds = {};
-var _explorerUrl = 'https://octrascan.io';
+var RPC_MAINNET = 'http://46.101.86.250:8080';
+var RPC_DEVNET = 'https://devnet.octra.com/rpc';
+var EXPLORER_MAINNET = 'https://octrascan.io';
+var EXPLORER_DEVNET = 'https://devnet.octrascan.io';
+var _explorerUrl = EXPLORER_MAINNET;
 var _tokens = [];
 var _selectedToken = null;
 var _tokenSymbols = {};
@@ -118,7 +122,9 @@ var _tokensLoaded = false;
 var _tokTxGen = 0;
 var _compiledAbi = null;
 var _fees = {};
+var _fetchGen = 0;
 var _rpcHost = '';
+var _walletRpcNorm = '';
 var _hasMasterSeed = false;
 
 
@@ -760,6 +766,116 @@ function networkLabel(host) {
   return host;
 }
 
+var _hdrNetworkMenuOpen = false;
+
+function normRpcUrl(u) {
+  try {
+    var x = new URL((u || '').trim());
+    var p = x.pathname.replace(/\/+$/, '');
+    return x.origin.toLowerCase() + p;
+  } catch (e) {
+    return (u || '').trim();
+  }
+}
+
+function syncHdrNetworkMenuSelection() {
+  var mainEl = $('hdr-net-mainnet');
+  var devEl = $('hdr-net-devnet');
+  if (!mainEl || !devEl) return;
+  mainEl.classList.remove('hdr-network-item-current');
+  devEl.classList.remove('hdr-network-item-current');
+  var cur = _walletRpcNorm;
+  if (!cur) return;
+  var nm = normRpcUrl(RPC_MAINNET);
+  var nd = normRpcUrl(RPC_DEVNET);
+  if (cur === nm) mainEl.classList.add('hdr-network-item-current');
+  else if (cur === nd) devEl.classList.add('hdr-network-item-current');
+}
+
+function toggleHdrNetworkMenu(ev) {
+  if (ev) ev.stopPropagation();
+  var m = $('hdr-network-menu');
+  if (!m) return;
+  _hdrNetworkMenuOpen = !_hdrNetworkMenuOpen;
+  m.style.display = _hdrNetworkMenuOpen ? 'block' : 'none';
+  if (_hdrNetworkMenuOpen) syncHdrNetworkMenuSelection();
+}
+
+function closeHdrNetworkMenu() {
+  var m = $('hdr-network-menu');
+  if (m) m.style.display = 'none';
+  _hdrNetworkMenuOpen = false;
+}
+
+document.addEventListener('click', function() {
+  closeHdrNetworkMenu();
+});
+
+function setHdrStatusConnecting() {
+  $('hdr-status-label').textContent = 'connecting...';
+  $('hdr-status').className = 'right hdr-net-toggle';
+}
+
+function flushDashboardValues() {
+  _fetchGen++;
+  var ids = ['st-balance','st-enc-balance','st-nonce','st-staging',
+             'send-bal','enc-pub-bal','enc-enc-bal','st-enc-bal-info','ct-bal'];
+  for (var i = 0; i < ids.length; i++) {
+    var el = $(ids[i]);
+    if (el) el.textContent = '-';
+  }
+  if ($('btn-key-switch')) $('btn-key-switch').style.display = 'none';
+  if ($('dash-txs')) $('dash-txs').innerHTML = '<div class="loading">loading...</div>';
+  if ($('dash-more')) $('dash-more').innerHTML = '';
+}
+
+function beginNetworkSwitch() {
+  pauseRefreshTimer();
+  setHdrStatusConnecting();
+  flushDashboardValues();
+}
+
+async function switchNetworkFromHeader(rpcUrl, explorerUrl) {
+  closeHdrNetworkMenu();
+  $('settings-rpc').value = rpcUrl;
+  $('settings-explorer').value = explorerUrl;
+  beginNetworkSwitch();
+  try {
+    await doSaveSettings({ deferClientRefresh: true });
+    await hdrNetworkAfterSave();
+  } finally {
+    startRefreshTimer();
+  }
+}
+
+function applyHdrStatusOnline() {
+  $('hdr-status-label').textContent = _rpcHost ? 'online | ' + networkLabel(_rpcHost) : 'online';
+  $('hdr-status').className = 'right hdr-net-toggle online';
+}
+
+async function hdrNetworkAfterSave() {
+  var onDash = document.querySelector('.nav-tabs a.active[data-view="dashboard"]');
+  var ok = onDash
+    ? await loadDashboard({ skipHdr: true })
+    : (await fetchBalance({ skipHdr: true })) !== null;
+  if (ok) applyHdrStatusOnline();
+}
+
+async function hdrNetworkPickMainnet() {
+  await switchNetworkFromHeader(RPC_MAINNET, EXPLORER_MAINNET);
+}
+
+async function hdrNetworkPickDevnet() {
+  await switchNetworkFromHeader(RPC_DEVNET, EXPLORER_DEVNET);
+}
+
+function hdrNetworkPickCustom() {
+  closeHdrNetworkMenu();
+  switchView('settings');
+  var el = $('settings-rpc');
+  if (el) window.setTimeout(function() { el.focus(); el.select(); }, 0);
+}
+
 
 
 
@@ -790,9 +906,12 @@ async function bgStealthScan() {
   } catch (e) {}
 }
 
-async function fetchBalance() {
+async function fetchBalance(opt) {
+  var gen = _fetchGen;
+  var skipHdr = opt && opt.skipHdr;
   try {
     var bal = await api('GET', '/balance');
+    if (_fetchGen !== gen) return null;
     _cachedBal = bal;
     var pub = bal.public_balance || '0';
     var enc = bal.encrypted_balance || '0';
@@ -813,12 +932,14 @@ async function fetchBalance() {
     if ($('st-enc-bal-info')) $('st-enc-bal-info').textContent = encCorrupt
         ? 'corrupted ciphertext' : fmtOct(enc);
     if ($('ct-bal')) $('ct-bal').textContent = fmtOct(pub);
-    $('hdr-status').textContent = _rpcHost ? 'online | ' + networkLabel(_rpcHost) : 'online';
-    $('hdr-status').className = 'right online';
+    if (!skipHdr) {
+      $('hdr-status-label').textContent = _rpcHost ? 'online | ' + networkLabel(_rpcHost) : 'online';
+      $('hdr-status').className = 'right hdr-net-toggle online';
+    }
     return bal;
   } catch (e) {
-    $('hdr-status').textContent = 'offline';
-    $('hdr-status').className = 'right error';
+    $('hdr-status-label').textContent = 'offline';
+    $('hdr-status').className = 'right hdr-net-toggle error';
     return null;
   }
 }
@@ -1222,23 +1343,29 @@ function renderDashTxs(txs) {
   $('dash-more').innerHTML = '<div class="dash-more-row"><a href="#" onclick="switchView(\'history\');return false">view full history</a></div>';
 }
 
-async function loadDashboard() {
-  await fetchBalance();
+async function loadDashboard(opt) {
+  var gen = _fetchGen;
+  var skipHdr = opt && opt.skipHdr;
+  var bal = await fetchBalance({ skipHdr: skipHdr });
+  if (_fetchGen !== gen || bal === null) return false;
   loadTokenSymbols();
   try {
     var lim = dashTxLimit();
     var hist = await api('GET', '/history?limit=' + lim + '&offset=0');
+    if (_fetchGen !== gen) return false;
     var txs = hist.transactions || [];
     if (txs.length === 0) {
       $('dash-txs').innerHTML = '<div class="staging-empty">no transactions yet</div>';
       $('dash-more').innerHTML = '';
-      return;
+      return true;
     }
     renderDashTxs(txs);
-    fetchMissingSymbols(txs).then(function() { renderDashTxs(txs); });
+    fetchMissingSymbols(txs).then(function() { if (_fetchGen === gen) renderDashTxs(txs); });
+    return true;
   } catch (e) {
     $('dash-txs').innerHTML = '<div class="staging-empty">no transactions yet</div>';
     $('dash-more').innerHTML = '';
+    return true;
   }
 }
 
@@ -2345,8 +2472,8 @@ async function revealPrivateKeys() {
 async function loadSettings() {
   try {
     var w = await api('GET', '/wallet');
-    $('settings-rpc').value = w.rpc_url || 'http://46.101.86.250:8080';
-    $('settings-explorer').value = w.explorer_url || 'https://octrascan.io';
+    $('settings-rpc').value = w.rpc_url || RPC_MAINNET;
+    $('settings-explorer').value = w.explorer_url || EXPLORER_MAINNET;
   } catch (e) {}
   loadAccountList();
 }
@@ -2422,8 +2549,7 @@ function modalPrompt(title, label, opts) {
       $('modal-pin').style.display = 'block';
       $('modal-pin-input').value = '';
       $('pin-back-btn').style.display = '';
-      var unlockBtn = $('modal-pin').querySelector('.action-btn');
-      if (unlockBtn) unlockBtn.textContent = _modalPromptBtnText;
+      setModalUnlockState(_modalPromptBtnText, false);
       $('modal-pin-input').focus();
       $('modal-overlay').style.display = 'flex';
     } else {
@@ -2530,7 +2656,9 @@ function showImportAnother() {
   $('modal-overlay').style.display = 'flex';
 }
 
-async function doSaveSettings() {
+async function doSaveSettings(opts) {
+  opts = opts || {};
+  var deferClientRefresh = !!opts.deferClientRefresh;
   clearResult('settings-result');
   var rpc = $('settings-rpc').value.trim();
   var explorer = $('settings-explorer').value.trim();
@@ -2539,6 +2667,7 @@ async function doSaveSettings() {
     var resp = await api('POST', '/settings', { rpc_url: rpc, explorer_url: explorer });
     if (explorer) _explorerUrl = explorer.replace(/\/+$/, '');
     try { _rpcHost = new URL(rpc).hostname; } catch(e) { _rpcHost = rpc; }
+    _walletRpcNorm = normRpcUrl(rpc);
     if (resp && resp.cache_cleared) {
       _cachedBal = null;
       _historyOffset = 0;
@@ -2549,9 +2678,11 @@ async function doSaveSettings() {
       _unclaimedCount = 0;
       _tokenSymbols = {};
       _tokenDecimals = {};
-      fetchBalance();
-      if (document.querySelector('.nav-tabs a.active[data-view="dashboard"]'))
-        loadDashboard();
+      if (!deferClientRefresh) {
+        fetchBalance();
+        if (document.querySelector('.nav-tabs a.active[data-view="dashboard"]'))
+          loadDashboard();
+      }
       showResult('settings-result', true, 'saved · cache cleared');
     } else {
       showResult('settings-result', true, 'saved');
@@ -2595,10 +2726,23 @@ function hideAllModalPanels() {
   $('modal-result').innerHTML = '';
 }
 
+function setModalUnlockState(label, busy) {
+  var btn = $('modal-unlock-btn');
+  var inp = $('modal-pin-input');
+  var back = $('pin-back-btn');
+  if (btn) {
+    btn.textContent = label;
+    btn.disabled = !!busy;
+  }
+  if (inp) inp.disabled = !!busy;
+  if (back) back.disabled = !!busy;
+}
+
 function showPinEntry(showBack) {
   hideAllModalPanels();
   $('modal-pin').style.display = 'block';
   $('modal-pin-input').value = '';
+  setModalUnlockState('unlock', false);
   var backBtn = $('pin-back-btn');
   if (backBtn) backBtn.style.display = showBack ? '' : 'none';
   $('modal-pin-input').focus();
@@ -2650,8 +2794,7 @@ function modalBackFromPin() {
   if (_modalPromptResolve) {
     var cb = _modalPromptResolve;
     _modalPromptResolve = null;
-    var unlockBtn = $('modal-pin').querySelector('.action-btn');
-    if (unlockBtn) unlockBtn.textContent = 'unlock';
+    setModalUnlockState('unlock', false);
     hideAllModalPanels();
     $('modal-overlay').style.display = 'none';
     cb(null);
@@ -2730,14 +2873,14 @@ async function modalUnlock() {
   if (_modalPromptResolve) {
     var cb = _modalPromptResolve;
     _modalPromptResolve = null;
-    var unlockBtn = $('modal-pin').querySelector('.action-btn');
-    if (unlockBtn) unlockBtn.textContent = 'unlock';
+    setModalUnlockState('unlock', false);
     hideAllModalPanels();
     $('modal-overlay').style.display = 'none';
     cb(pin);
     return;
   }
-  $('modal-result').innerHTML = '<div class="loading">unlocking...</div>';
+  setModalUnlockState('unlocking...', true);
+  var unlockFailed = false;
   try {
     var unlockBody = { pin: pin };
     if (_selectedUnlockAddr) unlockBody.addr = _selectedUnlockAddr;
@@ -2749,9 +2892,12 @@ async function modalUnlock() {
     await loadWalletInfo();
     startRefreshTimer();
   } catch (e) {
+    unlockFailed = true;
     $('modal-result').innerHTML = '<div class="result-msg result-error">' + e.message + '</div>';
     $('modal-pin-input').value = '';
-    $('modal-pin-input').focus();
+  } finally {
+    setModalUnlockState('unlock', false);
+    if (unlockFailed) $('modal-pin-input').focus();
   }
 }
 
@@ -2811,6 +2957,7 @@ async function loadWalletInfo() {
     _walletAddr = w.address || w.addr || '';
     if (w.explorer_url) _explorerUrl = w.explorer_url.replace(/\/+$/, '');
     if (w.rpc_url) try { _rpcHost = new URL(w.rpc_url).hostname; } catch(e) { _rpcHost = w.rpc_url; }
+    _walletRpcNorm = w.rpc_url ? normRpcUrl(w.rpc_url) : '';
     _hasMasterSeed = !!w.has_master_seed;
     $('hdr-addr').innerHTML = '<span class="mono">' + _walletAddr + '</span>';
     $('hdr-logout').style.display = '';
@@ -2819,23 +2966,24 @@ async function loadWalletInfo() {
     loadDashboard();
   } catch (e) {
     $('hdr-addr').textContent = 'error loading wallet';
-    $('hdr-status').textContent = 'error';
-    $('hdr-status').className = 'right error';
+    $('hdr-status-label').textContent = 'error';
+    $('hdr-status').className = 'right hdr-net-toggle error';
   }
 }
 
 async function doLogout() {
   try { await api('POST', '/wallet/lock', {}); } catch (e) {}
-  if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+  pauseRefreshTimer();
   _walletAddr = '';
   _cachedBal = null;
   _encryptedBalanceRaw = 0;
+  _walletRpcNorm = '';
   _hasMasterSeed = false;
   $('hdr-logout').style.display = 'none';
   $('hdr-dev').style.display = 'none';
   $('hdr-addr').textContent = 'locked';
-  $('hdr-status').textContent = 'locked';
-  $('hdr-status').className = 'right';
+  $('hdr-status-label').textContent = 'locked';
+  $('hdr-status').className = 'right hdr-net-toggle';
   switchView('dashboard');
   init();
 }
@@ -2850,6 +2998,10 @@ function startRefreshTimer() {
     var dash = $('view-dashboard');
     if (dash && dash.classList.contains('active')) loadDashboard();
   }, 15000);
+}
+
+function pauseRefreshTimer() {
+  if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
 }
 
 

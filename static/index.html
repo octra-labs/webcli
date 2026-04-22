@@ -31,7 +31,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octra_wallet</title>
-<link rel="stylesheet" href="style.css?v=2">
+<link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
 
@@ -83,7 +83,7 @@
         <input type="password" id="modal-pin-input" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="off">
       </div>
       <div class="action-row">
-        <button class="action-btn" onclick="modalUnlock()">unlock</button>
+        <button type="button" class="action-btn" id="modal-unlock-btn" onclick="modalUnlock()">unlock</button>
         <button class="action-btn" id="pin-back-btn" style="background:#8C9DB6;display:none" onclick="modalBackFromPin()">back</button>
       </div>
     </div>
@@ -113,7 +113,14 @@
     <div class="subtitle" id="hdr-addr">loading...</div>
   </div>
   <div class="hdr-right-group">
-    <div class="right" id="hdr-status">connecting...</div>
+    <div class="hdr-status-wrap">
+      <button type="button" class="right hdr-net-toggle" id="hdr-status" onclick="toggleHdrNetworkMenu(event)"><span id="hdr-status-label">connecting...</span></button>
+      <div id="hdr-network-menu" class="hdr-network-menu" style="display:none">
+        <button type="button" class="hdr-network-item" id="hdr-net-mainnet" onclick="hdrNetworkPickMainnet()">mainnet</button>
+        <button type="button" class="hdr-network-item" id="hdr-net-devnet" onclick="hdrNetworkPickDevnet()">devnet</button>
+        <button type="button" class="hdr-network-item" onclick="hdrNetworkPickCustom()">custom...</button>
+      </div>
+    </div>
     <button class="right logout-btn" id="hdr-dev" onclick="switchView('dev')" style="display:none">dev tools</button>
     <button class="right logout-btn" id="hdr-logout" onclick="doLogout()" style="display:none">logout</button>
   </div>
@@ -536,6 +543,6 @@
 <div class="footer">octra_wallet | 2026 | alpha ver. - 0.04.10</div>
 
 </div>
-<script src="wallet.js?v=10"></script>
+<script src="wallet.js?v=20"></script>
 </body>
 </html>
