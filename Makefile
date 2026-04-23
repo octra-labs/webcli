@@ -93,16 +93,16 @@ else
 		./setup.sh --deps-only || { \
 			echo ''; \
 			echo 'auto-install failed. install manually:'; \
-			echo 'sudo apt install libleveldb-dev libssl-dev   (debian/ubuntu)'; \
-			echo 'brew install leveldb openssl@3               (macos)'; \
-			echo 'setup.bat from cmd.exe                       (windows)'; \
+			echo 'sudo apt install libleveldb-dev libssl-dev (debian/ubuntu)'; \
+			echo 'brew install leveldb openssl@3 (macos)'; \
+			echo 'setup.bat from cmd.exe (windows)'; \
 			exit 1; \
 		}; \
 	else \
 		echo 'setup.sh not found. install manually:'; \
-		echo 'sudo apt install libleveldb-dev libssl-dev       (debian/ubuntu)'; \
-		echo 'brew install leveldb openssl@3                   (macos)'; \
-		echo 'setup.bat from cmd.exe                           (windows)'; \
+		echo 'sudo apt install libleveldb-dev libssl-dev (debian/ubuntu)'; \
+		echo 'brew install leveldb openssl@3 (macos)'; \
+		echo 'setup.bat from cmd.exe (windows)'; \
 		exit 1; \
 	fi
 	@ok=no; for p in $(LEVELDB_PATHS); do [ -f "$$p" ] && ok=yes; done; \
