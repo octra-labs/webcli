@@ -72,7 +72,43 @@ endif
 CXXFLAGS+=-I$(PVAC_DIR)
 LIBPVAC:=$(PVAC_BUILD)/libpvac.$(SHARED_EXT)
 
-all: $(TARGET)
+all: check-deps $(TARGET)
+
+LEVELDB_PATHS:=/usr/include/leveldb/db.h /usr/local/include/leveldb/db.h /opt/homebrew/include/leveldb/db.h /opt/local/include/leveldb/db.h $(LDB_PREFIX)/include/leveldb/db.h
+OPENSSL_PATHS:=/usr/include/openssl/evp.h /usr/local/include/openssl/evp.h /opt/homebrew/include/openssl/evp.h /opt/local/include/openssl/evp.h $(SSL_PREFIX)/include/openssl/evp.h
+
+HAVE_LEVELDB:=$(shell for p in $(LEVELDB_PATHS); do [ -f "$$p" ] && { echo yes; exit 0; }; done; echo no)
+HAVE_OPENSSL:=$(shell for p in $(OPENSSL_PATHS); do [ -f "$$p" ] && { echo yes; exit 0; }; done; echo no)
+
+check-deps:
+ifeq ($(OCTRA_SKIP_AUTOSETUP),)
+ifeq ($(HAVE_LEVELDB)$(HAVE_OPENSSL),yesyes)
+	@true
+else
+	@echo 'missing dependencies (leveldb=$(HAVE_LEVELDB) openssl=$(HAVE_OPENSSL))'
+	@echo 'running ./setup.sh --deps-only to install...'
+	@echo ''
+	@if [ -x ./setup.sh ]; then \
+		./setup.sh --deps-only || { \
+			echo ''; \
+			echo 'auto-install failed. install manually:'; \
+			echo 'sudo apt install libleveldb-dev libssl-dev (debian/ubuntu)'; \
+			echo 'brew install leveldb openssl@3 (macos)'; \
+			exit 1; \
+		}; \
+	else \
+		echo 'setup.sh not found. install manually:'; \
+		echo '  sudo apt install libleveldb-dev libssl-dev'; \
+		exit 1; \
+	fi
+	@ok=no; for p in $(LEVELDB_PATHS); do [ -f "$$p" ] && ok=yes; done; \
+		[ "$$ok" = "yes" ] || { echo 'error: leveldb still missing after setup.sh'; exit 1; }
+	@ok=no; for p in $(OPENSSL_PATHS); do [ -f "$$p" ] && ok=yes; done; \
+		[ "$$ok" = "yes" ] || { echo 'error: openssl still missing after setup.sh'; exit 1; }
+endif
+else
+	@true
+endif
 
 $(PVAC_BUILD):
 	@mkdir -p $(PVAC_BUILD)
@@ -104,4 +140,4 @@ clean:
 run: $(TARGET)
 	./$(TARGET) 8420
 
-.PHONY: all clean run
+.PHONY: all clean run check-deps

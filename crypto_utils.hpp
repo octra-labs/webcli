@@ -41,6 +41,7 @@
 #endif
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/bn.h>
 
 extern "C" {
 #include "lib/tweetnacl.h"
@@ -98,7 +99,7 @@ static const uint32_t K[64] = {
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 };
 
-} // namespace detail
+}
 
 inline std::array<uint8_t, 32> sha256(const uint8_t* data, size_t len) {
     using namespace detail;
@@ -147,7 +148,7 @@ inline std::array<uint8_t, 32> sha256(const uint8_t* data, size_t len) {
 
     std::array<uint8_t, 32> out;
     for (int i = 0; i < 8; i++) {
-        out[i * 4] = (uint8_t)(h[i] >> 24);
+        out[i * 4]     = (uint8_t)(h[i] >> 24);
         out[i * 4 + 1] = (uint8_t)(h[i] >> 16);
         out[i * 4 + 2] = (uint8_t)(h[i] >> 8);
         out[i * 4 + 3] = (uint8_t)(h[i]);
@@ -265,6 +266,59 @@ inline void ed25519_pk_to_curve25519(const uint8_t ed_sk[64], uint8_t x_pk[32]) 
     ed25519_sk_to_curve25519(ed_sk, x_sk);
     crypto_scalarmult_base(x_pk, x_sk);
 }
+
+
+
+// dont touch 
+
+inline bool ed25519_pub_to_x25519(const uint8_t ed_pub[32], uint8_t x_pub[32]) {
+    BN_CTX* ctx = BN_CTX_new();
+    BIGNUM *p = BN_new(), *y = BN_new(), *one = BN_new();
+    BIGNUM *one_plus_y = BN_new(), *one_minus_y = BN_new();
+    BIGNUM *u = BN_new(), *inv = BN_new(), *p_minus_2 = BN_new();
+    bool ok = false;
+    if (!ctx || !p || !y || !one || !one_plus_y || !one_minus_y || !u || !inv || !p_minus_2) goto done;
+
+    if (!BN_set_bit(p, 255)) goto done;
+    if (!BN_sub_word(p, 19)) goto done;
+    BN_one(one);
+
+    {
+        uint8_t y_be[32];
+        for (int i = 0; i < 32; ++i) y_be[i] = ed_pub[31 - i];
+        y_be[0] &= 0x7F;
+        if (!BN_bin2bn(y_be, 32, y)) goto done;
+    }
+
+    if (!BN_mod_add(one_plus_y, one, y, p, ctx)) goto done;
+    if (!BN_mod_sub(one_minus_y, one, y, p, ctx)) goto done;
+    if (!BN_copy(p_minus_2, p)) goto done;
+    if (!BN_sub_word(p_minus_2, 2)) goto done;
+    if (!BN_mod_exp(inv, one_minus_y, p_minus_2, p, ctx)) goto done;
+    if (!BN_mod_mul(u, one_plus_y, inv, p, ctx)) goto done;
+
+    {
+        uint8_t u_be[32] = {0};
+        if (BN_bn2binpad(u, u_be, 32) != 32) goto done;
+        for (int i = 0; i < 32; ++i) x_pub[i] = u_be[31 - i];
+    }
+    ok = true;
+
+done:
+    BN_free(p_minus_2);
+    BN_free(inv);
+    BN_free(u);
+    BN_free(one_minus_y);
+    BN_free(one_plus_y);
+    BN_free(one);
+    BN_free(y);
+    BN_free(p);
+    BN_CTX_free(ctx);
+    return ok;
+}
+
+
+// !!
 
 inline void secure_zero(void* ptr, size_t len) {
     volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
@@ -401,7 +455,7 @@ inline std::string generate_mnemonic_12() {
     uint8_t entropy[16];
     randombytes(entropy, 16);
     auto hash = sha256(entropy, 16);
-    uint8_t bits[17]; // 128 + 8 = 136 bits available
+    uint8_t bits[17];
     memcpy(bits, entropy, 16);
     bits[16] = hash[0];
     secure_zero(entropy, 16);
@@ -449,7 +503,7 @@ inline bool validate_mnemonic(const std::string& mnemonic) {
 inline bool looks_like_mnemonic(const std::string& input) {
     int spaces = 0;
     for (char c : input) if (c == ' ') spaces++;
-    return spaces >= 11; // at least 12 words
+    return spaces >= 11;
 }
 
-} // namespace octra
+}

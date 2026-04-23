@@ -25,9 +25,6 @@
               2025-2026 Julia L.
 */
 
-
-// mini-IDE pop up promt window with all things inside [lambda0xe]
-
 function idePrompt(title, message, defaultVal) {
   return new Promise(function(resolve) {
     var ov = document.createElement('div');
@@ -2347,6 +2344,7 @@ async function loadSettings() {
     var w = await api('GET', '/wallet');
     $('settings-rpc').value = w.rpc_url || 'http://46.101.86.250:8080';
     $('settings-explorer').value = w.explorer_url || 'https://octrascan.io';
+    $('settings-bridge-signer').value = w.bridge_signer_url || 'https://relayer-002838819188.octra.network';
   } catch (e) {}
   loadAccountList();
 }
@@ -2534,9 +2532,10 @@ async function doSaveSettings() {
   clearResult('settings-result');
   var rpc = $('settings-rpc').value.trim();
   var explorer = $('settings-explorer').value.trim();
+  var bridgeSigner = $('settings-bridge-signer').value.trim();
   if (!rpc) { showResult('settings-result', false, 'rpc url required'); return; }
   try {
-    var resp = await api('POST', '/settings', { rpc_url: rpc, explorer_url: explorer });
+    var resp = await api('POST', '/settings', { rpc_url: rpc, explorer_url: explorer, bridge_signer_url: bridgeSigner });
     if (explorer) _explorerUrl = explorer.replace(/\/+$/, '');
     try { _rpcHost = new URL(rpc).hostname; } catch(e) { _rpcHost = rpc; }
     if (resp && resp.cache_cleared) {
@@ -2815,6 +2814,7 @@ async function loadWalletInfo() {
     $('hdr-addr').innerHTML = '<span class="mono">' + _walletAddr + '</span>';
     $('hdr-logout').style.display = '';
     $('hdr-dev').style.display = '';
+    $('hdr-apps').style.display = '';
     fetchFees();
     loadDashboard();
   } catch (e) {
@@ -2833,6 +2833,7 @@ async function doLogout() {
   _hasMasterSeed = false;
   $('hdr-logout').style.display = 'none';
   $('hdr-dev').style.display = 'none';
+  $('hdr-apps').style.display = 'none';
   $('hdr-addr').textContent = 'locked';
   $('hdr-status').textContent = 'locked';
   $('hdr-status').className = 'right';

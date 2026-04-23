@@ -114,6 +114,7 @@
   </div>
   <div class="hdr-right-group">
     <div class="right" id="hdr-status">connecting...</div>
+    <button class="right logout-btn" id="hdr-apps" onclick="switchView('apps')" style="display:none">apps</button>
     <button class="right logout-btn" id="hdr-dev" onclick="switchView('dev')" style="display:none">dev tools</button>
     <button class="right logout-btn" id="hdr-logout" onclick="doLogout()" style="display:none">logout</button>
   </div>
@@ -278,6 +279,13 @@
 
     <div class="section-title">token transactions</div>
     <div id="tok-txs"><div class="staging-empty">switch to a token to see transactions</div></div>
+  </div>
+
+  <div class="view" id="view-apps">
+    <div class="ide-picker-title">apps</div>
+    <div class="ide-picker-actions">
+      <button class="action-btn" onclick="window.open('bridge.html','_blank')"><span class="tpl-label">bridge</span><span class="tpl-desc">alpha version of the experimental bridge between octra &lt;&gt; eth</span></button>
+    </div>
   </div>
 
   <div class="view" id="view-dev">
@@ -483,7 +491,7 @@
   </div>
 
   <div class="view" id="view-settings">
-    <div class="section-title">node settings</div>
+    <div class="section-title">network settings</div>
     <div class="form-area">
       <div class="form-row">
         <label>rpc url</label>
@@ -492,6 +500,10 @@
       <div class="form-row">
         <label>explorer url</label>
         <input type="text" id="settings-explorer" placeholder="https://devnet.octrascan.io">
+      </div>
+      <div class="form-row">
+        <label>relayer url</label>
+        <input type="text" id="settings-bridge-signer" placeholder="https://relayer-002838819188.octra.network">
       </div>
       <div class="action-row">
         <button class="action-btn" onclick="doSaveSettings()">save</button>

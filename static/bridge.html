@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; connect-src 'self' http://178.62.60.204:8090 https://ethereum-sepolia-rpc.publicnode.com https://*.infura.io https://*.publicnode.com wss://* ws://*;">
+<title>octra bridge</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-height:100vh;display:flex;justify-content:center;align-items:flex-start;padding:40px 16px;font-size:12px;letter-spacing:0.5px}
+.bridge-wrap{width:100%;max-width:460px;background:#fff;border:1px solid #D0D7E2;overflow:hidden}
+.bridge-header{padding:14px 20px;border-bottom:1px solid #E5E9EF;display:flex;align-items:center;justify-content:space-between}
+.bridge-header h1{font-size:14px;font-weight:600;color:#2B3A52}
+.connect-section{border-bottom:1px solid #E5E9EF}
+.connect-row{display:flex;align-items:center;justify-content:space-between;padding:10px 20px;border-bottom:1px solid #F0F2F5}
+.connect-row:last-child{border-bottom:none}
+.connect-row .cr-left{display:flex;align-items:center;gap:8px}
+.connect-row .cr-chain{font-size:12px;font-weight:600;color:#2B3A52}
+.connect-row .cr-addr{font-size:10px;font-family:monospace;color:#4CAF50;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+.connect-row .cr-addr.none{color:#E57373}
+.connect-row .cr-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.connect-row .cr-dot.on{background:#4CAF50}
+.connect-row .cr-dot.off{background:#E57373}
+.connect-btn{padding:5px 12px;font-size:11px;font-weight:500;border:1px solid #D0D7E2;background:#fff;color:#3B567F;cursor:pointer;font-family:Tahoma,arial,sans-serif;letter-spacing:0.5px}
+.connect-btn:hover{background:#F7F8FA}
+.connect-btn.connected{border-color:#4CAF50;color:#4CAF50;cursor:default}
+.dir-tabs{display:flex;border-bottom:1px solid #E5E9EF}
+.dir-tabs button{flex:1;padding:10px;font-size:12px;font-weight:500;border:none;background:#fff;cursor:pointer;color:#8C9DB6;border-bottom:2px solid transparent;transition:all 0.15s;font-family:Tahoma,arial,sans-serif;letter-spacing:0.5px}
+.dir-tabs button.active{color:#3B567F;border-bottom-color:#3B567F}
+.dir-tabs button:hover{background:#F7F8FA}
+.chain-bar{display:flex;align-items:center;gap:0;border-bottom:1px solid #E5E9EF}
+.chain-box{flex:1;padding:12px 20px;text-align:center}
+.chain-box .chain-label{font-size:10px;color:#8C9DB6;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
+.chain-box .chain-name{font-size:13px;font-weight:600;color:#2B3A52}
+.chain-box .chain-token{font-size:11px;color:#516E9A;margin-top:2px}
+.chain-arrow{width:40px;display:flex;align-items:center;justify-content:center;font-size:16px;color:#8C9DB6;flex-shrink:0}
+.notice-bar{padding:10px 20px;background:#F7F8FA;border-bottom:1px solid #E5E9EF;font-size:11px;color:#8C9DB6;line-height:170%}
+.notice-bar .disclaimer{color:#B0B8C8;font-size:10px;margin-top:4px}
+.bridge-body{padding:16px 20px}
+.input-group{margin-bottom:14px}
+.input-group label{display:block;font-size:11px;color:#8C9DB6;letter-spacing:0.5px;margin-bottom:4px}
+.input-row{display:flex;align-items:center;border:1px solid #C0C6D0;overflow:hidden;transition:border-color 0.15s}
+.input-row:focus-within{border-color:#3B567F}
+.input-row input{flex:1;padding:10px;font-size:14px;font-family:monospace;border:none;outline:none;background:transparent}
+.input-row .token-label{padding:10px 14px;font-size:12px;font-weight:600;color:#3B567F;background:#F7F8FA;border-left:1px solid #E5E9EF;white-space:nowrap}
+.max-btn{padding:3px 7px;font-size:10px;color:#3B567F;background:#E5E9EF;border:none;cursor:pointer;margin-right:6px;font-weight:600}
+.max-btn:hover{background:#D0D7E2}
+.output-box{padding:10px;background:#F7F8FA;border:1px solid #E5E9EF;font-family:monospace;font-size:14px;color:#2B3A52;min-height:40px;display:flex;align-items:center;justify-content:space-between}
+.output-box .out-val{font-weight:600}
+.output-box .out-token{color:#8C9DB6;font-size:12px}
+.info-rows{margin:14px 0;font-size:12px;color:#516E9A}
+.info-rows .info-row{display:flex;justify-content:space-between;padding:3px 0}
+.info-rows .info-row .val{font-family:monospace;color:#2B3A52}
+.bridge-btn{width:100%;padding:12px;font-size:13px;font-weight:600;border:none;cursor:pointer;background:#3B567F;color:#fff;transition:background 0.15s;font-family:Tahoma,arial,sans-serif;letter-spacing:0.5px}
+.bridge-btn:hover{background:#2B4060}
+.bridge-btn:disabled{background:#C0C6D0;cursor:not-allowed}
+.bridge-btn.loading{opacity:0.7;pointer-events:none}
+.balance-bar{padding:10px 20px;border-top:1px solid #E5E9EF;font-size:12px;color:#8C9DB6;display:flex;justify-content:space-between}
+.balance-bar .bal-val{font-family:monospace;color:#2B3A52;font-weight:500}
+.status-msg{padding:10px 20px;font-size:12px;text-align:center;display:none}
+.status-msg.ok{color:#4CAF50;display:block}
+.status-msg.err{color:#E57373;display:block}
+.status-msg.info{color:#516E9A;display:block}
+.modal-bg{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);display:none;justify-content:center;align-items:center;z-index:100}
+.modal-bg.show{display:flex}
+.modal-box{background:#fff;padding:20px;width:90%;max-width:400px;box-shadow:0 4px 20px rgba(0,0,0,0.15);border:1px solid #D0D7E2}
+.modal-box h2{font-size:14px;margin-bottom:14px;color:#2B3A52;font-weight:600}
+.modal-box .confirm-detail{margin-bottom:14px;font-size:12px;color:#516E9A;line-height:1.7}
+.modal-box .confirm-detail .cd-row{display:flex;justify-content:space-between;padding:3px 0}
+.modal-box .confirm-detail .cd-val{font-family:monospace;font-weight:400;color:#2B3A52;word-break:break-all;max-width:220px;text-align:right}
+.modal-btns{display:flex;gap:8px}
+.modal-btns button{flex:1;padding:10px;font-size:12px;font-weight:500;border:none;cursor:pointer;font-family:Tahoma,arial,sans-serif;letter-spacing:0.5px}
+.modal-btns .btn-cancel{background:#E5E9EF;color:#516E9A}
+.modal-btns .btn-cancel:hover{background:#D0D7E2}
+.modal-btns .btn-confirm{background:#3B567F;color:#fff}
+.modal-btns .btn-confirm:hover{background:#2B4060}
+.progress-steps{margin:10px 0;font-size:12px;color:#8C9DB6}
+.progress-steps .step{padding:4px 0;display:flex;align-items:center;gap:8px}
+.progress-steps .step .dot{width:8px;height:8px;border-radius:50%;background:#C0C6D0;flex-shrink:0}
+.progress-steps .step.active .dot{background:#3B567F}
+.progress-steps .step.done .dot{background:#4CAF50}
+.progress-steps .step.fail .dot{background:#E57373}
+.progress-steps .step.active{color:#3B567F;font-weight:500}
+.progress-steps .step.done{color:#4CAF50}
+.progress-steps .step.fail{color:#E57373}
+.warning-box{margin:10px 0;padding:10px;background:#FFF8E1;border:1px solid #FFE082;font-size:11px;color:#795548;line-height:160%}
+.footer-bar{padding:10px 20px;border-top:1px solid #E5E9EF;text-align:center;font-size:10px;color:#8C9DB6}
+.footer-bar a{color:#8C9DB6;text-decoration:none;border-bottom:1px solid #D0D7E2}
+@media(max-width:500px){body{padding:0;align-items:stretch}.bridge-wrap{border:none;min-height:100vh}}
+</style>
+</head>
+<body>
+<div class="bridge-wrap" id="app">
+  <div class="bridge-header">
+    <h1>octra bridge</h1>
+    <span style="font-size:10px;color:#8C9DB6">v1 experimental</span>
+  </div>
+
+  <div class="connect-section">
+    <div class="connect-row">
+      <div class="cr-left">
+        <span class="cr-dot off" id="octra-dot"></span>
+        <span class="cr-chain">octra</span>
+        <span class="cr-addr none" id="octra-addr">not connected</span>
+      </div>
+      <button class="connect-btn" id="octra-connect-btn" onclick="connectOctra()">connect</button>
+    </div>
+    <div class="connect-row">
+      <div class="cr-left">
+        <span class="cr-dot off" id="eth-dot"></span>
+        <span class="cr-chain">ethereum</span>
+        <span class="cr-addr none" id="eth-addr">not connected</span>
+      </div>
+      <button class="connect-btn" id="eth-connect-btn" onclick="connectEth()">connect MetaMask</button>
+    </div>
+  </div>
+
+  <div class="dir-tabs">
+    <button id="tab-o2e" class="active" onclick="setDir('o2e')">OCT -> wOCT</button>
+    <button id="tab-e2o" onclick="setDir('e2o')">wOCT -> OCT</button>
+  </div>
+
+  <div class="chain-bar">
+    <div class="chain-box">
+      <div class="chain-label">from</div>
+      <div class="chain-name" id="from-chain">octra</div>
+      <div class="chain-token" id="from-token">OCT</div>
+    </div>
+    <div class="chain-arrow">-></div>
+    <div class="chain-box">
+      <div class="chain-label">to</div>
+      <div class="chain-name" id="to-chain">ethereum</div>
+      <div class="chain-token" id="to-token">wOCT</div>
+    </div>
+  </div>
+
+  <div class="notice-bar">
+    <div id="notice-text">lock OCT on octra, receive wOCT on ethereum</div>
+  </div>
+
+  <div class="bridge-body">
+    <div class="input-group">
+      <label>amount</label>
+      <div class="input-row">
+        <input type="text" id="bridge-amount" placeholder="0.0" inputmode="decimal" autocomplete="off" oninput="validateForm()">
+        <button class="max-btn" onclick="setMax()">max</button>
+        <div class="token-label" id="input-token">OCT</div>
+      </div>
+    </div>
+
+    <div class="input-group" id="recipient-group">
+      <label id="recipient-label">recipient</label>
+      <div class="input-row">
+        <input type="text" id="recipient" placeholder="0x..." autocomplete="off" spellcheck="false" oninput="validateForm()">
+      </div>
+    </div>
+
+    <div class="input-group">
+      <label>you will receive</label>
+      <div class="output-box">
+        <span class="out-val" id="output-val">0</span>
+        <span class="out-token" id="output-token">wOCT</span>
+      </div>
+    </div>
+
+    <div class="info-rows">
+      <div class="info-row"><span>fee</span><span class="val">0</span></div>
+      <div class="info-row"><span>estimated time</span><span class="val">~2 min</span></div>
+    </div>
+
+    <button class="bridge-btn" id="bridge-btn" onclick="doBridge()" disabled>connect both wallets</button>
+  </div>
+
+  <div id="status-area" class="status-msg"></div>
+  <div id="progress-area" class="progress-steps" style="display:none;padding:0 20px 14px"></div>
+
+  <div class="balance-bar">
+    <div>OCT: <span class="bal-val" id="bal-oct">-</span></div>
+    <div>wOCT: <span class="bal-val" id="bal-woct">-</span></div>
+  </div>
+
+  <div class="footer-bar">
+    octra bridge v1 | this project is in beta | use at your own risk<br>
+    <a href="https://octrascan.io" target="_blank">octra explorer</a> |
+    <a href="https://etherscan.io" target="_blank">etherscan</a>
+  </div>
+
+  <div class="modal-bg" id="confirm-modal">
+    <div class="modal-box">
+      <h2 id="cm-title">confirm bridge</h2>
+      <div class="confirm-detail">
+        <div class="cd-row"><span>action</span><span class="cd-val" id="cm-action"></span></div>
+        <div class="cd-row"><span>amount</span><span class="cd-val" id="cm-amount"></span></div>
+        <div class="cd-row"><span>from</span><span class="cd-val" id="cm-from"></span></div>
+        <div class="cd-row"><span>to</span><span class="cd-val" id="cm-to"></span></div>
+        <div class="cd-row"><span>receive</span><span class="cd-val" id="cm-receive"></span></div>
+      </div>
+      <div class="warning-box" id="cm-warning"></div>
+      <div class="modal-btns" style="margin-top:14px">
+        <button class="btn-cancel" onclick="closeModal()">cancel</button>
+        <button class="btn-confirm" id="cm-confirm-btn" onclick="confirmBridge()">confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-bg" id="wallet-modal">
+    <div class="modal-box">
+      <h2>connect wallet</h2>
+      <div id="wallet-list"></div>
+      <div class="modal-btns" style="margin-top:14px">
+        <button class="btn-cancel" onclick="closeWalletModal()">cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+var BRIDGE_VAULT = 'oct5MrNfjiXFNRDLwsodn8Zm9hDKNGAYt3eQDCQ52bSpCHq';
+var WOCT_ADDR = '0x4647e1fE715c9e23959022C2416C71867F5a6E80';
+var ETH_BRIDGE = '0xE7eD69b852fd2a1406080B26A37e8E04e7dA4caE';
+var SIGNER_URL = '/api/bridge/signer';
+var SEPOLIA_CHAIN_ID = '0xaa36a7';
+var OCT_DECIMALS = 6;
+
+var _dir = 'o2e';
+var _octraAddr = '';
+var _ethAddr = '';
+var _octBalance = '0';
+var _woctBalance = '0';
+var _ethProvider = null;
+
+async function wcli(method, path, body) {
+  var opts = { method: method, headers: {} };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  var res = await fetch('/api' + path, opts);
+  if (!res.ok) throw new Error('WebCLI error: ' + res.status);
+  return res.json();
+}
+
+async function connectOctra() {
+  try {
+    var st = await wcli('GET', '/wallet/status');
+    if (!st.loaded) { showStatus('err', 'unlock your wallet in webcli first'); return; }
+    var info = await wcli('GET', '/wallet');
+    _octraAddr = info.address;
+    $('octra-addr').textContent = _octraAddr.substring(0, 12) + '...' + _octraAddr.slice(-4);
+    $('octra-addr').classList.remove('none');
+    $('octra-dot').classList.replace('off', 'on');
+    $('octra-connect-btn').textContent = 'connected';
+    $('octra-connect-btn').classList.add('connected');
+    await refreshBalances();
+    validateForm();
+  } catch(e) { showStatus('err', 'cannot connect to webcli'); }
+}
+
+var _detectedWallets = [];
+var _eip6963Providers = [];
+
+window.addEventListener('eip6963:announceProvider', function(e) {
+  _eip6963Providers.push({ name: e.detail.info.name, icon: e.detail.info.icon, provider: e.detail.provider, rdns: e.detail.info.rdns });
+});
+window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+async function connectEth() {
+  setTimeout(function() { _connectEthInner(); }, 100);
+}
+
+async function _connectEthInner() {
+  if (_eip6963Providers.length > 0) {
+    _detectedWallets = _eip6963Providers.map(function(w) { return { name: w.name, provider: w.provider, icon: w.icon }; });
+  } else if (window.ethereum) {
+    _detectedWallets = [{ name: window.ethereum.isMetaMask ? 'MetaMask' : 'Wallet', provider: window.ethereum, icon: null }];
+  } else {
+    showStatus('err', 'no EVM wallet found. install MetaMask.');
+    return;
+  }
+
+  if (_detectedWallets.length === 1) {
+    await connectWithProvider(_detectedWallets[0]);
+    return;
+  }
+
+  var html = '';
+  _detectedWallets.forEach(function(w, i) {
+    var iconHtml = w.icon ? '<img src="' + w.icon + '" width="20" height="20" style="vertical-align:middle;margin-right:8px;border-radius:4px">' : '';
+    html += '<button onclick="selectWallet(' + i + ')" style="display:flex;align-items:center;width:100%;padding:10px;margin:4px 0;font-size:13px;font-weight:500;border:1px solid #D0D7E2;background:#fff;color:#2B3A52;cursor:pointer;text-align:left;font-family:Tahoma,arial,sans-serif">' + iconHtml + esc(w.name) + '</button>';
+  });
+  $('wallet-list').innerHTML = html;
+  $('wallet-modal').classList.add('show');
+}
+
+function closeWalletModal() { $('wallet-modal').classList.remove('show'); }
+
+async function selectWallet(idx) {
+  $('wallet-modal').classList.remove('show');
+  await connectWithProvider(_detectedWallets[idx]);
+}
+
+async function connectWithProvider(w) {
+  _ethProvider = w.provider;
+  try {
+    var accounts = await _ethProvider.request({ method: 'eth_requestAccounts' });
+    if (!accounts.length) return;
+    _ethAddr = accounts[0];
+    $('eth-addr').textContent = _ethAddr.substring(0, 8) + '...' + _ethAddr.slice(-4);
+    $('eth-addr').classList.remove('none');
+    $('eth-dot').classList.replace('off', 'on');
+    $('eth-connect-btn').textContent = w.name;
+    $('eth-connect-btn').classList.add('connected');
+    if (_dir === 'o2e') $('recipient').value = _ethAddr;
+    else $('recipient').value = _octraAddr || '';
+    try { localStorage.setItem('bridge_eth_wallet', w.name); } catch(e) {}
+    await refreshBalances();
+    validateForm();
+    _ethProvider.on('accountsChanged', function(accs) {
+      if (accs.length) { _ethAddr = accs[0]; $('eth-addr').textContent = _ethAddr.substring(0, 8) + '...' + _ethAddr.slice(-4); refreshBalances(); validateForm(); }
+    });
+  } catch(e) { showStatus('err', w.name + ': ' + e.message); }
+}
+
+async function refreshBalances() {
+  if (_octraAddr) {
+    try { var b = await wcli('GET', '/balance'); _octBalance = b.public_balance || b.balance_raw || '0'; $('bal-oct').textContent = fmtU(_octBalance, OCT_DECIMALS); } catch(e) {}
+  }
+  if (_ethAddr && WOCT_ADDR) {
+    try {
+      var data = '0x70a08231000000000000000000000000' + _ethAddr.substring(2);
+      var result = await _ethProvider.request({ method: 'eth_call', params: [{ to: WOCT_ADDR, data: data }, 'latest'] });
+      _woctBalance = (!result || result === '0x' || result === '0x0') ? '0' : BigInt(result).toString();
+      $('bal-woct').textContent = fmtU(_woctBalance, OCT_DECIMALS);
+    } catch(e) { _woctBalance = '0'; $('bal-woct').textContent = '0'; }
+  }
+}
+
+function setDir(d) {
+  _dir = d;
+  $('tab-o2e').className = d === 'o2e' ? 'active' : '';
+  $('tab-e2o').className = d === 'e2o' ? 'active' : '';
+  if (d === 'o2e') {
+    $('from-chain').textContent = 'octra'; $('from-token').textContent = 'OCT';
+    $('to-chain').textContent = 'ethereum'; $('to-token').textContent = 'wOCT';
+    $('input-token').textContent = 'OCT'; $('output-token').textContent = 'wOCT';
+    $('recipient-label').textContent = 'ethereum recipient';
+    $('recipient').placeholder = '0x...';
+    $('recipient').value = _ethAddr || '';
+    $('notice-text').textContent = 'lock OCT on octra, receive wOCT on ethereum';
+  } else {
+    $('from-chain').textContent = 'ethereum'; $('from-token').textContent = 'wOCT';
+    $('to-chain').textContent = 'octra'; $('to-token').textContent = 'OCT';
+    $('input-token').textContent = 'wOCT'; $('output-token').textContent = 'OCT';
+    $('recipient-label').textContent = 'octra recipient';
+    $('recipient').placeholder = 'oct...';
+    $('recipient').value = _octraAddr || '';
+    $('notice-text').textContent = 'burn wOCT on ethereum, receive OCT on octra';
+  }
+  $('bridge-amount').value = '';
+  $('output-val').textContent = '0';
+  clearStatus();
+  validateForm();
+}
+
+function validateForm() {
+  var btn = $('bridge-btn');
+  var amtStr = $('bridge-amount').value.trim();
+  var recip = $('recipient').value.trim();
+  var amt = parseFloat(amtStr);
+  $('output-val').textContent = (amtStr && !isNaN(amt) && amt > 0) ? addCommas(amtStr) : '0';
+  if (!_octraAddr || !_ethAddr) { btn.disabled = true; btn.textContent = 'connect both wallets'; return; }
+  if (!amtStr || isNaN(amt) || amt <= 0) { btn.disabled = true; btn.textContent = 'enter amount'; return; }
+  var rawAmt = parseU(amtStr, OCT_DECIMALS);
+  if (_dir === 'o2e') {
+    if (BigInt(rawAmt) > BigInt(_octBalance)) { btn.disabled = true; btn.textContent = 'insufficient OCT'; return; }
+    if (!recip || !/^0x[0-9a-fA-F]{40}$/.test(recip)) { btn.disabled = true; btn.textContent = 'enter valid ETH address'; return; }
+    btn.disabled = false; btn.textContent = 'bridge ' + amtStr + ' OCT';
+  } else {
+    if (BigInt(rawAmt) > BigInt(_woctBalance)) { btn.disabled = true; btn.textContent = 'insufficient wOCT'; return; }
+    if (!recip || recip.length !== 47 || recip.substring(0, 3) !== 'oct') { btn.disabled = true; btn.textContent = 'enter valid octra address'; return; }
+    btn.disabled = false; btn.textContent = 'bridge ' + amtStr + ' wOCT';
+  }
+}
+
+function setMax() {
+  if (_dir === 'o2e') $('bridge-amount').value = fmtU(_octBalance, OCT_DECIMALS);
+  else $('bridge-amount').value = fmtU(_woctBalance, OCT_DECIMALS);
+  validateForm();
+}
+
+function doBridge() {
+  var amt = $('bridge-amount').value.trim();
+  var recip = $('recipient').value.trim();
+  if (_dir === 'o2e') {
+    $('cm-title').textContent = 'confirm: lock OCT';
+    $('cm-action').textContent = 'lock OCT -> mint wOCT';
+    $('cm-amount').textContent = amt + ' OCT';
+    $('cm-from').textContent = _octraAddr.substring(0, 14) + '...';
+    $('cm-to').textContent = recip;
+    $('cm-receive').textContent = amt + ' wOCT';
+    $('cm-warning').textContent = 'OCT will be locked on octra. wOCT will be minted on ethereum.';
+    $('cm-confirm-btn').textContent = 'lock & bridge';
+  } else {
+    $('cm-title').textContent = 'confirm: burn wOCT';
+    $('cm-action').textContent = 'burn wOCT -> unlock OCT';
+    $('cm-amount').textContent = amt + ' wOCT';
+    $('cm-from').textContent = _ethAddr.substring(0, 10) + '...';
+    $('cm-to').textContent = recip;
+    $('cm-receive').textContent = amt + ' OCT';
+    $('cm-warning').textContent = 'wOCT will be burned on ethereum. OCT will be unlocked on octra (~2 min).';
+    $('cm-confirm-btn').textContent = 'burn & bridge';
+  }
+  $('confirm-modal').classList.add('show');
+}
+
+function closeModal() { $('confirm-modal').classList.remove('show'); }
+
+async function confirmBridge() {
+  closeModal();
+  if (_dir === 'o2e') await doForward();
+  else await doReverse();
+}
+
+var _pendingClaim = null;
+
+async function doForward() {
+  var amt = $('bridge-amount').value.trim();
+  var recip = $('recipient').value.trim();
+  var rawAmt = parseU(amt, OCT_DECIMALS);
+  var btn = $('bridge-btn');
+  btn.disabled = true; btn.classList.add('loading'); btn.textContent = 'bridging...';
+  clearStatus();
+
+  _pendingClaim = null;
+  try { localStorage.removeItem('bridge_pending_claim'); } catch(e) {}
+  var oldClaimBtn = $('claim-btn');
+  if (oldClaimBtn) oldClaimBtn.remove();
+  showProgress([
+    { id: 'lock', text: 'locking ' + amt + ' OCT on octra...' },
+    { id: 'confirm', text: 'waiting for epoch confirmation...' },
+    { id: 'header', text: 'waiting for bridge header on ethereum...' },
+    { id: 'claim', text: 'claim wOCT (your MetaMask transaction)...' }
+  ]);
+  setStep('lock', 'active');
+  try {
+    var r = await wcli('POST', '/contract/call', {
+      address: BRIDGE_VAULT, method: 'lock_to_eth', params: [recip], amount: rawAmt, ou: '1000'
+    });
+    if (!r.tx_hash) throw new Error('no tx_hash');
+    setStep('lock', 'done'); setStep('confirm', 'active');
+    showStatus('info', 'locked! <a href="https://octrascan.io/tx.html?hash=' + r.tx_hash + '" target="_blank" style="color:#3B567F">' + r.tx_hash.substring(0, 16) + '...</a>');
+    var receipt = await waitReceipt(r.tx_hash, 60);
+    if (!receipt || !receipt.success) throw new Error('lock transaction failed');
+    setStep('confirm', 'done'); setStep('header', 'active');
+    showStatus('info', 'OCT locked. waiting for bridge header (~1-2 min)...');
+
+    var epochId = receipt.epoch || 0;
+    if (!epochId) {
+      var txInfo = await wcli('GET', '/transaction?hash=' + r.tx_hash);
+      epochId = txInfo.epoch || 0;
+    }
+
+    var claimData = await waitForClaimData(epochId, recip, rawAmt);
+    if (!claimData) throw new Error('bridge header not found. try claim later.');
+
+    showStatus('info', 'signer returned header. verifying it landed on ethereum...');
+    var simOk = false;
+    var simAttempts = 0;
+    var simMaxAttempts = 18;
+    var lastSimErr = '';
+    while (simAttempts < simMaxAttempts) {
+      try {
+        await _ethProvider.request({
+          method: 'eth_call',
+          params: [{ from: _ethAddr, to: ETH_BRIDGE, data: claimData.calldata }, 'latest']
+        });
+        simOk = true;
+        break;
+      } catch(simErr) {
+        lastSimErr = (simErr && (simErr.message || JSON.stringify(simErr))) || 'unknown';
+        simAttempts++;
+        showStatus('info', 'header not yet on ethereum. waiting for relayer ' + simAttempts + '/' + simMaxAttempts + ' (retry in 5s)...');
+        await new Promise(function(r) { setTimeout(r, 5000); });
+      }
+    }
+    if (!simOk) {
+      throw new Error('header not verified on ethereum after 90s. last error: ' + lastSimErr);
+    }
+
+    setStep('header', 'done'); setStep('claim', 'active');
+    _pendingClaim = claimData;
+    showClaimButton(amt);
+    showStatus('info', 'bridge header verified on ethereum. click button to claim your wOCT:');
+  } catch(e) { showStatus('err', e.message); setCurrentStepFail(); }
+  btn.classList.remove('loading'); validateForm();
+}
+
+function showClaimButton(amt) {
+  showStatus('info', 'bridge header ready. claim your wOCT:');
+  var existing = $('claim-btn');
+  if (existing) existing.remove();
+  var area = $('progress-area');
+  var btn = document.createElement('button');
+  btn.id = 'claim-btn';
+  btn.textContent = 'claim on ethereum ' + amt + ' wOCT';
+  btn.style.cssText = 'width:100%;padding:12px;font-size:13px;font-weight:600;border:none;cursor:pointer;background:#3B567F;color:#fff;margin-top:10px;font-family:Tahoma,arial,sans-serif';
+  btn.onclick = doClaim;
+  area.appendChild(btn);
+  try { localStorage.setItem('bridge_pending_claim', JSON.stringify({ claim: _pendingClaim, amt: amt })); } catch(e) {}
+}
+
+async function waitForReceipt(txHash, timeoutMs) {
+  var start = Date.now();
+  var interval = 3000;
+  while (Date.now() - start < timeoutMs) {
+    try {
+      var receipt = await _ethProvider.request({
+        method: 'eth_getTransactionReceipt',
+        params: [txHash]
+      });
+      if (receipt && receipt.blockNumber) {
+        return receipt;
+      }
+    } catch(e) {}
+    await new Promise(function(r) { setTimeout(r, interval); });
+  }
+  return null;
+}
+
+async function getSafeGas() {
+  var floor = 10000000000n;
+  var priority = 2000000000n;
+  try {
+    var gasPriceHex = await _ethProvider.request({method: 'eth_gasPrice'});
+    var current = BigInt(gasPriceHex);
+    var doubled = current * 2n;
+    var maxFee = doubled > floor ? doubled : floor;
+    return {
+      maxFeePerGas: '0x' + maxFee.toString(16),
+      maxPriorityFeePerGas: '0x' + priority.toString(16)
+    };
+  } catch(e) {
+    return {
+      maxFeePerGas: '0x2540be400',
+      maxPriorityFeePerGas: '0x77359400'
+    };
+  }
+}
+
+async function doClaim() {
+  if (!_pendingClaim) return;
+  var claimBtn = $('claim-btn');
+  if (claimBtn) { claimBtn.disabled = true; claimBtn.textContent = 'submitting...'; }
+  var explorerBase = (typeof ETH_EXPLORER !== 'undefined' && ETH_EXPLORER) ? ETH_EXPLORER : 'https://etherscan.io';
+  var claimTx = null;
+  try {
+    var c = _pendingClaim;
+
+    if (claimBtn) { claimBtn.textContent = 'verifying...'; }
+    try {
+      await _ethProvider.request({
+        method: 'eth_call',
+        params: [{ from: _ethAddr, to: ETH_BRIDGE, data: c.calldata }, 'latest']
+      });
+    } catch(simErr) {
+      if (claimBtn) { claimBtn.disabled = false; claimBtn.textContent = 'claim on ethereum (retry)'; }
+      showStatus('err', 'claim would revert right now. header may have been evicted or state changed. pending claim preserved — click button to retry in a few seconds.');
+      return;
+    }
+
+    if (claimBtn) { claimBtn.textContent = 'submitting to metamask...'; }
+    var gas = await getSafeGas();
+    claimTx = await _ethProvider.request({
+      method: 'eth_sendTransaction',
+      params: [{ from: _ethAddr, to: ETH_BRIDGE, data: c.calldata, gas: '0x60000', maxFeePerGas: gas.maxFeePerGas, maxPriorityFeePerGas: gas.maxPriorityFeePerGas }]
+    });
+  } catch(e) {
+    if (claimBtn) { claimBtn.disabled = false; claimBtn.textContent = 'claim on ethereum (retry)'; }
+    showStatus('err', 'claim cancelled or rejected. click button to try again.');
+    return;
+  }
+
+  if (claimBtn) { claimBtn.textContent = 'waiting for confirmation...'; }
+  showStatus('info', 'tx submitted: <a href="' + explorerBase + '/tx/' + claimTx + '" target="_blank" style="color:#3B567F">' + claimTx.slice(0, 10) + '...</a> waiting for confirmation');
+
+  var receipt = await waitForReceipt(claimTx, 300000);
+
+  if (!receipt) {
+    if (claimBtn) { claimBtn.disabled = false; claimBtn.textContent = 'claim on ethereum (retry)'; }
+    showStatus('err', 'tx not confirmed in 5 min. it may still land later, or was dropped. pending claim is preserved — refresh page to retry.');
+    return;
+  }
+
+  if (receipt.status !== '0x1') {
+    if (claimBtn) { claimBtn.disabled = false; claimBtn.textContent = 'claim on ethereum (retry)'; }
+    showStatus('err', 'tx reverted on-chain. <a href="' + explorerBase + '/tx/' + claimTx + '" target="_blank" style="color:#3B567F">view on etherscan</a> — pending claim preserved, click button to retry.');
+    return;
+  }
+
+  setStep('claim', 'done');
+  if (claimBtn) claimBtn.remove();
+  showStatus('ok', 'wOCT claimed! <a href="' + explorerBase + '/tx/' + claimTx + '" target="_blank" style="color:#3B567F">view on etherscan</a>');
+  _pendingClaim = null;
+  try { localStorage.removeItem('bridge_pending_claim'); } catch(e) {}
+  await refreshBalances();
+}
+
+async function checkPendingClaim() {
+  try {
+    var saved = localStorage.getItem('bridge_pending_claim');
+    if (!saved) return;
+    var data = JSON.parse(saved);
+    _pendingClaim = data.claim;
+    showProgress([
+      { id: 'lock', text: 'OCT locked' },
+      { id: 'confirm', text: 'confirmed' },
+      { id: 'header', text: 'header on ethereum' },
+      { id: 'claim', text: 'claim wOCT' }
+    ]);
+    setStep('lock', 'done'); setStep('confirm', 'done'); setStep('header', 'active');
+    showStatus('info', 'restoring pending claim. verifying header on ethereum...');
+
+    if (!_ethProvider || !_ethAddr) {
+      showStatus('info', 'pending claim restored. connect metamask to verify header and claim.');
+      return;
+    }
+
+    var simOk = false;
+    var simAttempts = 0;
+    var simMaxAttempts = 6;
+    var lastErr = '';
+    while (simAttempts < simMaxAttempts) {
+      try {
+        await _ethProvider.request({
+          method: 'eth_call',
+          params: [{ from: _ethAddr, to: ETH_BRIDGE, data: _pendingClaim.calldata }, 'latest']
+        });
+        simOk = true;
+        break;
+      } catch(e) {
+        lastErr = (e && (e.message || JSON.stringify(e))) || 'unknown';
+        simAttempts++;
+        showStatus('info', 'header not yet on ethereum. retrying ' + simAttempts + '/' + simMaxAttempts + '...');
+        await new Promise(function(r) { setTimeout(r, 5000); });
+      }
+    }
+    if (!simOk) {
+      setCurrentStepFail();
+      showStatus('err', 'header not verified on ethereum. pending claim kept — try again later (last: ' + lastErr + ')');
+      return;
+    }
+    setStep('header', 'done'); setStep('claim', 'active');
+    showStatus('info', 'bridge header verified. click button to claim:');
+    showClaimButton(data.amt);
+  } catch(e) { showStatus('err', 'failed to restore pending claim: ' + e.message); }
+}
+
+async function waitForClaimData(epochId, recipient, rawAmt) {
+  var start = Date.now();
+  while (Date.now() - start < 180000) {
+    try {
+      var rpcBody = JSON.stringify({jsonrpc:'2.0',id:1,method:'bridgeHeader',params:[epochId]});
+      var resp = await fetch(SIGNER_URL, {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: rpcBody
+      }).catch(function() { return null; });
+      if (resp && resp.ok) {
+        var data = await resp.json();
+        if (data.result && data.result.message_count > 0) {
+          return await buildClaimCalldata(epochId, recipient, rawAmt, data.result);
+        }
+      }
+    } catch(e) {}
+    await sleep(5000);
+  }
+  return null;
+}
+
+async function buildClaimCalldata(epochId, recipient, rawAmt, headerData) {
+  try {
+    var msgBody = JSON.stringify({jsonrpc:'2.0',id:1,method:'bridgeMessagesByEpoch',params:[epochId]});
+    var msgResp = await fetch(SIGNER_URL, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: msgBody
+    });
+    var msgData = await msgResp.json();
+    var messages = msgData.result.messages;
+    var myMsg = messages.find(function(m) {
+      return m.recipient.toLowerCase() === recipient.toLowerCase();
+    });
+    if (!myMsg) return null;
+
+    var cdBody = JSON.stringify({jsonrpc:'2.0',id:1,method:'bridgeClaimCalldata',params:[epochId, myMsg.leaf_index]});
+    var cdResp = await fetch(SIGNER_URL, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: cdBody
+    });
+    var cdData = await cdResp.json();
+    if (cdData.result && cdData.result.calldata) {
+      return { calldata: cdData.result.calldata, epochId: epochId, message: myMsg };
+    }
+    return null;
+  } catch(e) { return null; }
+}
+
+async function doReverse() {
+  var amt = $('bridge-amount').value.trim();
+  var recip = $('recipient').value.trim();
+  var rawAmt = parseU(amt, OCT_DECIMALS);
+  var btn = $('bridge-btn');
+  btn.disabled = true; btn.classList.add('loading'); btn.textContent = 'bridging...';
+  clearStatus();
+  showProgress([
+    { id: 'approve', text: 'approving wOCT spend...' },
+    { id: 'burn', text: 'burning ' + amt + ' wOCT...' },
+    { id: 'unlock', text: 'unlocking OCT on octra...' }
+  ]);
+  setStep('approve', 'active');
+  try {
+    var gas1 = await getSafeGas();
+    var approveData = '0x095ea7b3' + ETH_BRIDGE.substring(2).toLowerCase().padStart(64, '0') + BigInt(rawAmt).toString(16).padStart(64, '0');
+    var approveTx = await _ethProvider.request({
+      method: 'eth_sendTransaction',
+      params: [{ from: _ethAddr, to: WOCT_ADDR, data: approveData, gas: '0x30000', maxFeePerGas: gas1.maxFeePerGas, maxPriorityFeePerGas: gas1.maxPriorityFeePerGas }]
+    });
+    var approveReceipt = await waitForReceipt(approveTx, 300000);
+    if (!approveReceipt || approveReceipt.status !== '0x1') {
+      showStatus('err', 'approve tx failed or dropped. your wOCT is still in the wallet — try again.');
+      setCurrentStepFail();
+      btn.classList.remove('loading'); validateForm();
+      return;
+    }
+    setStep('approve', 'done'); setStep('burn', 'active');
+
+    var gas2 = await getSafeGas();
+    var burnSig = '0xe3e3aed0';
+    var encoded = abiEncodeStringUint(recip, rawAmt);
+    var burnData = burnSig + encoded;
+    var burnTx = await _ethProvider.request({
+      method: 'eth_sendTransaction',
+      params: [{ from: _ethAddr, to: ETH_BRIDGE, data: burnData, gas: '0x40000', maxFeePerGas: gas2.maxFeePerGas, maxPriorityFeePerGas: gas2.maxPriorityFeePerGas }]
+    });
+    var explorerBase2 = (typeof ETH_EXPLORER !== 'undefined' && ETH_EXPLORER) ? ETH_EXPLORER : 'https://etherscan.io';
+    showStatus('info', 'burn tx submitted: <a href="' + explorerBase2 + '/tx/' + burnTx + '" target="_blank" style="color:#3B567F">' + burnTx.slice(0, 10) + '...</a> waiting for confirmation');
+    var burnReceipt = await waitForReceipt(burnTx, 300000);
+    if (!burnReceipt) {
+      showStatus('err', 'burn tx not confirmed in 5 min. may still land later or was dropped. your wOCT is still in the wallet — try again.');
+      setCurrentStepFail();
+      btn.classList.remove('loading'); validateForm();
+      return;
+    }
+    if (burnReceipt.status !== '0x1') {
+      showStatus('err', 'burn tx reverted on-chain. <a href="' + explorerBase2 + '/tx/' + burnTx + '" target="_blank" style="color:#3B567F">view on etherscan</a> — your wOCT is still in the wallet.');
+      setCurrentStepFail();
+      btn.classList.remove('loading'); validateForm();
+      return;
+    }
+    setStep('burn', 'done'); setStep('unlock', 'active');
+    showStatus('info', 'wOCT burned. waiting for OCT unlock on octra... <a href="' + explorerBase2 + '/tx/' + burnTx + '" target="_blank" style="color:#3B567F">view tx</a>');
+    var prevOct = _octBalance;
+    var unlocked = await pollUntilChange(function() { return getOctBalance(); }, prevOct, 180);
+    if (unlocked) {
+      setStep('unlock', 'done');
+      showStatus('ok', 'OCT unlocked! <a href="https://octrascan.io/address.html?addr=' + _octraAddr + '" target="_blank" style="color:#3B567F">view on octra</a>');
+      await refreshBalances();
+    } else {
+      showStatus('info', 'wOCT burned. OCT unlock may take a few minutes.');
+    }
+  } catch(e) { showStatus('err', e.message); setCurrentStepFail(); }
+  btn.classList.remove('loading'); validateForm();
+}
+
+async function waitReceipt(hash, maxWait) {
+  var start = Date.now();
+  while (Date.now() - start < maxWait * 1000) {
+    try { var r = await wcli('GET', '/contract/receipt?hash=' + hash); if (r && r.success !== undefined) return r; } catch(e) {}
+    await sleep(3000);
+  }
+  return null;
+}
+
+function keccak256(sig) {
+  var encoder = new TextEncoder();
+  var data = encoder.encode(sig);
+  var hash = '';
+  var h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  return '00000000';
+}
+
+function abiEncodeStringUint(str, uint) {
+  var offset = '0000000000000000000000000000000000000000000000000000000000000040';
+  var uintHex = BigInt(uint).toString(16).padStart(64, '0');
+  var strLen = str.length.toString(16).padStart(64, '0');
+  var strHex = '';
+  for (var i = 0; i < str.length; i++) strHex += str.charCodeAt(i).toString(16).padStart(2, '0');
+  while (strHex.length % 64 !== 0) strHex += '0';
+  return offset + uintHex + strLen + strHex;
+}
+
+var _steps = [];
+function showProgress(steps) { _steps = steps; var el = $('progress-area'); el.style.display = ''; el.innerHTML = steps.map(function(s) { return '<div class="step" id="step-' + s.id + '"><span class="dot"></span>' + esc(s.text) + '</div>'; }).join(''); }
+function setStep(id, state) { var el = document.getElementById('step-' + id); if (el) el.className = 'step ' + state; }
+function setCurrentStepFail() { _steps.forEach(function(s) { var el = document.getElementById('step-' + s.id); if (el && el.classList.contains('active')) el.className = 'step fail'; }); }
+
+function $(id) { return document.getElementById(id); }
+function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+async function getWoctBalance() {
+  if (!_ethAddr || !_ethProvider || !WOCT_ADDR) return '0';
+  try {
+    var data = '0x70a08231000000000000000000000000' + _ethAddr.substring(2);
+    var result = await _ethProvider.request({ method: 'eth_call', params: [{ to: WOCT_ADDR, data: data }, 'latest'] });
+    if (!result || result === '0x' || result === '0x0') return '0';
+    return BigInt(result).toString();
+  } catch(e) { return '0'; }
+}
+
+async function getOctBalance() {
+  if (!_octraAddr) return '0';
+  try { var b = await wcli('GET', '/balance'); return b.public_balance || '0'; } catch(e) { return '0'; }
+}
+
+async function pollUntilChange(getFn, prevVal, maxSec) {
+  var start = Date.now();
+  while (Date.now() - start < maxSec * 1000) {
+    await sleep(5000);
+    var cur = await getFn();
+    if (cur !== prevVal && BigInt(cur) !== BigInt(prevVal)) return true;
+  }
+  return false;
+}
+
+function showStatus(type, msg) { var el = $('status-area'); el.className = 'status-msg ' + type; el.innerHTML = msg; }
+function clearStatus() { $('status-area').className = 'status-msg'; $('status-area').textContent = ''; $('progress-area').style.display = 'none'; }
+function fmtU(raw, dec) { var s = raw.toString().padStart(dec + 1, '0'); var i = s.slice(0, s.length - dec) || '0'; var f = s.slice(s.length - dec).replace(/0+$/, ''); return f ? addCommas(i) + '.' + f : addCommas(i); }
+function parseU(h, dec) { h = h.replace(/,/g, ''); var p = h.split('.'); var i = p[0] || '0'; var f = (p[1] || '').padEnd(dec, '0').substring(0, dec); return (BigInt(i) * BigInt(10 ** dec) + BigInt(f)).toString(); }
+function addCommas(s) { var p = s.split('.'); p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ','); return p.join('.'); }
+
+connectOctra().catch(function(){});
+checkPendingClaim();
+setInterval(function() { refreshBalances(); }, 10000);
+setTimeout(function() {
+  var saved = null;
+  try { saved = localStorage.getItem('bridge_eth_wallet'); } catch(e) {}
+  if (saved && _eip6963Providers.length > 0) {
+    var match = _eip6963Providers.find(function(p) { return p.name === saved; });
+    if (match) connectWithProvider({ name: match.name, provider: match.provider, icon: match.icon }).catch(function(){});
+  }
+}, 300);
+</script>
+</body>
+</html>

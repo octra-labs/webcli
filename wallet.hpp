@@ -59,6 +59,7 @@ struct Wallet {
     std::string addr;
     std::string rpc_url;
     std::string explorer_url = "https://octrascan.io";
+    std::string bridge_signer_url;
     uint8_t sk[64];
     uint8_t pk[32];
     std::string pub_b64;
@@ -226,6 +227,7 @@ inline void save_wallet_encrypted(const std::string& path,
     j["addr"] = w.addr;
     j["rpc"] = w.rpc_url;
     j["explorer"] = w.explorer_url;
+    j["bridge_signer"] = w.bridge_signer_url;
     if (!w.master_seed_b64.empty()) {
         j["master_seed"] = w.master_seed_b64;
         j["hd_index"] = w.hd_index;
@@ -269,6 +271,7 @@ inline Wallet load_wallet_encrypted(const std::string& path,
     w.addr = j.at("addr").get<std::string>();
     w.rpc_url = j.value("rpc", "http://46.101.86.250:8080");
     w.explorer_url = j.value("explorer", "https://octrascan.io");
+    w.bridge_signer_url = j.value("bridge_signer", "");
     w.master_seed_b64 = j.value("master_seed", "");
     w.mnemonic = j.value("mnemonic", "");
     w.hd_index = j.value("hd_index", 0);
@@ -553,4 +556,5 @@ inline std::vector<ManifestEntry> scan_and_merge_oct_files() {
 #endif
     return entries;
 }
+
 }

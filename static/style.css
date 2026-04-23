@@ -210,6 +210,14 @@ header .logout-btn:hover { background: #7A8BA3; }
 .view { display: none; }
 .view.active { display: block; }
 
+
+
+
+#view-apps.active {
+  padding: clamp(16px, 2.5vw, 32px) clamp(12px, 3vw, 40px);
+  box-sizing: border-box;
+}
+
 .section {
   margin: 0;
   padding: 0;
