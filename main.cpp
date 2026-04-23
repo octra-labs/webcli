@@ -374,7 +374,12 @@ int main(int argc, char** argv) {
         res.set_header("X-Frame-Options", "DENY");
         res.set_header("X-Content-Type-Options", "nosniff");
         res.set_header("Content-Security-Policy",
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'");
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https:; "
+            "connect-src 'self' http://127.0.0.1:* http://178.62.60.204:8090 https://*.octra.network https://*.publicnode.com https://*.infura.io wss: ws:; "
+            "frame-ancestors 'none'");
         res.set_header("Cache-Control", "no-store");
     });
 

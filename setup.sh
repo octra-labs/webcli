@@ -62,7 +62,7 @@ case "$OS" in
         if command -v apt-get &>/dev/null; then
             echo "installing dependencies (apt)..."
             $SUDO apt-get update -qq
-            $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                 build-essential g++ libssl-dev libleveldb-dev pkg-config make curl
         elif command -v dnf &>/dev/null; then
             echo "installing dependencies (dnf)..."
@@ -103,6 +103,12 @@ case "$OS" in
         $SUDO pkgin install -y gcc openssl leveldb gmake pkg-config
         ;;
     MINGW*|MSYS*|CYGWIN*)
+        if [ "$MODE" = "deps" ]; then
+            echo "[1/1] detected windows shell ($OS) in deps-only mode"
+            echo "on windows, dependencies should be installed via setup.bat from cmd.exe"
+            echo "if you already ran setup.bat, this is fine — continuing"
+            exit 0
+        fi
         echo "detected windows shell ($OS). run setup.bat from cmd.exe instead."
         exit 1
         ;;
@@ -144,7 +150,7 @@ echo ""
 echo "[3/3] done"
 echo ""
 echo "start the wallet:"
-echo " ./octra_wallet"
+echo "./octra_wallet"
 echo ""
 echo "then open http://127.0.0.1:8420 in your browser"
 echo ""
