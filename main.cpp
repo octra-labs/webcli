@@ -133,33 +133,37 @@ static std::string parse_ou(const json& body, const std::string& fallback) {
 static const int64_t MAX_OCT_RAW = 1000000000LL * 1000000LL;
 
 static int64_t parse_amount_raw(const json& body) {
-    std::string s;
-    if (body.contains("amount")) {
-        if (body["amount"].is_string()) s = body["amount"].get<std::string>();
-        else if (body["amount"].is_number()) {
-            s = body["amount"].dump();
+    try {
+        std::string s;
+        if (body.contains("amount")) {
+            if (body["amount"].is_string()) s = body["amount"].get<std::string>();
+            else if (body["amount"].is_number()) {
+                s = body["amount"].dump();
+            }
+            else return -1;
+        } else return -1;
+        if (s.empty()) return -1;
+        size_t dot = s.find('.');
+        if (dot == std::string::npos) {
+            for (char c : s) if (c < '0' || c > '9') return -1;
+            int64_t v = std::stoll(s);
+            if (v > MAX_OCT_RAW / 1000000) return -1;
+            return v * 1000000;
         }
-        else return -1;
-    } else return -1;
-    if (s.empty()) return -1;
-    size_t dot = s.find('.');
-    if (dot == std::string::npos) {
-        for (char c : s) if (c < '0' || c > '9') return -1;
-        int64_t v = std::stoll(s);
-        if (v > MAX_OCT_RAW / 1000000) return -1;
-        return v * 1000000;
+        std::string integer_part = s.substr(0, dot);
+        std::string frac_part = s.substr(dot + 1);
+        if (integer_part.empty() && frac_part.empty()) return -1;
+        for (char c : integer_part) if (c < '0' || c > '9') return -1;
+        for (char c : frac_part) if (c < '0' || c > '9') return -1;
+        if (frac_part.size() > 6) frac_part = frac_part.substr(0, 6);
+        while (frac_part.size() < 6) frac_part += '0';
+        int64_t ip = integer_part.empty() ? 0 : std::stoll(integer_part);
+        if (ip > MAX_OCT_RAW / 1000000) return -1;
+        int64_t fp = std::stoll(frac_part);
+        return ip * 1000000 + fp;
+    } catch (const std::logic_error&) {
+        return -1;
     }
-    std::string integer_part = s.substr(0, dot);
-    std::string frac_part = s.substr(dot + 1);
-    if (integer_part.empty() && frac_part.empty()) return -1;
-    for (char c : integer_part) if (c < '0' || c > '9') return -1;
-    for (char c : frac_part) if (c < '0' || c > '9') return -1;
-    if (frac_part.size() > 6) frac_part = frac_part.substr(0, 6);
-    while (frac_part.size() < 6) frac_part += '0';
-    int64_t ip = integer_part.empty() ? 0 : std::stoll(integer_part);
-    if (ip > MAX_OCT_RAW / 1000000) return -1;
-    int64_t fp = std::stoll(frac_part);
-    return ip * 1000000 + fp;
 }
 
 struct BalanceInfo {
@@ -1409,7 +1413,7 @@ int main(int argc, char** argv) {
         auto commitment = g_pvac.commit_ct(ct_delta);
         std::string commitment_b64 = octra::base64_encode(commitment.data(), 32);
 
-        steps.push_back("[5/8] range proofs (parallel) - Bulletproofs R1CS");
+        steps.push_back("[5/8] range proofs (delta + balance) - Bulletproofs R1CS");
         pvac_cipher current_ct = g_pvac.decode_cipher(eb_cipher);
         pvac_cipher new_ct = g_pvac.ct_sub(current_ct, ct_delta);
         uint64_t new_val = (uint64_t)(eb_decrypted - raw);
@@ -1417,14 +1421,9 @@ int main(int argc, char** argv) {
         pvac_range_proof rp_delta = nullptr;
         pvac_range_proof rp_bal = nullptr;
 
-        std::thread t_rp_delta([&]() {
-            rp_delta = pvac_make_range_proof(g_pvac.pk(), g_pvac.sk(), ct_delta, (uint64_t)raw);
-        });
-        std::thread t_rp_bal([&]() {
-            rp_bal = pvac_make_range_proof(g_pvac.pk(), g_pvac.sk(), new_ct, new_val);
-        });
-        t_rp_delta.join();
-        t_rp_bal.join();
+        // libpvac is not safe to call with the same pk/sk handles from two threads at once.
+        rp_delta = pvac_make_range_proof(g_pvac.pk(), g_pvac.sk(), ct_delta, (uint64_t)raw);
+        rp_bal = pvac_make_range_proof(g_pvac.pk(), g_pvac.sk(), new_ct, new_val);
 
         steps.push_back("[6/8] encoding proofs");
         std::string rp_delta_str = g_pvac.encode_range_proof(rp_delta);
