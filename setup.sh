@@ -111,11 +111,7 @@ case "$OS" in
                 $SUDO emerge --noreplace dev-libs/openssl dev-libs/leveldb sys-devel/gcc sys-devel/make
             fi
         elif command -v xbps-install &>/dev/null; then
-            if xbps-query -l | grep -qE "^ii gcc-" && \
-               xbps-query -l | grep -qE "^ii openssl-devel-" && \
-               xbps-query -l | grep -qE "^ii leveldb-devel-" && \
-               xbps-query -l | grep -qE "^ii make-" && \
-               xbps-query -l | grep -qE "^ii pkgconf-"; then
+            if [ "$(xbps-query -l | grep -cE "^ii (gcc|openssl-devel|leveldb-devel|make|pkgconf)-")" -eq 5 ]; then
                 echo "dependencies already installed"
             else
                 echo "installing dependencies (xbps)..."
@@ -136,7 +132,7 @@ case "$OS" in
         ;;
     OpenBSD)
         echo "[1/3] OpenBSD detected"
-        if pkg_info g++ openssl leveldb gmake &>/dev/null; then
+        if pkg_info -e g++ &>/dev/null && pkg_info -e openssl &>/dev/null && pkg_info -e leveldb &>/dev/null && pkg_info -e gmake &>/dev/null; then
             echo "dependencies already installed"
         else
             $SUDO pkg_add -I g++ openssl leveldb gmake
