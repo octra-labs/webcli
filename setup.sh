@@ -60,31 +60,63 @@ case "$OS" in
             echo "distro: ${ID:-unknown} ${VERSION_ID:-}"
         fi
         if command -v apt-get &>/dev/null; then
-            echo "installing dependencies (apt)..."
-            $SUDO apt-get update -qq
-            $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-                build-essential g++ libssl-dev libleveldb-dev pkg-config make curl
+            if dpkg -s build-essential g++ libssl-dev libleveldb-dev pkg-config make curl &>/dev/null; then
+                echo "dependencies already installed"
+            else
+                echo "installing dependencies (apt)..."
+                $SUDO apt-get update -qq
+                $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                    build-essential g++ libssl-dev libleveldb-dev pkg-config make curl
+            fi
         elif command -v dnf &>/dev/null; then
-            echo "installing dependencies (dnf)..."
-            $SUDO dnf install -y gcc-c++ openssl-devel leveldb-devel make pkgconfig
+            if rpm -q gcc-c++ openssl-devel leveldb-devel make pkgconfig &>/dev/null; then
+                echo "dependencies already installed"
+            else
+                echo "installing dependencies (dnf)..."
+                $SUDO dnf install -y gcc-c++ openssl-devel leveldb-devel make pkgconfig
+            fi
         elif command -v yum &>/dev/null; then
-            echo "installing dependencies (yum)..."
-            $SUDO yum install -y gcc-c++ openssl-devel leveldb-devel make pkgconfig
+            if rpm -q gcc-c++ openssl-devel leveldb-devel make pkgconfig &>/dev/null; then
+                echo "dependencies already installed"
+            else
+                echo "installing dependencies (yum)..."
+                $SUDO yum install -y gcc-c++ openssl-devel leveldb-devel make pkgconfig
+            fi
         elif command -v zypper &>/dev/null; then
-            echo "installing dependencies (zypper)..."
-            $SUDO zypper install -y gcc-c++ libopenssl-devel leveldb-devel make pkg-config
+            if rpm -q gcc-c++ libopenssl-devel leveldb-devel make pkg-config &>/dev/null; then
+                echo "dependencies already installed"
+            else
+                echo "installing dependencies (zypper)..."
+                $SUDO zypper install -y gcc-c++ libopenssl-devel leveldb-devel make pkg-config
+            fi
         elif command -v pacman &>/dev/null; then
-            echo "installing dependencies (pacman)..."
-            $SUDO pacman -S --noconfirm --needed gcc openssl leveldb make pkgconf
+            if pacman -Q gcc openssl leveldb make pkgconf &>/dev/null; then
+                echo "dependencies already installed"
+            else
+                echo "installing dependencies (pacman)..."
+                $SUDO pacman -S --noconfirm --needed gcc openssl leveldb make pkgconf
+            fi
         elif command -v apk &>/dev/null; then
-            echo "installing dependencies (apk)..."
-            $SUDO apk add --no-cache g++ openssl-dev leveldb-dev make pkgconfig musl-dev linux-headers
+            if apk info -e g++ openssl-dev leveldb-dev make pkgconfig musl-dev linux-headers &>/dev/null; then
+                echo "dependencies already installed"
+            else
+                echo "installing dependencies (apk)..."
+                $SUDO apk add --no-cache g++ openssl-dev leveldb-dev make pkgconfig musl-dev linux-headers
+            fi
         elif command -v emerge &>/dev/null; then
-            echo "installing dependencies (emerge)..."
-            $SUDO emerge --noreplace dev-libs/openssl dev-libs/leveldb sys-devel/gcc sys-devel/make
+            if ls -d /var/db/pkg/dev-libs/openssl-* /var/db/pkg/dev-libs/leveldb-* /var/db/pkg/sys-devel/gcc-* /var/db/pkg/sys-devel/make-* &>/dev/null; then
+                echo "dependencies already installed"
+            else
+                echo "installing dependencies (emerge)..."
+                $SUDO emerge --noreplace dev-libs/openssl dev-libs/leveldb sys-devel/gcc sys-devel/make
+            fi
         elif command -v xbps-install &>/dev/null; then
-            echo "installing dependencies (xbps)..."
-            $SUDO xbps-install -Sy gcc openssl-devel leveldb-devel make pkgconf
+            if [ "$(xbps-query -l | grep -cE "^ii (gcc|openssl-devel|leveldb-devel|make|pkgconf)-")" -eq 5 ]; then
+                echo "dependencies already installed"
+            else
+                echo "installing dependencies (xbps)..."
+                $SUDO xbps-install -Sy gcc openssl-devel leveldb-devel make pkgconf
+            fi
         else
             echo "unknown package manager. install manually: g++, libssl-dev, libleveldb-dev, make, pkg-config"
             exit 1
@@ -92,15 +124,27 @@ case "$OS" in
         ;;
     FreeBSD)
         echo "[1/3] FreeBSD detected"
-        $SUDO pkg install -y gcc openssl leveldb gmake pkgconf
+        if pkg info gcc openssl leveldb gmake pkgconf &>/dev/null; then
+            echo "dependencies already installed"
+        else
+            $SUDO pkg install -y gcc openssl leveldb gmake pkgconf
+        fi
         ;;
     OpenBSD)
         echo "[1/3] OpenBSD detected"
-        $SUDO pkg_add -I g++ openssl leveldb gmake
+        if pkg_info -e g++ &>/dev/null && pkg_info -e openssl &>/dev/null && pkg_info -e leveldb &>/dev/null && pkg_info -e gmake &>/dev/null; then
+            echo "dependencies already installed"
+        else
+            $SUDO pkg_add -I g++ openssl leveldb gmake
+        fi
         ;;
     NetBSD)
         echo "[1/3] NetBSD detected"
-        $SUDO pkgin install -y gcc openssl leveldb gmake pkg-config
+        if pkg_info gcc openssl leveldb gmake pkg-config &>/dev/null; then
+            echo "dependencies already installed"
+        else
+            $SUDO pkgin install -y gcc openssl leveldb gmake pkg-config
+        fi
         ;;
     MINGW*|MSYS*|CYGWIN*)
         if [ "$MODE" = "deps" ]; then
