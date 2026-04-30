@@ -820,21 +820,27 @@ async function fetchBalance() {
   }
 }
 
+var _inFlight = {};
 async function api(method, path, body) {
-  var opts = { method: method, headers: {} };
-
-
-  if (body !== undefined) {
-    opts.headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
+  var key = method + ':' + path + (body !== undefined ? ':' + JSON.stringify(body) : '');
+  if (_inFlight[key]) return null;
+  _inFlight[key] = true;
+  try {
+    var opts = { method: method, headers: {} };
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    var res = await fetch('/api' + path, opts);
+    var text = await res.text();
+    if (!text || text.length === 0) throw new Error('empty response from RPC (possible timeout)');
+    var j;
+    try { j = JSON.parse(text); } catch (e) { throw new Error('invalid server response: ' + text.substring(0, 200)); }
+    if (!res.ok) throw new Error(j.error || j.message || 'request failed');
+    return j;
+  } finally {
+    delete _inFlight[key];
   }
-  var res = await fetch('/api' + path, opts);
-  var text = await res.text();
-  if (!text || text.length === 0) throw new Error('empty response from RPC (possible timeout)');
-  var j;
-  try { j = JSON.parse(text); } catch (e) { throw new Error('invalid server response: ' + text.substring(0, 200)); }
-  if (!res.ok) throw new Error(j.error || j.message || 'request failed');
-  return j;
 }
 
 async function fetchFees() {
