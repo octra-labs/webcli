@@ -822,7 +822,7 @@ async function fetchBalance() {
 
 var _inFlight = {};
 async function api(method, path, body) {
-  var key = method + ':' + path;
+  var key = method + ':' + path + (body !== undefined ? ':' + JSON.stringify(body) : '');
   if (_inFlight[key]) return null;
   _inFlight[key] = true;
   try {
