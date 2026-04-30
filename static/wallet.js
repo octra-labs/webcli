@@ -821,14 +821,21 @@ async function fetchBalance() {
 }
 
 async function api(method, path, body) {
-  var opts = { method: method, headers: {} };
-
-
+  var controller = new AbortController();
+  var timer = setTimeout(function() { controller.abort(); }, 120000);
+  var opts = { method: method, headers: {}, signal: controller.signal };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  var res = await fetch('/api' + path, opts);
+  var res;
+  try {
+    res = await fetch('/api' + path, opts);
+  } catch (e) {
+    clearTimeout(timer);
+    throw new Error(e.name === 'AbortError' ? 'empty response from RPC (possible timeout)' : e.message);
+  }
+  clearTimeout(timer);
   var text = await res.text();
   if (!text || text.length === 0) throw new Error('empty response from RPC (possible timeout)');
   var j;
