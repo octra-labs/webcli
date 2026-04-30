@@ -822,7 +822,7 @@ async function fetchBalance() {
 
 async function api(method, path, body) {
   var controller = new AbortController();
-  var timer = setTimeout(function() { controller.abort(); }, 60000);
+  var timer = setTimeout(function() { controller.abort(); }, 120000);
   var opts = { method: method, headers: {}, signal: controller.signal };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
