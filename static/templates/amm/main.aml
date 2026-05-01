@@ -1,51 +1,166 @@
-contract SimpleAMM {
+import IOCS01 from "interfaces/IOCS01.aml"
+
+contract AMM {
   state {
-    token_a: address
-    token_b: address
-    reserve_a: int
-    reserve_b: int
+    token_x: address
+    token_y: address
+    reserve_x: int
+    reserve_y: int
     total_lp: int
     lp_balances: map[address]int
+    deployer: address
+    fee_rate: int // in basis points, i.e., 100 = 1%
   }
 
-  event Swap(who: address, token_in: address, amount_in: int, amount_out: int)
-  event AddLiquidity(who: address, a: int, b: int, lp: int)
+  event Swap(from: address, to: address, is_buy: bool, amount_in: int, amount_out: int)
+  event AddLiquidity(from: address, to: address, amount: int)
+  event RemoveLiquidity(from: address, to: address, amount: int)
 
-  constructor(a: address, b: address) {
-    self.token_a = a
-    self.token_b = b
-    self.reserve_a = 0
-    self.reserve_b = 0
-    self.total_lp = 0
+  constructor(token_x: address, token_y: address, fee_rate: int) {
+    require(fee_rate >= 0 && fee_rate <= 9999, "invalid fee rate")
+    self.deployer = caller
+    self.token_x = token_x
+    self.token_y = token_y
+    self.fee_rate = fee_rate
   }
 
-  fn add_liquidity(amount_a: int, amount_b: int): int {
-    require(amount_a > 0 && amount_b > 0, "amounts must be positive")
-    let lp = amount_a * amount_b
-    self.reserve_a += amount_a
-    self.reserve_b += amount_b
-    self.total_lp += lp
-    self.lp_balances[caller] += lp
-    emit AddLiquidity(caller, amount_a, amount_b, lp)
-    return lp
+  nonreentrant fn swap(to: address, is_buy: bool, amount_in: int, amount_out: int): bool {
+    // pool status check
+    require(self.total_lp > 0, "pool not initialized")
+
+    // validate inputs
+    require(amount_in > 0, "amount in must be positive")
+    require(amount_out > 0, "amount out must be positive")
+    if is_buy {
+      require(amount_out < self.reserve_x, "too much amount out")
+    } else {
+      require(amount_out < self.reserve_y, "too much amount out")
+    }
+
+    // fee calculation
+    let amount_in_after_fee = amount_in * (10000 - self.fee_rate) / 10000
+    require(amount_in_after_fee > 0, "amount in after fee must be positive")
+    // invariant check
+    let invariant_before = _invariant(self.reserve_x, self.reserve_y)
+    let invariant_after = 0
+    if is_buy {
+      invariant_after = _invariant(self.reserve_x - amount_out, self.reserve_y + amount_in_after_fee)
+    } else {
+      invariant_after = _invariant(self.reserve_x + amount_in_after_fee, self.reserve_y - amount_out)
+    }
+    require(invariant_after >= invariant_before, "invariant")
+
+    // pull the funds
+    // if is_buy {
+    //   require(IOCS01(self.token_y).pull(caller, address(this), amount_in), "pull token y failed")
+    // } else {
+    //   require(IOCS01(self.token_x).pull(caller, address(this), amount_in), "pull token x failed")
+    // }
+
+    // update storage
+    if is_buy {
+      self.reserve_x -= amount_out
+      self.reserve_y += amount_in
+    } else {
+      self.reserve_x += amount_in
+      self.reserve_y -= amount_out
+    }
+
+    // push the funds
+    // if is_buy {
+    //   require(IOCS01(self.token_x).transfer(to, amount_out), "push token x failed")
+    // } else {
+    //   require(IOCS01(self.token_y).transfer(to, amount_out), "push token y failed")
+    // }
+
+    emit Swap(caller, to, is_buy, amount_in, amount_out)
+    return true
   }
 
-  fn swap_a_for_b(amount_in: int): int {
-    require(amount_in > 0, "zero input")
-    let out = (amount_in * self.reserve_b) / (self.reserve_a + amount_in)
-    require(out > 0, "output too small")
-    self.reserve_a += amount_in
-    self.reserve_b -= out
-    emit Swap(caller, self.token_a, amount_in, out)
-    return out
+
+  nonreentrant fn add_liquidity(recipient: address, amount_x: int, amount_y: int): int {
+    // for initial liquidity injection, only the deployer is allowed
+    if self.total_lp == 0 {
+      require(caller == self.deployer, "only deployer can add initial liquidity")
+    }
+
+    // input validation
+    require(amount_x > 0 && amount_y > 0, "amounts invalid")
+
+    // take fee from amounts to prevent bypassing the swap fee
+    let amount_x_after_fee = amount_x * (10000 - self.fee_rate) / 10000
+    let amount_y_after_fee = amount_y * (10000 - self.fee_rate) / 10000
+
+    // calculate invariant increase
+    let invariant_before = _invariant(self.reserve_x, self.reserve_y)
+    let invariant_after = _invariant(self.reserve_x + amount_x_after_fee, self.reserve_y + amount_y_after_fee)
+    require(invariant_before < invariant_after, "invariant did not increase")
+    let amount_mint = invariant_after
+    if invariant_before > 0 {
+      amount_mint = self.total_lp * (invariant_after - invariant_before) / invariant_before
+    }
+    require(amount_mint > 0, "amounts too small")
+
+    // pull the funds
+    // TODO: uncomment once external contract call syntax is confirmed
+    // require(IOCS01(self.token_x).pull(caller, address(this), amount_x), "pull token x failed")
+    // require(IOCS01(self.token_y).pull(caller, address(this), amount_y), "pull token y failed")
+
+    // update storage
+    self.reserve_x += amount_x
+    self.reserve_y += amount_y
+    self.total_lp += amount_mint
+    self.lp_balances[recipient] += amount_mint
+    emit AddLiquidity(caller, recipient, amount_mint)
+    return amount_mint
   }
 
-  view fn get_reserves(): (int, int) {
-    return (self.reserve_a, self.reserve_b)
+  nonreentrant fn remove_liquidity(recipient: address, amount_remove: int): int {
+    // input validation
+    require(amount_remove > 0, "amount invalid")
+    require(self.total_lp > 0, "no liquidity")
+    require(self.lp_balances[caller] >= amount_remove, "insufficient liquidity")
+
+    // calculate proportional token amounts
+    let amount_x = self.reserve_x * amount_remove / self.total_lp
+    let amount_y = self.reserve_y * amount_remove / self.total_lp
+    require(amount_x > 0 && amount_y > 0, "amounts too small")
+
+    // update storage
+    self.reserve_x -= amount_x
+    self.reserve_y -= amount_y
+    self.total_lp -= amount_remove
+    self.lp_balances[caller] -= amount_remove
+
+    // push the funds
+    // TODO: uncomment once external contract call syntax is confirmed
+    // require(IOCS01(self.token_x).transfer(recipient, amount_x), "push token x failed")
+    // require(IOCS01(self.token_y).transfer(recipient, amount_y), "push token y failed")
+
+    emit RemoveLiquidity(caller, recipient, amount_remove)
+    return amount_remove
   }
 
-  view fn get_price(): int {
-    require(self.reserve_a > 0, "no liquidity")
-    return (self.reserve_b * 1000000) / self.reserve_a
+  private view fn _invariant(reserve_x: int, reserve_y: int): int {
+    require(reserve_x >= 0 && reserve_y >= 0, "invalid reserves")
+    let invariant = _isqrt(reserve_x * reserve_y)
+    return invariant
+  }
+
+  private view fn _isqrt(n: int): int {
+    require(n >= 0, "only nonnegative numbers")
+    let z = 0
+    if n > 3 {
+      z = n
+      let x = n / 2 + 1
+      while x < z {
+        z = x
+        x = (n / x + x) / 2
+      }
+    }
+    if n > 0 && n <= 3 {
+      z = 1
+    }
+    return z
   }
 }
