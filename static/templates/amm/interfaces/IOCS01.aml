@@ -1,0 +1,10 @@
+interface IOCS01 {
+  fn transfer(to: address, amount: int): bool
+  fn grant(spender: address, amount: int): bool
+  fn pull(from: address, to: address, amount: int): bool
+  fn balance_of(addr: address): int
+  fn allowance(owner: address, spender: address): int
+  fn get_name(): string
+  fn get_symbol(): string
+  fn get_total_supply(): int
+}
