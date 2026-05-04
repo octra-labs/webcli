@@ -494,6 +494,15 @@
     <div class="section-title">network settings</div>
     <div class="form-area">
       <div class="form-row">
+        <label>network preset</label>
+        <select id="settings-network" onchange="onNetworkPresetChange()">
+          <option value="devent">devent</option>
+          <option value="mainnet">mainnet</option>
+          <option value="custom">custom</option>
+        </select>
+        <div class="settings-note" id="settings-network-note">choose a preset, then save before compile/deploy/call</div>
+      </div>
+      <div class="form-row">
         <label>rpc url</label>
         <input type="text" id="settings-rpc" placeholder="http://165.227.225.79:8080">
       </div>

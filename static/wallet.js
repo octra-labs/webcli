@@ -116,7 +116,25 @@ var _tokTxGen = 0;
 var _compiledAbi = null;
 var _fees = {};
 var _rpcHost = '';
+var _networkPreset = 'custom';
 var _hasMasterSeed = false;
+
+var NETWORK_PRESETS = {
+  devent: {
+    label: 'devent',
+    rpc_url: 'http://165.227.225.79:8080',
+    explorer_url: 'https://devnet.octrascan.io',
+    bridge_signer_url: 'https://relayer-002838819188.octra.network',
+    aliases: ['http://165.227.225.79:8080']
+  },
+  mainnet: {
+    label: 'mainnet',
+    rpc_url: 'https://octra.network',
+    explorer_url: 'https://octrascan.io',
+    bridge_signer_url: 'https://relayer-002838819188.octra.network',
+    aliases: ['https://octra.network', 'http://46.101.86.250:8080']
+  }
+};
 
 
 var _ideProject = null;  // { id, name, created, template }
@@ -750,9 +768,75 @@ async function doVerifyProject() {
   }
 }
 
+function normalizeEndpoint(url) {
+  return String(url || '').trim().replace(/\/+$/, '').toLowerCase();
+}
+
+function presetMatches(preset, rpc, explorer) {
+  var cfg = NETWORK_PRESETS[preset];
+  if (!cfg) return false;
+  var nrpc = normalizeEndpoint(rpc);
+  var nexp = normalizeEndpoint(explorer);
+  if (nexp && nexp === normalizeEndpoint(cfg.explorer_url)) return true;
+  for (var i = 0; i < cfg.aliases.length; i++) {
+    if (nrpc === normalizeEndpoint(cfg.aliases[i])) return true;
+  }
+  return nrpc === normalizeEndpoint(cfg.rpc_url);
+}
+
+function detectNetworkPreset(rpc, explorer) {
+  if (presetMatches('devent', rpc, explorer)) return 'devent';
+  if (presetMatches('mainnet', rpc, explorer)) return 'mainnet';
+  return 'custom';
+}
+
+function setNetworkFieldLock(locked) {
+  ['settings-rpc', 'settings-explorer', 'settings-bridge-signer'].forEach(function(id) {
+    var el = $(id);
+    if (!el) return;
+    el.readOnly = locked;
+    if (locked) el.classList.add('network-locked');
+    else el.classList.remove('network-locked');
+  });
+}
+
+function applyNetworkPresetFields(preset) {
+  var cfg = NETWORK_PRESETS[preset];
+  var note = $('settings-network-note');
+  if (!cfg) {
+    setNetworkFieldLock(false);
+    if (note) note.textContent = 'custom RPC/explorer values will be saved';
+    return;
+  }
+  if ($('settings-rpc')) $('settings-rpc').value = cfg.rpc_url;
+  if ($('settings-explorer')) $('settings-explorer').value = cfg.explorer_url;
+  if ($('settings-bridge-signer')) $('settings-bridge-signer').value = cfg.bridge_signer_url;
+  setNetworkFieldLock(true);
+  if (note) note.textContent = cfg.label + ' preset loaded - save before compile/deploy/call';
+}
+
+function onNetworkPresetChange() {
+  var sel = $('settings-network');
+  _networkPreset = sel ? sel.value : 'custom';
+  applyNetworkPresetFields(_networkPreset);
+}
+
+function clearNetworkCaches() {
+  _cachedBal = null;
+  _historyOffset = 0;
+  _tokens = [];
+  _tokensLoaded = false;
+  _fees = {};
+  _encryptedBalanceRaw = 0;
+  _unclaimedCount = 0;
+  _tokenSymbols = {};
+  _tokenDecimals = {};
+}
+
 function networkLabel(host) {
-  if (host === '46.101.86.250') return 'main net';
-  if (host === '165.227.225.79') return 'dev net';
+  if (_networkPreset !== 'custom') return _networkPreset;
+  if (host === 'octra.network' || host === '46.101.86.250') return 'mainnet';
+  if (host === '165.227.225.79') return 'devent';
   if (host === 'localhost' || host === '127.0.0.1') return 'local';
   return host;
 }
@@ -2345,6 +2429,16 @@ async function loadSettings() {
     $('settings-rpc').value = w.rpc_url || 'http://46.101.86.250:8080';
     $('settings-explorer').value = w.explorer_url || 'https://octrascan.io';
     $('settings-bridge-signer').value = w.bridge_signer_url || 'https://relayer-002838819188.octra.network';
+    _networkPreset = detectNetworkPreset($('settings-rpc').value, $('settings-explorer').value);
+    if ($('settings-network')) $('settings-network').value = _networkPreset;
+    if (_networkPreset === 'custom') setNetworkFieldLock(false);
+    else setNetworkFieldLock(true);
+    var note = $('settings-network-note');
+    if (note) {
+      note.textContent = _networkPreset === 'custom'
+        ? 'custom RPC/explorer values will be saved'
+        : _networkPreset + ' active - save after changing presets';
+    }
   } catch (e) {}
   loadAccountList();
 }
@@ -2530,24 +2624,21 @@ function showImportAnother() {
 
 async function doSaveSettings() {
   clearResult('settings-result');
+  var preset = $('settings-network') ? $('settings-network').value : 'custom';
+  if (NETWORK_PRESETS[preset]) applyNetworkPresetFields(preset);
   var rpc = $('settings-rpc').value.trim();
   var explorer = $('settings-explorer').value.trim();
   var bridgeSigner = $('settings-bridge-signer').value.trim();
   if (!rpc) { showResult('settings-result', false, 'rpc url required'); return; }
   try {
     var resp = await api('POST', '/settings', { rpc_url: rpc, explorer_url: explorer, bridge_signer_url: bridgeSigner });
+    _networkPreset = detectNetworkPreset(resp.rpc_url || rpc, resp.explorer_url || explorer);
+    if ($('settings-network')) $('settings-network').value = _networkPreset;
+    setNetworkFieldLock(_networkPreset !== 'custom');
     if (explorer) _explorerUrl = explorer.replace(/\/+$/, '');
     try { _rpcHost = new URL(rpc).hostname; } catch(e) { _rpcHost = rpc; }
     if (resp && resp.cache_cleared) {
-      _cachedBal = null;
-      _historyOffset = 0;
-      _tokens = [];
-      _tokensLoaded = false;
-      _fees = {};
-      _encryptedBalanceRaw = 0;
-      _unclaimedCount = 0;
-      _tokenSymbols = {};
-      _tokenDecimals = {};
+      clearNetworkCaches();
       fetchBalance();
       if (document.querySelector('.nav-tabs a.active[data-view="dashboard"]'))
         loadDashboard();
@@ -2810,6 +2901,7 @@ async function loadWalletInfo() {
     _walletAddr = w.address || w.addr || '';
     if (w.explorer_url) _explorerUrl = w.explorer_url.replace(/\/+$/, '');
     if (w.rpc_url) try { _rpcHost = new URL(w.rpc_url).hostname; } catch(e) { _rpcHost = w.rpc_url; }
+    _networkPreset = detectNetworkPreset(w.rpc_url || '', w.explorer_url || '');
     _hasMasterSeed = !!w.has_master_seed;
     $('hdr-addr').innerHTML = '<span class="mono">' + _walletAddr + '</span>';
     $('hdr-logout').style.display = '';
@@ -2831,6 +2923,7 @@ async function doLogout() {
   _cachedBal = null;
   _encryptedBalanceRaw = 0;
   _hasMasterSeed = false;
+  _networkPreset = 'custom';
   $('hdr-logout').style.display = 'none';
   $('hdr-dev').style.display = 'none';
   $('hdr-apps').style.display = 'none';
