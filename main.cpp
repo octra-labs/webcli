@@ -1880,7 +1880,7 @@ int main(int argc, char** argv) {
         tx.to_ = contract_addr;
         tx.amount = "0";
         tx.nonce = nonce + 1;
-        tx.ou = parse_ou(body, "50000000");
+        tx.ou = parse_ou(body, "200000");
         tx.timestamp = now_ts();
         tx.op_type = "deploy";
         tx.encrypted_data = bytecode;
