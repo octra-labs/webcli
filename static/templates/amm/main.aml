@@ -40,6 +40,7 @@ contract AMM {
     // fee calculation
     let amount_in_after_fee = amount_in * (10000 - self.fee_rate) / 10000
     require(amount_in_after_fee > 0, "amount in after fee must be positive")
+    
     // invariant check
     let invariant_before = _invariant(self.reserve_x, self.reserve_y)
     let invariant_after = 0
@@ -51,11 +52,11 @@ contract AMM {
     require(invariant_after >= invariant_before, "invariant")
 
     // pull the funds
-    // if is_buy {
-    //   require(IOCS01(self.token_y).pull(caller, address(this), amount_in), "pull token y failed")
-    // } else {
-    //   require(IOCS01(self.token_x).pull(caller, address(this), amount_in), "pull token x failed")
-    // }
+    if is_buy {
+      require(call(self.token_y, "pull", caller, self_addr, amount_in), "pull token y failed")
+    } else {
+      require(call(self.token_x, "pull", caller, self_addr, amount_in), "pull token x failed")
+    }
 
     // update storage
     if is_buy {
@@ -67,11 +68,11 @@ contract AMM {
     }
 
     // push the funds
-    // if is_buy {
-    //   require(IOCS01(self.token_x).transfer(to, amount_out), "push token x failed")
-    // } else {
-    //   require(IOCS01(self.token_y).transfer(to, amount_out), "push token y failed")
-    // }
+    if is_buy {
+      require(call(self.token_x, "transfer", to, amount_out), "push token x failed")
+    } else {
+      require(call(self.token_y, "transfer", to, amount_out), "push token y failed")
+    }
 
     emit Swap(caller, to, is_buy, amount_in, amount_out)
     return true
@@ -102,9 +103,8 @@ contract AMM {
     require(amount_mint > 0, "amounts too small")
 
     // pull the funds
-    // TODO: uncomment once external contract call syntax is confirmed
-    // require(IOCS01(self.token_x).pull(caller, address(this), amount_x), "pull token x failed")
-    // require(IOCS01(self.token_y).pull(caller, address(this), amount_y), "pull token y failed")
+    require(call(self.token_x, "pull", caller, self_addr, amount_x), "pull token x failed")
+    require(call(self.token_y, "pull", caller, self_addr, amount_y), "pull token y failed")
 
     // update storage
     self.reserve_x += amount_x
@@ -133,9 +133,8 @@ contract AMM {
     self.lp_balances[caller] -= amount_remove
 
     // push the funds
-    // TODO: uncomment once external contract call syntax is confirmed
-    // require(IOCS01(self.token_x).transfer(recipient, amount_x), "push token x failed")
-    // require(IOCS01(self.token_y).transfer(recipient, amount_y), "push token y failed")
+    require(call(self.token_x, "transfer", recipient, amount_x), "push token x failed")
+    require(call(self.token_y, "transfer", recipient, amount_y), "push token y failed")
 
     emit RemoveLiquidity(caller, recipient, amount_remove)
     return amount_remove
@@ -152,10 +151,10 @@ contract AMM {
     let z = 0
     if n > 3 {
       z = n
-      let x = n / 2 + 1
+      let x = (n + 1) / 2
       while x < z {
         z = x
-        x = (n / x + x) / 2
+        x = (x + n / x) / 2
       }
     }
     if n > 0 && n <= 3 {

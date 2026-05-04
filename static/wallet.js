@@ -1024,11 +1024,21 @@ function addCommas(s) {
 }
 
 function fmtOct(raw) {
-  var v = parseFloat(raw);
-  if (v === 0 || isNaN(v)) return '0 oct';
-  var n = v / 1000000;
-  var s = n.toFixed(6).replace(/\.?0+$/, '');
-  return addCommas(s) + ' oct';
+  var s = String(raw == null ? '0' : raw).trim();
+  var neg = false;
+  if (s.charAt(0) === '-') {
+    neg = true;
+    s = s.slice(1);
+  }
+  s = s.replace(/[^0-9]/g, '').replace(/^0+/, '');
+  if (!s) s = '0';
+  var isZero = s === '0';
+  while (s.length <= 6) s = '0' + s;
+  var intPart = s.slice(0, s.length - 6);
+  var fracPart = s.slice(s.length - 6);
+  if (!intPart) intPart = '0';
+  var sign = (neg && !isZero) ? '-' : '';
+  return sign + addCommas(intPart + '.' + fracPart) + ' oct';
 }
 
 function formatUnits(rawStr, decimals) {
