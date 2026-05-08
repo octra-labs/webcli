@@ -22,5 +22,9 @@
   "multisig": {
     "name": "Multisig",
     "files": ["main.aml"]
+  },
+  "private_credit": {
+    "name": "Private Credit Score",
+    "files": ["main.aml"]
   }
 }

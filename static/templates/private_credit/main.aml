@@ -1,0 +1,115 @@
+contract PrivateCreditScore {
+  const BASE_SCORE: int = 520
+  const EXCELLENT_SCORE: int = 720
+  const GOOD_SCORE: int = 660
+  const FAIR_SCORE: int = 600
+
+  state {
+    owner: address
+    model_version: int
+    total_private_scores: int
+    encrypted_scores: map[address]string
+    score_epochs: map[address]int
+  }
+
+  event PrivateScoreStored(user: address, epoch_num: int)
+  event ModelVersionChanged(version: int)
+
+  constructor() {
+    self.owner = origin
+    self.model_version = 1
+    self.total_private_scores = 0
+  }
+
+  view fn plain_score(age: int, income_k: int, debt_k: int, savings_k: int, history_score: int, employment_years: int, defaults_count: int, open_accounts: int): int {
+    let score = BASE_SCORE
+    score -= age
+    score += income_k
+    score -= debt_k * 2
+    score += savings_k * 2
+    score += history_score * 2
+    score += employment_years * 8
+    score -= defaults_count * 140
+    score -= open_accounts * 3
+    return score
+  }
+
+  view fn private_score(pk_addr: string, ct_age: string, ct_income_k: string, ct_debt_k: string, ct_savings_k: string, ct_history_score: string, ct_employment_years: string, ct_defaults_count: string, ct_open_accounts: string): string {
+    let pk = fhe_load_pk(pk_addr)
+    let age = fhe_deser(ct_age)
+    let income_k = fhe_deser(ct_income_k)
+    let debt_k = fhe_deser(ct_debt_k)
+    let savings_k = fhe_deser(ct_savings_k)
+    let history_score = fhe_deser(ct_history_score)
+    let employment_years = fhe_deser(ct_employment_years)
+    let defaults_count = fhe_deser(ct_defaults_count)
+    let open_accounts = fhe_deser(ct_open_accounts)
+
+    let score = fhe_add_const(pk, fhe_scale(pk, age, -1), BASE_SCORE)
+    score = fhe_add(pk, score, fhe_scale(pk, income_k, 1))
+    score = fhe_add(pk, score, fhe_scale(pk, debt_k, -2))
+    score = fhe_add(pk, score, fhe_scale(pk, savings_k, 2))
+    score = fhe_add(pk, score, fhe_scale(pk, history_score, 2))
+    score = fhe_add(pk, score, fhe_scale(pk, employment_years, 8))
+    score = fhe_add(pk, score, fhe_scale(pk, defaults_count, -140))
+    score = fhe_add(pk, score, fhe_scale(pk, open_accounts, -3))
+    return fhe_ser(score)
+  }
+
+  fn store_score(ct_score: string): bool {
+    require(len(ct_score) > 0, "score required")
+    self.encrypted_scores[caller] = ct_score
+    self.score_epochs[caller] = epoch
+    self.total_private_scores += 1
+    emit PrivateScoreStored(caller, epoch)
+    return true
+  }
+
+  fn set_model_version(version: int): bool {
+    require(caller == self.owner, "not owner")
+    require(version > self.model_version, "version must increase")
+    self.model_version = version
+    emit ModelVersionChanged(version)
+    return true
+  }
+
+  view fn latest_score(addr: address): string {
+    return self.encrypted_scores[addr]
+  }
+
+  view fn latest_score_epoch(addr: address): int {
+    return self.score_epochs[addr]
+  }
+
+  view fn risk_tier(score: int): string {
+    if score >= EXCELLENT_SCORE {
+      return "excellent"
+    }
+    if score >= GOOD_SCORE {
+      return "good"
+    }
+    if score >= FAIR_SCORE {
+      return "fair"
+    }
+    return "high_risk"
+  }
+
+  view fn get_model_info(): string {
+    let s = to_string(self.model_version)
+    s = concat(s, ",")
+    s = concat(s, to_string(BASE_SCORE))
+    s = concat(s, ",")
+    s = concat(s, to_string(EXCELLENT_SCORE))
+    s = concat(s, ",")
+    s = concat(s, to_string(GOOD_SCORE))
+    s = concat(s, ",")
+    s = concat(s, to_string(FAIR_SCORE))
+    s = concat(s, ",")
+    s = concat(s, to_string(self.total_private_scores))
+    return s
+  }
+
+  view fn get_owner(): address {
+    return self.owner
+  }
+}

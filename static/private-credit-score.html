@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>private credit score</title>
+<link rel="stylesheet" href="private-credit-score.css?v=1">
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div>
+      <h1>private credit score</h1>
+      <div class="subline"><span id="wallet-state">checking wallet</span><span id="wallet-address"></span><span id="wallet-balance"></span></div>
+    </div>
+    <div class="top-actions">
+      <a class="ghost-link" href="https://faucet-devnet.octra.com" target="_blank" rel="noreferrer">faucet</a>
+      <a class="ghost-link" href="index.html">wallet</a>
+      <button id="refresh-wallet" type="button">refresh</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel contract-panel">
+      <div class="panel-title">
+        <span>contract</span>
+        <span id="contract-state" class="pill muted">not set</span>
+      </div>
+      <div class="field-row">
+        <label for="contract-address">address</label>
+        <input id="contract-address" type="text" placeholder="oct..." autocomplete="off" spellcheck="false">
+      </div>
+      <div class="button-row">
+        <button id="save-contract" type="button">save</button>
+        <button id="compile-contract" type="button">compile</button>
+        <button id="deploy-contract" type="button">deploy</button>
+      </div>
+      <div id="contract-output" class="log-box"></div>
+    </section>
+
+    <section class="panel model-panel">
+      <div class="panel-title">
+        <span>applicant</span>
+        <button id="load-sample" type="button" class="small-btn">sample</button>
+      </div>
+      <form id="score-form" class="grid-form">
+        <div class="field-row">
+          <label for="age">age</label>
+          <input id="age" name="age" type="number" min="18" max="100" step="1" value="34">
+        </div>
+        <div class="field-row">
+          <label for="income_k">income k</label>
+          <input id="income_k" name="income_k" type="number" min="0" max="1000" step="1" value="115">
+        </div>
+        <div class="field-row">
+          <label for="debt_k">debt k</label>
+          <input id="debt_k" name="debt_k" type="number" min="0" max="1000" step="1" value="42">
+        </div>
+        <div class="field-row">
+          <label for="savings_k">savings k</label>
+          <input id="savings_k" name="savings_k" type="number" min="0" max="1000" step="1" value="38">
+        </div>
+        <div class="field-row">
+          <label for="history_score">history</label>
+          <input id="history_score" name="history_score" type="number" min="0" max="100" step="1" value="82">
+        </div>
+        <div class="field-row">
+          <label for="employment_years">employment</label>
+          <input id="employment_years" name="employment_years" type="number" min="0" max="60" step="1" value="7">
+        </div>
+        <div class="field-row">
+          <label for="defaults_count">defaults</label>
+          <input id="defaults_count" name="defaults_count" type="number" min="0" max="20" step="1" value="0">
+        </div>
+        <div class="field-row">
+          <label for="open_accounts">accounts</label>
+          <input id="open_accounts" name="open_accounts" type="number" min="0" max="80" step="1" value="5">
+        </div>
+      </form>
+      <div class="button-row">
+        <button id="score-private" type="button" class="primary">score privately</button>
+        <button id="store-score" type="button" disabled>store encrypted</button>
+        <button id="load-latest" type="button">load latest</button>
+      </div>
+    </section>
+
+    <section class="panel result-panel">
+      <div class="panel-title">
+        <span>result</span>
+        <span id="run-state" class="pill muted">idle</span>
+      </div>
+      <div class="score-display">
+        <div>
+          <span class="score-label">score</span>
+          <strong id="score-value">-</strong>
+        </div>
+        <div>
+          <span class="score-label">tier</span>
+          <strong id="risk-tier">-</strong>
+        </div>
+      </div>
+      <div class="progress-list" id="progress-list">
+        <div class="progress-item">ready</div>
+      </div>
+      <details class="details-box">
+        <summary>ciphertext</summary>
+        <textarea id="cipher-output" readonly spellcheck="false"></textarea>
+      </details>
+    </section>
+  </main>
+</div>
+<script src="private-credit-score.js?v=1"></script>
+</body>
+</html>

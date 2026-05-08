@@ -1880,7 +1880,7 @@ int main(int argc, char** argv) {
         tx.to_ = contract_addr;
         tx.amount = "0";
         tx.nonce = nonce + 1;
-        tx.ou = parse_ou(body, "50000000");
+        tx.ou = parse_ou(body, "200000");
         tx.timestamp = now_ts();
         tx.op_type = "deploy";
         tx.encrypted_data = bytecode;
@@ -2026,6 +2026,39 @@ int main(int argc, char** argv) {
         json params = json::array();
         if (!params_str.empty()) {
             try { params = json::parse(params_str); } catch (...) {}
+        }
+        auto r = g_rpc.contract_call_view(addr, method, params, g_wallet.addr);
+        if (!r.ok) {
+            res.status = 400;
+            res.set_content(err_json(r.error).dump(), "application/json");
+            return;
+        }
+        res.set_content(r.result.dump(), "application/json");
+    });
+
+    svr.Post("/api/contract/view", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string addr = body.value("address", "");
+        std::string method = body.value("method", "");
+        if (addr.empty() || method.empty()) {
+            res.status = 400;
+            res.set_content(err_json("address and method required").dump(), "application/json");
+            return;
+        }
+        json params = json::array();
+        if (body.contains("params")) {
+            params = body["params"];
+            if (!params.is_array()) {
+                res.status = 400;
+                res.set_content(err_json("params must be an array").dump(), "application/json");
+                return;
+            }
         }
         auto r = g_rpc.contract_call_view(addr, method, params, g_wallet.addr);
         if (!r.ok) {
