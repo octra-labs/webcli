@@ -36,6 +36,9 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 .chain-arrow{width:40px;display:flex;align-items:center;justify-content:center;font-size:16px;color:#8C9DB6;flex-shrink:0}
 .notice-bar{padding:10px 20px;background:#F7F8FA;border-bottom:1px solid #E5E9EF;font-size:11px;color:#8C9DB6;line-height:170%}
 .notice-bar .disclaimer{color:#B0B8C8;font-size:10px;margin-top:4px}
+.network-note{margin-top:8px;padding:8px;background:#FFF8E1;border:1px solid #FFE082;color:#795548;font-size:10px;line-height:150%}
+.network-note.ok{background:#F1F8E9;border-color:#C8E6C9;color:#4CAF50}
+.network-note.err{background:#FFEBEE;border-color:#FFCDD2;color:#C62828}
 .bridge-body{padding:16px 20px}
 .input-group{margin-bottom:14px}
 .input-group label{display:block;font-size:11px;color:#8C9DB6;letter-spacing:0.5px;margin-bottom:4px}
@@ -155,6 +158,7 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 
   <div class="notice-bar">
     <div id="notice-text">lock OCT on octra, receive wOCT on ethereum</div>
+    <div class="network-note" id="network-note">Network note: choose Ethereum Mainnet (ETH) in MetaMask only. Bridge transactions are blocked on every other EVM network.</div>
   </div>
 
   <div class="bridge-body">
@@ -248,7 +252,8 @@ var WOCT_ADDR = '0x4647e1fE715c9e23959022C2416C71867F5a6E80';
 var ETH_BRIDGE = '0xE7eD69b852fd2a1406080B26A37e8E04e7dA4caE';
 var SIGNER_URL = '/api/bridge/signer';
 var RECOVERY_URL = 'https://relayer-002838819188.octra.network/recovery.json';
-var SEPOLIA_CHAIN_ID = '0xaa36a7';
+var ETH_CHAIN_ID = '0x1';
+var ETH_CHAIN_NAME = 'Ethereum Mainnet';
 var OCT_DECIMALS = 6;
 
 var _dir = 'o2e';
@@ -257,6 +262,7 @@ var _ethAddr = '';
 var _octBalance = '0';
 var _woctBalance = '0';
 var _ethProvider = null;
+var _ethNetworkOk = false;
 
 async function wcli(method, path, body) {
   var opts = { method: method, headers: {} };
@@ -330,6 +336,7 @@ async function connectWithProvider(w) {
   try {
     var accounts = await _ethProvider.request({ method: 'eth_requestAccounts' });
     if (!accounts.length) return;
+    await requireEthNetwork();
     _ethAddr = accounts[0];
     $('eth-addr').textContent = _ethAddr.substring(0, 8) + '...' + _ethAddr.slice(-4);
     $('eth-addr').classList.remove('none');
@@ -351,7 +358,73 @@ async function connectWithProvider(w) {
         try { recoveryFetch(true); } catch(e) {}
       }
     });
+    if (_ethProvider.on) {
+      _ethProvider.on('chainChanged', function(chainId) {
+        setEthNetworkState(isEthMainnet(chainId), chainId);
+        if (!isEthMainnet(chainId)) showStatus('err', 'wrong MetaMask network. Select Ethereum Mainnet (ETH); bridge transactions are blocked on this network.');
+        refreshBalances();
+        validateForm();
+      });
+    }
   } catch(e) { showStatus('err', w.name + ': ' + e.message); }
+}
+
+function isEthMainnet(chainId) {
+  return (chainId || '').toLowerCase() === ETH_CHAIN_ID;
+}
+
+function setEthNetworkState(ok, chainId) {
+  _ethNetworkOk = !!ok;
+  var note = $('network-note');
+  if (note) {
+    note.className = 'network-note ' + (ok ? 'ok' : (chainId ? 'err' : ''));
+    note.textContent = ok
+      ? 'Network: Ethereum Mainnet (ETH). Bridge commands will be sent only on this network.'
+      : 'Network note: choose Ethereum Mainnet (ETH) in MetaMask only. Bridge transactions are blocked on every other EVM network.';
+  }
+}
+
+async function checkEthNetwork(silent) {
+  if (!_ethProvider) return false;
+  try {
+    var chainId = await _ethProvider.request({ method: 'eth_chainId' });
+    var ok = isEthMainnet(chainId);
+    setEthNetworkState(ok, chainId);
+    if (!ok && !silent) showStatus('err', 'select Ethereum Mainnet (ETH) in MetaMask. Current network is blocked.');
+    return ok;
+  } catch(e) {
+    setEthNetworkState(false, '');
+    if (!silent) showStatus('err', 'cannot read MetaMask network');
+    return false;
+  }
+}
+
+async function requireEthNetwork() {
+  if (!_ethProvider) throw new Error('connect MetaMask first');
+  if (await checkEthNetwork(true)) return true;
+  try {
+    showStatus('info', 'switching MetaMask to Ethereum Mainnet (ETH)...');
+    await _ethProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: ETH_CHAIN_ID }] });
+  } catch(e) {
+    if (e && e.code === 4902) {
+      await _ethProvider.request({
+        method: 'wallet_addEthereumChain',
+        params: [{
+          chainId: ETH_CHAIN_ID,
+          chainName: ETH_CHAIN_NAME,
+          nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+          rpcUrls: ['https://ethereum.publicnode.com'],
+          blockExplorerUrls: ['https://etherscan.io']
+        }]
+      });
+    } else {
+      throw new Error('select Ethereum Mainnet (ETH) in MetaMask. Bridge transactions are blocked on other networks.');
+    }
+  }
+  if (!(await checkEthNetwork(true))) {
+    throw new Error('select Ethereum Mainnet (ETH) in MetaMask. Bridge transactions are blocked on other networks.');
+  }
+  return true;
 }
 
 async function refreshBalances() {
@@ -360,6 +433,7 @@ async function refreshBalances() {
   }
   if (_ethAddr && WOCT_ADDR) {
     try {
+      if (!(await checkEthNetwork(true))) { _woctBalance = '0'; $('bal-woct').textContent = 'switch to ETH'; validateForm(); return; }
       var data = '0x70a08231000000000000000000000000' + _ethAddr.substring(2);
       var result = await _ethProvider.request({ method: 'eth_call', params: [{ to: WOCT_ADDR, data: data }, 'latest'] });
       _woctBalance = (!result || result === '0x' || result === '0x0') ? '0' : BigInt(result).toString();
@@ -402,6 +476,7 @@ function validateForm() {
   var amt = parseFloat(amtStr);
   $('output-val').textContent = (amtStr && !isNaN(amt) && amt > 0) ? addCommas(amtStr) : '0';
   if (!_octraAddr || !_ethAddr) { btn.disabled = true; btn.textContent = 'connect both wallets'; return; }
+  if (!_ethNetworkOk) { btn.disabled = true; btn.textContent = 'switch to ETH'; return; }
   if (!amtStr || isNaN(amt) || amt <= 0) { btn.disabled = true; btn.textContent = 'enter amount'; return; }
   var rawAmt = parseU(amtStr, OCT_DECIMALS);
   if (_dir === 'o2e') {
@@ -431,7 +506,7 @@ function doBridge() {
     $('cm-from').textContent = _octraAddr.substring(0, 14) + '...';
     $('cm-to').textContent = recip;
     $('cm-receive').textContent = amt + ' wOCT';
-    $('cm-warning').textContent = 'OCT will be locked on octra. wOCT will be minted on ethereum.';
+    $('cm-warning').textContent = 'OCT will be locked on octra. wOCT will be minted on Ethereum Mainnet only. Select Ethereum Mainnet (ETH) in MetaMask before claiming.';
     $('cm-confirm-btn').textContent = 'lock & bridge';
   } else {
     $('cm-title').textContent = 'confirm: burn wOCT';
@@ -440,7 +515,7 @@ function doBridge() {
     $('cm-from').textContent = _ethAddr.substring(0, 10) + '...';
     $('cm-to').textContent = recip;
     $('cm-receive').textContent = amt + ' OCT';
-    $('cm-warning').textContent = 'wOCT will be burned on ethereum. OCT will be unlocked on octra (~2 min).';
+    $('cm-warning').textContent = 'wOCT will be burned on Ethereum Mainnet only. Do not approve or sign this bridge on any other EVM network.';
     $('cm-confirm-btn').textContent = 'burn & bridge';
   }
   $('confirm-modal').classList.add('show');
@@ -450,6 +525,7 @@ function closeModal() { $('confirm-modal').classList.remove('show'); }
 
 async function confirmBridge() {
   closeModal();
+  try { await requireEthNetwork(); } catch(e) { showStatus('err', e.message); return; }
   if (_dir === 'o2e') await doForward();
   else await doReverse();
 }
@@ -478,6 +554,7 @@ async function doForward() {
   ]);
   setStep('lock', 'active');
   try {
+    await requireEthNetwork();
     var r = await wcli('POST', '/contract/call', {
       address: BRIDGE_VAULT, method: 'lock_to_eth', params: [recip], amount: rawAmt, ou: '1000'
     });
@@ -523,6 +600,7 @@ async function doForward() {
     var lastSimErr = '';
     while (simAttempts < simMaxAttempts) {
       try {
+        await requireEthNetwork();
         await _ethProvider.request({
           method: 'eth_call',
           params: [{ from: _ethAddr, to: ETH_BRIDGE, data: claimData.calldata }, 'latest']
@@ -568,6 +646,7 @@ async function waitForReceipt(txHash, timeoutMs) {
   var interval = 3000;
   while (Date.now() - start < timeoutMs) {
     try {
+      if (!(await checkEthNetwork(true))) { await new Promise(function(r) { setTimeout(r, interval); }); continue; }
       var receipt = await _ethProvider.request({
         method: 'eth_getTransactionReceipt',
         params: [txHash]
@@ -585,6 +664,7 @@ async function getSafeGas() {
   var floor = 10000000000n;
   var priority = 2000000000n;
   try {
+    await requireEthNetwork();
     var gasPriceHex = await _ethProvider.request({method: 'eth_gasPrice'});
     var current = BigInt(gasPriceHex);
     var doubled = current * 2n;
@@ -608,10 +688,12 @@ async function doClaim() {
   var explorerBase = (typeof ETH_EXPLORER !== 'undefined' && ETH_EXPLORER) ? ETH_EXPLORER : 'https://etherscan.io';
   var claimTx = null;
   try {
+    await requireEthNetwork();
     var c = _pendingClaim;
 
     if (claimBtn) { claimBtn.textContent = 'verifying...'; }
     try {
+      await requireEthNetwork();
       await _ethProvider.request({
         method: 'eth_call',
         params: [{ from: _ethAddr, to: ETH_BRIDGE, data: c.calldata }, 'latest']
@@ -624,9 +706,10 @@ async function doClaim() {
 
     if (claimBtn) { claimBtn.textContent = 'submitting to metamask...'; }
     var gas = await getSafeGas();
+    await requireEthNetwork();
     claimTx = await _ethProvider.request({
       method: 'eth_sendTransaction',
-      params: [{ from: _ethAddr, to: ETH_BRIDGE, data: c.calldata, gas: '0x60000', maxFeePerGas: gas.maxFeePerGas, maxPriorityFeePerGas: gas.maxPriorityFeePerGas }]
+      params: [{ from: _ethAddr, to: ETH_BRIDGE, data: c.calldata, gas: '0x60000', chainId: ETH_CHAIN_ID, maxFeePerGas: gas.maxFeePerGas, maxPriorityFeePerGas: gas.maxPriorityFeePerGas }]
     });
   } catch(e) {
     if (claimBtn) { claimBtn.disabled = false; claimBtn.textContent = 'claim on ethereum (retry)'; }
@@ -793,6 +876,7 @@ function historyClearOld() {
 async function historyCheckE2o(entry) {
   if (!entry.burn_tx_hash) { historyUpdate(entry.id, {last_checked:Date.now()}); return; }
   if (!_ethProvider) { historyUpdate(entry.id, {last_checked:Date.now()}); return; }
+  if (!(await checkEthNetwork(true))) { historyUpdate(entry.id, {last_checked:Date.now(), last_error:'switch MetaMask to Ethereum Mainnet (ETH)'}); return; }
   try {
     var r = await _ethProvider.request({method:'eth_getTransactionReceipt', params:[entry.burn_tx_hash]});
     if (!r) { historyUpdate(entry.id, {last_checked:Date.now()}); return; }
@@ -842,6 +926,10 @@ async function historyCheckOne(entry) {
     var claimData = await buildClaimCalldata(entry.epoch, entry.recipient, entry.amount_raw, data.result);
     if (!claimData) { historyUpdate(entry.id, {last_checked:Date.now(), last_error:'no claim calldata'}); return; }
     if (_ethProvider && _ethAddr) {
+      if (!(await checkEthNetwork(true))) {
+        historyUpdate(entry.id, {claim_data:claimData, last_checked:Date.now(), last_error:'switch MetaMask to Ethereum Mainnet (ETH)'});
+        return;
+      }
       try {
         await _ethProvider.request({method:'eth_call', params:[{from:_ethAddr, to:ETH_BRIDGE, data:claimData.calldata}, 'latest']});
         historyUpdate(entry.id, {status:'claimable', claim_data:claimData, last_checked:Date.now(), last_error:null});
@@ -923,7 +1011,9 @@ async function historyClaim(id) {
   historyUpdate(id, {status:'claiming'});
   showStatus('info', 'submitting claim: ' + entry.amt_display + ' wOCT ep ' + entry.epoch);
   try {
+    await requireEthNetwork();
     try {
+      await requireEthNetwork();
       await _ethProvider.request({method:'eth_call', params:[{from:_ethAddr, to:ETH_BRIDGE, data:entry.claim_data.calldata}, 'latest']});
     } catch(simErr) {
       var em = (simErr && (simErr.message || String(simErr))) || '';
@@ -941,7 +1031,8 @@ async function historyClaim(id) {
       return;
     }
     var gasFees = await getSafeGas();
-    var txReq = {from:_ethAddr, to:ETH_BRIDGE, data:entry.claim_data.calldata};
+    await requireEthNetwork();
+    var txReq = {from:_ethAddr, to:ETH_BRIDGE, data:entry.claim_data.calldata, chainId:ETH_CHAIN_ID};
     for (var k in gasFees) txReq[k] = gasFees[k];
     var txHash = await _ethProvider.request({method:'eth_sendTransaction', params:[txReq]});
     historyUpdate(id, {claim_tx_hash:txHash});
@@ -1150,11 +1241,13 @@ async function doReverse() {
   setStep('approve', 'active');
   var burnHistoryId = null;
   try {
+    await requireEthNetwork();
     var gas1 = await getSafeGas();
     var approveData = '0x095ea7b3' + ETH_BRIDGE.substring(2).toLowerCase().padStart(64, '0') + BigInt(rawAmt).toString(16).padStart(64, '0');
+    await requireEthNetwork();
     var approveTx = await _ethProvider.request({
       method: 'eth_sendTransaction',
-      params: [{ from: _ethAddr, to: WOCT_ADDR, data: approveData, gas: '0x30000', maxFeePerGas: gas1.maxFeePerGas, maxPriorityFeePerGas: gas1.maxPriorityFeePerGas }]
+      params: [{ from: _ethAddr, to: WOCT_ADDR, data: approveData, gas: '0x30000', chainId: ETH_CHAIN_ID, maxFeePerGas: gas1.maxFeePerGas, maxPriorityFeePerGas: gas1.maxPriorityFeePerGas }]
     });
     var approveReceipt = await waitForReceipt(approveTx, 300000);
     if (!approveReceipt || approveReceipt.status !== '0x1') {
@@ -1169,9 +1262,10 @@ async function doReverse() {
     var burnSig = '0xe3e3aed0';
     var encoded = abiEncodeStringUint(recip, rawAmt);
     var burnData = burnSig + encoded;
+    await requireEthNetwork();
     var burnTx = await _ethProvider.request({
       method: 'eth_sendTransaction',
-      params: [{ from: _ethAddr, to: ETH_BRIDGE, data: burnData, gas: '0x40000', maxFeePerGas: gas2.maxFeePerGas, maxPriorityFeePerGas: gas2.maxPriorityFeePerGas }]
+      params: [{ from: _ethAddr, to: ETH_BRIDGE, data: burnData, gas: '0x40000', chainId: ETH_CHAIN_ID, maxFeePerGas: gas2.maxFeePerGas, maxPriorityFeePerGas: gas2.maxPriorityFeePerGas }]
     });
     burnHistoryId = 'burn_' + burnTx.slice(2, 10) + '_' + Date.now();
     historyAdd({
@@ -1261,6 +1355,7 @@ function esc(s) { var d = document.createElement('div'); d.textContent = s; retu
 async function getWoctBalance() {
   if (!_ethAddr || !_ethProvider || !WOCT_ADDR) return '0';
   try {
+    if (!(await checkEthNetwork(true))) return '0';
     var data = '0x70a08231000000000000000000000000' + _ethAddr.substring(2);
     var result = await _ethProvider.request({ method: 'eth_call', params: [{ to: WOCT_ADDR, data: data }, 'latest'] });
     if (!result || result === '0x' || result === '0x0') return '0';
