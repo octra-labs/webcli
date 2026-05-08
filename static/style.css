@@ -478,6 +478,18 @@ td {
   min-height: 60px;
 }
 
+.settings-note {
+  margin-top: 3px;
+  color: #8C9DB6;
+  font-size: 10px;
+  line-height: 150%;
+}
+
+.form-row input.network-locked {
+  background: #F6F7F9;
+  color: #516E9A;
+}
+
 .action-btn {
   display: block;
   width: 100%;

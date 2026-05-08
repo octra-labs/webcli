@@ -688,6 +688,33 @@ int main(int argc, char** argv) {
         }
     });
 
+    svr.Post("/api/wallet/derive-address", [](const httplib::Request& req, httplib::Response& res) {
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string priv = body.value("priv", "");
+        if (priv.empty()) {
+            res.status = 400;
+            res.set_content(err_json("priv required").dump(), "application/json");
+            return;
+        }
+        try {
+            auto w = octra::wallet_from_private_key(priv);
+            json j;
+            j["address"] = w.addr;
+            j["public_key"] = w.pub_b64;
+            octra::secure_zero(w.sk, 64);
+            octra::secure_zero(w.pk, 32);
+            res.set_content(j.dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(err_json(e.what()).dump(), "application/json");
+        }
+    });
+
     svr.Get("/api/wallet", [](const httplib::Request&, httplib::Response& res) {
         WALLET_GUARD
         json j;
@@ -1880,7 +1907,7 @@ int main(int argc, char** argv) {
         tx.to_ = contract_addr;
         tx.amount = "0";
         tx.nonce = nonce + 1;
-        tx.ou = parse_ou(body, "50000000");
+        tx.ou = parse_ou(body, "200000");
         tx.timestamp = now_ts();
         tx.op_type = "deploy";
         tx.encrypted_data = bytecode;

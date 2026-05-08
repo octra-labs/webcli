@@ -430,9 +430,7 @@ inline Wallet import_wallet_mnemonic(const std::string& path,
     return w;
 }
 
-inline Wallet import_wallet(const std::string& path,
-                             const std::string& priv_b64_raw,
-                             const std::string& pin) {
+inline Wallet wallet_from_private_key(const std::string& priv_b64_raw) {
     std::string clean;
     for (char c : priv_b64_raw) {
         if (c != '\n' && c != '\r' && c != ' ' && c != '\t')
@@ -454,9 +452,16 @@ inline Wallet import_wallet(const std::string& path,
     w.priv_b64 = base64_encode(w.sk, 32);
     w.pub_b64 = base64_encode(w.pk, 32);
     w.rpc_url = "http://46.101.86.250:8080";
-    save_wallet_encrypted(path, w, pin);
     try_mlock(w.sk, 64);
     try_mlock(w.pk, 32);
+    return w;
+}
+
+inline Wallet import_wallet(const std::string& path,
+                             const std::string& priv_b64_raw,
+                             const std::string& pin) {
+    Wallet w = wallet_from_private_key(priv_b64_raw);
+    save_wallet_encrypted(path, w, pin);
     return w;
 }
 
