@@ -98,10 +98,13 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 .history-list .hs-item .hs-amount{font-weight:600;color:#2B3A52}
 .history-list .hs-item .hs-to{font-family:monospace;font-size:10px;color:#516E9A}
 .history-list .hs-item .hs-time{color:#8C9DB6;font-size:10px;margin-top:1px}
+.history-list .hs-item .hs-error{color:#E57373;font-size:10px;margin-top:2px;line-height:140%}
 .history-list .hs-item .hs-status{font-size:10px;padding:3px 8px;border:1px solid #D0D7E2;white-space:nowrap;font-weight:500;min-width:110px;box-sizing:border-box;text-align:center;display:inline-block}
 .history-list .hs-item .hs-status.pending{color:#8C9DB6;border-color:#E5E9EF}
 .history-list .hs-item .hs-status.claimable{color:#fff;background:#4CAF50;border-color:#4CAF50;cursor:pointer}
 .history-list .hs-item .hs-status.claimable:hover{background:#43A047}
+.history-list .hs-item .hs-status.wrong{color:#fff;background:#E57373;border-color:#E57373;cursor:pointer}
+.history-list .hs-item .hs-status.wrong:hover{background:#D75C5C}
 .history-list .hs-item .hs-status.claimed{color:#4CAF50;border-color:#C8E6C9;background:#F1F8E9}
 .history-list .hs-item .hs-status.expired{color:#E57373;border-color:#FFCDD2}
 .history-list .hs-item .hs-status.failed{color:#E57373;border-color:#FFCDD2}
@@ -201,8 +204,9 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
     <div class="history-list" id="history-list"></div>
     <div class="hs-actions">
       <a onclick="historyRefreshAll()">refresh status</a>
+      <a onclick="historyRepairWrongNetwork(false)">repair wrong network</a>
       <a onclick="recoveryFetch(false)">recover from network</a>
-      <a onclick="historyClearOld()">clear old (&gt;24h)</a>
+      <a onclick="historyClearOld()">clear completed (&gt;24h)</a>
     </div>
   </div>
 
@@ -255,6 +259,7 @@ var RECOVERY_URL = 'https://relayer-002838819188.octra.network/recovery.json';
 var ETH_CHAIN_ID = '0x1';
 var ETH_CHAIN_NAME = 'Ethereum Mainnet';
 var OCT_DECIMALS = 6;
+var BRIDGE_ACTIVE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 var _dir = 'o2e';
 var _octraAddr = '';
@@ -807,7 +812,8 @@ function historyRender() {
   var labels = {
     pending_header: 'waiting', claimable: 'claim', claiming: 'claiming...',
     claimed: 'claimed', expired: 'expired', failed: 'failed',
-    burning: 'burning', burn_pending: 'unlocking...', unlocked: 'unlocked'
+    burning: 'burning', burn_pending: 'unlocking...', unlocked: 'unlocked',
+    wrong_network: 'claim on ETH'
   };
   var visible = _historyShowAll ? arr : arr.slice(0, _historyPageSize);
   for (var i = 0; i < visible.length; i++) {
@@ -818,6 +824,7 @@ function historyRender() {
     var toShort = e.recipient ? (e.recipient.substr(0, 6) + '...' + e.recipient.substr(-4)) : '';
     var cls = 'pending';
     if (e.status === 'claimable') cls = 'claimable';
+    else if (e.status === 'wrong_network') cls = 'wrong';
     else if (e.status === 'claimed' || e.status === 'unlocked') cls = 'claimed';
     else if (e.status === 'expired') cls = 'expired';
     else if (e.status === 'failed') cls = 'failed';
@@ -834,17 +841,21 @@ function historyRender() {
     } else {
       var lockLink = e.lock_tx_hash ? ('<a href="https://octrascan.io/tx.html?hash=' + e.lock_tx_hash + '" target="_blank" style="color:#3B567F;text-decoration:none">' + hh + ':' + mm + '</a>') : (hh + ':' + mm);
       var claimInfo = e.claim_tx_hash ? (' | <a href="https://etherscan.io/tx/' + e.claim_tx_hash + '" target="_blank" style="color:#4CAF50;text-decoration:none">view</a>') : '';
+      if (!claimInfo && e.wrong_network_claim_tx) claimInfo = ' | wrong net ' + e.wrong_network_claim_tx.slice(0, 10) + '...';
       var epTag = e.epoch ? (' | ep ' + e.epoch) : ' | ep pending';
       midLine = '<div class="hs-time">' + lockLink + epTag + claimInfo + '</div>';
     }
+    var errLine = e.last_error ? '<div class="hs-error">' + esc(e.last_error) + '</div>' : '';
     var row = document.createElement('div');
     row.className = 'hs-item';
     row.innerHTML =
-      '<div class="hs-main">' + topLine + midLine + '</div>' +
+      '<div class="hs-main">' + topLine + midLine + errLine + '</div>' +
       '<div class="hs-status ' + cls + '" data-id="' + e.id + '">' + (labels[e.status] || e.status) + '</div>';
     var statusEl = row.querySelector('.hs-status');
     if (e.status === 'claimable') {
       statusEl.onclick = (function(id) { return function() { historyClaim(id); }; })(e.id);
+    } else if (e.status === 'wrong_network') {
+      statusEl.onclick = (function(id) { return function() { historyRetryWrongNetwork(id); }; })(e.id);
     }
     list.appendChild(row);
   }
@@ -873,6 +884,81 @@ function historyClearOld() {
   historyRender();
 }
 
+async function historyCheckClaimTxOnEth(entry) {
+  if (!entry || entry.direction === 'e2o' || !entry.claim_tx_hash || !_ethProvider) return false;
+  if (!(await checkEthNetwork(true))) {
+    historyUpdate(entry.id, {last_checked:Date.now(), last_error:'switch MetaMask to Ethereum Mainnet (ETH) to verify this claim'});
+    return false;
+  }
+  try {
+    var r = await _ethProvider.request({method:'eth_getTransactionReceipt', params:[entry.claim_tx_hash]});
+    if (r && r.status === '0x1') {
+      historyUpdate(entry.id, {status:'claimed', last_checked:Date.now(), last_error:null});
+      return false;
+    }
+    if (!r && entry.status === 'claiming' && entry.claim_submitted_at && Date.now() - entry.claim_submitted_at < 600000) {
+      historyUpdate(entry.id, {last_checked:Date.now(), last_error:'claim tx submitted on Ethereum Mainnet, waiting for receipt'});
+      return false;
+    }
+    var wrongHash = entry.claim_tx_hash;
+    var nextStatus = entry.claim_data ? 'wrong_network' : 'pending_header';
+    historyUpdate(entry.id, {
+      status: nextStatus,
+      claim_tx_hash: '',
+      wrong_network_claim_tx: wrongHash,
+      last_checked: Date.now(),
+      last_error: r && r.status === '0x0'
+        ? 'Ethereum claim reverted. Refresh, then claim again on Ethereum Mainnet.'
+        : 'Previous claim tx is not on Ethereum Mainnet. It was likely signed on another EVM network; claim again on ETH.'
+    });
+    return true;
+  } catch(e) {
+    historyUpdate(entry.id, {last_checked:Date.now(), last_error:(e.message || 'claim verification failed')});
+    return false;
+  }
+}
+
+async function historyRetryWrongNetwork(id) {
+  var entry = historyGet(id);
+  if (!entry) return;
+  if (!entry.claim_data) {
+    showStatus('info', 'refreshing claim data before retry...');
+    await historyCheckOne(entry);
+    entry = historyGet(id);
+  }
+  if (entry && entry.claim_data) {
+    historyUpdate(id, {status:'claimable', last_error:null});
+    await historyClaim(id);
+  } else {
+    showStatus('err', 'claim data is not ready yet. Click refresh status or recover from network.');
+  }
+}
+
+async function historyRepairWrongNetwork(silent) {
+  if (!_ethProvider || !_ethAddr) {
+    if (!silent) showStatus('err', 'connect MetaMask first, then repair wrong-network claims');
+    return 0;
+  }
+  try {
+    await requireEthNetwork();
+  } catch(e) {
+    if (!silent) showStatus('err', e.message);
+    return 0;
+  }
+  var arr = historyLoad();
+  var reopened = 0;
+  for (var i = 0; i < arr.length; i++) {
+    var e = arr[i];
+    if (e.direction === 'e2o') continue;
+    if ((e.status === 'claimed' || e.status === 'claiming') && e.claim_tx_hash) {
+      if (await historyCheckClaimTxOnEth(e)) reopened += 1;
+    }
+  }
+  if (reopened > 0) await historyCheckAll();
+  if (!silent) showStatus(reopened > 0 ? 'ok' : 'info', reopened > 0 ? ('reopened ' + reopened + ' wrong-network claim' + (reopened === 1 ? '' : 's') + '. Claim again on ETH.') : 'no wrong-network claims found');
+  return reopened;
+}
+
 async function historyCheckE2o(entry) {
   if (!entry.burn_tx_hash) { historyUpdate(entry.id, {last_checked:Date.now()}); return; }
   if (!_ethProvider) { historyUpdate(entry.id, {last_checked:Date.now()}); return; }
@@ -895,8 +981,17 @@ async function historyCheckE2o(entry) {
 }
 
 async function historyCheckOne(entry) {
-  if (entry.status === 'claimed' || entry.status === 'claiming' || entry.status === 'unlocked') return;
-  if (Date.now() - entry.locked_at > 86400000) {
+  if ((entry.status === 'claimed' || entry.status === 'claiming') && entry.claim_tx_hash && entry.direction !== 'e2o') {
+    var reopened = await historyCheckClaimTxOnEth(entry);
+    if (!reopened) return;
+    entry = historyGet(entry.id) || entry;
+  }
+  if (entry.status === 'claimed' || entry.status === 'unlocked') return;
+  if (entry.status === 'claiming' && !entry.claim_tx_hash) {
+    historyUpdate(entry.id, {status:'claimable', last_error:'claim was interrupted before tx submission; retry on Ethereum Mainnet'});
+    return;
+  }
+  if (Date.now() - entry.locked_at > BRIDGE_ACTIVE_TTL_MS) {
     if (entry.status !== 'expired') historyUpdate(entry.id, {status:'expired', last_checked:Date.now()});
     return;
   }
@@ -965,7 +1060,11 @@ async function historyCheckAll() {
   var arr = historyLoad();
   for (var i = 0; i < arr.length; i++) {
     var e = arr[i];
-    if (e.status === 'claimed' || e.status === 'expired' || e.status === 'claiming' || e.status === 'unlocked') continue;
+    if (e.status === 'claimed' && e.claim_tx_hash && e.direction !== 'e2o') {
+      await historyCheckOne(e);
+      continue;
+    }
+    if (e.status === 'expired' || e.status === 'unlocked') continue;
     await historyCheckOne(e);
   }
 }
@@ -996,11 +1095,13 @@ function startHistoryAutoPoll() {
 
 async function historyRefreshAll() {
   showStatus('info', 'refreshing history...');
+  await historyRepairWrongNetwork(true);
   await historyCheckAll();
   var arr = historyLoad();
   var pending = arr.filter(function(e){return e.status==='pending_header';}).length;
   var claimable = arr.filter(function(e){return e.status==='claimable';}).length;
-  showStatus('info', 'history refreshed: ' + claimable + ' claimable, ' + pending + ' waiting');
+  var wrong = arr.filter(function(e){return e.status==='wrong_network';}).length;
+  showStatus('info', 'history refreshed: ' + (claimable + wrong) + ' claimable, ' + pending + ' waiting');
 }
 
 async function historyClaim(id) {
@@ -1035,7 +1136,7 @@ async function historyClaim(id) {
     var txReq = {from:_ethAddr, to:ETH_BRIDGE, data:entry.claim_data.calldata, chainId:ETH_CHAIN_ID};
     for (var k in gasFees) txReq[k] = gasFees[k];
     var txHash = await _ethProvider.request({method:'eth_sendTransaction', params:[txReq]});
-    historyUpdate(id, {claim_tx_hash:txHash});
+    historyUpdate(id, {claim_tx_hash:txHash, claim_submitted_at:Date.now(), last_error:null});
     showStatus('info', 'tx submitted: <a href="https://etherscan.io/tx/' + txHash + '" target="_blank" style="color:#3B567F">' + txHash.slice(0,10) + '...</a>');
     var receipt = await waitForReceipt(txHash, 300000);
     if (!receipt) {
