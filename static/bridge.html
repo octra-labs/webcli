@@ -249,6 +249,7 @@ const ETH_BRIDGE = '0xE7eD69b852fd2a1406080B26A37e8E04e7dA4caE';
 const SIGNER_URL = '/api/bridge/signer';
 const RECOVERY_URL = 'https://relayer-002838819188.octra.network/recovery.json';
 const MAINNET_CHAIN_ID = '0x1';
+const ETH_FALLBACK_RPC = 'https://ethereum.publicnode.com';
 const ETHEREUM_MAINNET_PARAMS = {
   chainId: MAINNET_CHAIN_ID,
   chainName: 'Ethereum Mainnet',
@@ -276,6 +277,7 @@ const ETH_CHAIN_NAMES = {
   '0x66eee': 'Arbitrum Sepolia'
 };
 const OCT_DECIMALS = 6;
+const OCTRA_BRIDGE_OU_RAW = '1000';
 
 let _currentChainId = null;
 
@@ -290,8 +292,44 @@ async function wcli(method, path, body) {
   var opts = { method: method, headers: {} };
   if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   var res = await fetch('/api' + path, opts);
-  if (!res.ok) throw new Error('WebCLI error: ' + res.status);
-  return res.json();
+  var text = await res.text();
+  var data = null;
+  try { data = text ? JSON.parse(text) : null; } catch(e) {}
+  if (!res.ok) {
+    var msg = data && data.error ? data.error : (text || ('HTTP ' + res.status));
+    throw new Error('WebCLI error: ' + res.status + ' - ' + msg);
+  }
+  return data || {};
+}
+
+async function ethCallWithFallback(tx) {
+  try {
+    if (_ethProvider) {
+      return await _ethProvider.request({method:'eth_call', params:[tx, 'latest']});
+    }
+  } catch(e) {
+    var primaryError = e;
+    try {
+      var resp = await fetch(ETH_FALLBACK_RPC, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({jsonrpc:'2.0', id:1, method:'eth_call', params:[tx, 'latest']})
+      });
+      var data = await resp.json();
+      if (data && !data.error) return data.result;
+      throw new Error(data && data.error ? data.error.message : 'fallback eth_call failed');
+    } catch(_) {
+      throw primaryError;
+    }
+  }
+  var resp2 = await fetch(ETH_FALLBACK_RPC, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({jsonrpc:'2.0', id:1, method:'eth_call', params:[tx, 'latest']})
+  });
+  var data2 = await resp2.json();
+  if (data2 && data2.error) throw new Error(data2.error.message || 'fallback eth_call failed');
+  return data2.result;
 }
 
 async function connectOctra() {
@@ -521,7 +559,11 @@ function validateForm() {
   if (!amtStr || isNaN(amt) || amt <= 0) { btn.disabled = true; btn.textContent = 'enter amount'; return; }
   const rawAmt = parseU(amtStr, OCT_DECIMALS);
   if (_dir === 'o2e') {
-    if (BigInt(rawAmt) > BigInt(_octBalance)) { btn.disabled = true; btn.textContent = 'insufficient OCT'; return; }
+    if (BigInt(rawAmt) + BigInt(OCTRA_BRIDGE_OU_RAW) > BigInt(_octBalance)) {
+      btn.disabled = true;
+      btn.textContent = 'insufficient OCT incl. fee';
+      return;
+    }
     if (!recip || !/^0x[0-9a-fA-F]{40}$/.test(recip)) { btn.disabled = true; btn.textContent = 'enter valid ETH address'; return; }
     if (_currentChainId && _currentChainId !== MAINNET_CHAIN_ID) { btn.disabled = false; btn.textContent = 'switch to ethereum mainnet'; return; }
     btn.disabled = false; btn.textContent = 'bridge ' + amtStr + ' OCT';
@@ -534,7 +576,10 @@ function validateForm() {
 }
 
 function setMax() {
-  if (_dir === 'o2e') $('bridge-amount').value = fmtU(_octBalance, OCT_DECIMALS);
+  if (_dir === 'o2e') {
+    var maxRaw = BigInt(_octBalance) - BigInt(OCTRA_BRIDGE_OU_RAW);
+    $('bridge-amount').value = fmtU(maxRaw > 0n ? maxRaw.toString() : '0', OCT_DECIMALS);
+  }
   else $('bridge-amount').value = fmtU(_woctBalance, OCT_DECIMALS);
   validateForm();
 }
@@ -600,7 +645,7 @@ async function doForward() {
   setStep('lock', 'active');
   try {
     var r = await wcli('POST', '/contract/call', {
-      address: BRIDGE_VAULT, method: 'lock_to_eth', params: [recip], amount: rawAmt, ou: '1000'
+      address: BRIDGE_VAULT, method: 'lock_to_eth', params: [recip], amount: rawAmt, ou: OCTRA_BRIDGE_OU_RAW
     });
     if (!r.tx_hash) throw new Error('no tx_hash');
     setStep('lock', 'done'); setStep('confirm', 'active');
@@ -644,10 +689,7 @@ async function doForward() {
     var lastSimErr = '';
     while (simAttempts < simMaxAttempts) {
       try {
-        await _ethProvider.request({
-          method: 'eth_call',
-          params: [{ from: _ethAddr, to: ETH_BRIDGE, data: claimData.calldata }, 'latest']
-        });
+        await ethCallWithFallback({ from: _ethAddr, to: ETH_BRIDGE, data: claimData.calldata });
         simOk = true;
         break;
       } catch(simErr) {
@@ -734,10 +776,7 @@ async function doClaim() {
 
     if (claimBtn) { claimBtn.textContent = 'verifying...'; }
     try {
-      await _ethProvider.request({
-        method: 'eth_call',
-        params: [{ from: _ethAddr, to: ETH_BRIDGE, data: c.calldata }, 'latest']
-      });
+      await ethCallWithFallback({ from: _ethAddr, to: ETH_BRIDGE, data: c.calldata });
     } catch(simErr) {
       if (claimBtn) { claimBtn.disabled = false; claimBtn.textContent = 'claim on ethereum (retry)'; }
       showStatus('err', 'claim would revert right now. header may have been evicted or state changed. pending claim preserved - click button to retry in a few seconds.');
@@ -965,7 +1004,7 @@ async function historyCheckOne(entry) {
     if (!claimData) { historyUpdate(entry.id, {last_checked:Date.now(), last_error:'no claim calldata'}); return; }
     if (_ethProvider && _ethAddr) {
       try {
-        await _ethProvider.request({method:'eth_call', params:[{from:_ethAddr, to:ETH_BRIDGE, data:claimData.calldata}, 'latest']});
+        await ethCallWithFallback({from:_ethAddr, to:ETH_BRIDGE, data:claimData.calldata});
         historyUpdate(entry.id, {status:'claimable', claim_data:claimData, last_checked:Date.now(), last_error:null});
       } catch(err) {
         var m = (err && (err.message || String(err))) || '';
@@ -1047,7 +1086,7 @@ async function historyClaim(id) {
   showStatus('info', 'submitting claim: ' + entry.amt_display + ' wOCT ep ' + entry.epoch);
   try {
     try {
-      await _ethProvider.request({method:'eth_call', params:[{from:_ethAddr, to:ETH_BRIDGE, data:entry.claim_data.calldata}, 'latest']});
+      await ethCallWithFallback({from:_ethAddr, to:ETH_BRIDGE, data:entry.claim_data.calldata});
     } catch(simErr) {
       var em = (simErr && (simErr.message || String(simErr))) || '';
       var ed = (simErr && simErr.data) ? (typeof simErr.data === 'string' ? simErr.data : (simErr.data.data || simErr.data.originalError && simErr.data.originalError.data || '')) : '';

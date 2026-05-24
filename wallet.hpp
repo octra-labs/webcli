@@ -269,7 +269,7 @@ inline Wallet load_wallet_encrypted(const std::string& path,
     Wallet w;
     w.priv_b64 = j.at("priv").get<std::string>();
     w.addr = j.at("addr").get<std::string>();
-    w.rpc_url = j.value("rpc", "http://46.101.86.250:8080");
+    w.rpc_url = j.value("rpc", "https://octra.network/rpc");
     w.explorer_url = j.value("explorer", "https://octrascan.io");
     w.bridge_signer_url = j.value("bridge_signer", "");
     w.master_seed_b64 = j.value("master_seed", "");
@@ -347,7 +347,7 @@ inline std::pair<Wallet, std::string> create_wallet(const std::string& path,
         throw std::runtime_error("derived address is invalid");
     w.priv_b64 = base64_encode(w.sk, 32);
     w.pub_b64 = base64_encode(w.pk, 32);
-    w.rpc_url = "http://46.101.86.250:8080";
+    w.rpc_url = "https://octra.network/rpc";
     w.master_seed_b64 = base64_encode(seed.data(), 64);
     w.mnemonic = mnemonic;
     w.hd_index = 0;
@@ -367,7 +367,7 @@ inline Wallet load_wallet_legacy(const std::string& path) {
     f >> j;
     w.priv_b64 = j.at("priv").get<std::string>();
     w.addr = j.at("addr").get<std::string>();
-    w.rpc_url = j.value("rpc", "http://165.227.225.79:8080");
+    w.rpc_url = j.value("rpc", "https://octra.network/rpc");
     auto raw = base64_decode(w.priv_b64);
     if (raw.size() >= 64) {
         memcpy(w.sk, raw.data(), 64);
@@ -418,7 +418,7 @@ inline Wallet import_wallet_mnemonic(const std::string& path,
         throw std::runtime_error("derived address is invalid");
     w.priv_b64 = base64_encode(w.sk, 32);
     w.pub_b64 = base64_encode(w.pk, 32);
-    w.rpc_url = "http://46.101.86.250:8080";
+    w.rpc_url = "https://octra.network/rpc";
     w.master_seed_b64 = base64_encode(seed.data(), 64);
     w.mnemonic = mnemonic;
     w.hd_index = 0;
@@ -453,7 +453,7 @@ inline Wallet import_wallet(const std::string& path,
         throw std::runtime_error("derived address is invalid");
     w.priv_b64 = base64_encode(w.sk, 32);
     w.pub_b64 = base64_encode(w.pk, 32);
-    w.rpc_url = "http://46.101.86.250:8080";
+    w.rpc_url = "https://octra.network/rpc";
     save_wallet_encrypted(path, w, pin);
     try_mlock(w.sk, 64);
     try_mlock(w.pk, 32);
