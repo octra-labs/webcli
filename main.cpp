@@ -1341,7 +1341,7 @@ int main(int argc, char** argv) {
                 {
                     std::string addr_v2 = octra::addr_from_mnemonic(mn, 2);
                     std::string addr_v1 = octra::addr_from_mnemonic(mn, 1);
-                    std::string rpc_url = g_wallet_loaded ? g_wallet.rpc_url : "http://46.101.86.250:8080";
+                    std::string rpc_url = g_wallet_loaded ? g_wallet.rpc_url : "https://octra.network/rpc";
                     octra::RpcClient probe;
                     probe.set_url(rpc_url);
                     auto r2 = probe.get_balance(addr_v2);
@@ -6377,7 +6377,9 @@ int main(int argc, char** argv) {
     });
     pvac_bg.detach();
 
-    printf("octra_wallet listening on http://127.0.0.1:%d\n", port);
-    svr.listen("127.0.0.1", port);
+    const char* env_bind = std::getenv("OCTRA_BIND_HOST");
+    std::string bind_host = (env_bind && *env_bind) ? env_bind : "0.0.0.0";
+    printf("octra_wallet listening on http://%s:%d\n", bind_host.c_str(), port);
+    svr.listen(bind_host.c_str(), port);
     return 0;
 }
