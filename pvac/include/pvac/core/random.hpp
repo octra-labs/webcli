@@ -7,11 +7,17 @@
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     #include <stdlib.h>
-#elif defined(__linux__)
+#elif defined(__ANDROID__) || defined(__linux__)
     #include <unistd.h>
-    #include <sys/random.h>
     #include <fcntl.h>
     #include <errno.h>
+    #if defined(__ANDROID__)
+        // Header khusus Android/Termux (Bionic libc)
+        #include <sys/syscall.h>
+    #else
+        // Header standar Linux desktop
+        #include <sys/random.h>
+    #endif
 #elif defined(_WIN32)
     #define NOMINMAX
     #include <windows.h>
@@ -41,11 +47,16 @@ inline void csprng_bytes(uint8_t * out, size_t n) {
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     arc4random_buf(out, n);
 
-#elif defined(__linux__)
+#elif defined(__ANDROID__) || defined(__linux__)
     size_t off = 0;
 
     while (off < n) {
+        // Logika dipisah agar Linux desktop tetap menggunakan getrandom standar
+#if defined(__ANDROID__)
+        ssize_t r = syscall(SYS_getrandom, out + off, n - off, 0);
+#else
         ssize_t r = getrandom(out + off, n - off, 0);
+#endif
 
         if (r > 0) {
             off += r;

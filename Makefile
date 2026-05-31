@@ -32,6 +32,12 @@ UNAME_S:=$(shell uname -s)
 IS_WIN:=$(findstring MINGW,$(UNAME_S))$(findstring MSYS,$(UNAME_S))
 ifeq ($(UNAME_M),arm64)
 ARCH:=-march=armv8-a+crypto
+else ifeq ($(UNAME_M),aarch64)
+ARCH:=-march=armv8-a+crypto -D_GNU_SOURCE
+else ifneq (,$(findstring armv7,$(UNAME_M)))
+ARCH:=-march=armv7-a -D_GNU_SOURCE
+else ifeq ($(UNAME_M),arm)
+ARCH:=-march=armv7-a -D_GNU_SOURCE
 else
 ARCH:=-march=native
 endif
@@ -75,8 +81,8 @@ LIBPVAC:=$(PVAC_BUILD)/libpvac.$(SHARED_EXT)
 
 all: check-deps $(TARGET)
 
-LEVELDB_PATHS:=/usr/include/leveldb/db.h /usr/local/include/leveldb/db.h /opt/homebrew/include/leveldb/db.h /opt/local/include/leveldb/db.h /mingw64/include/leveldb/db.h /ucrt64/include/leveldb/db.h /clang64/include/leveldb/db.h $(LDB_PREFIX)/include/leveldb/db.h
-OPENSSL_PATHS:=/usr/include/openssl/evp.h /usr/local/include/openssl/evp.h /opt/homebrew/include/openssl/evp.h /opt/local/include/openssl/evp.h /mingw64/include/openssl/evp.h /ucrt64/include/openssl/evp.h /clang64/include/openssl/evp.h $(SSL_PREFIX)/include/openssl/evp.h
+LEVELDB_PATHS:=/usr/include/leveldb/db.h /usr/local/include/leveldb/db.h /opt/homebrew/include/leveldb/db.h /opt/local/include/leveldb/db.h /mingw64/include/leveldb/db.h /ucrt64/include/leveldb/db.h /clang64/include/leveldb/db.h $(LDB_PREFIX)/include/leveldb/db.h $(PREFIX)/include/leveldb/db.h
+OPENSSL_PATHS:=/usr/include/openssl/evp.h /usr/local/include/openssl/evp.h /opt/homebrew/include/openssl/evp.h /opt/local/include/openssl/evp.h /mingw64/include/openssl/evp.h /ucrt64/include/openssl/evp.h /clang64/include/openssl/evp.h $(SSL_PREFIX)/include/openssl/evp.h $(PREFIX)/include/openssl/evp.h
 
 HAVE_LEVELDB:=$(shell for p in $(LEVELDB_PATHS); do [ -f "$$p" ] && { echo yes; exit 0; }; done; echo no)
 HAVE_OPENSSL:=$(shell for p in $(OPENSSL_PATHS); do [ -f "$$p" ] && { echo yes; exit 0; }; done; echo no)
@@ -95,6 +101,7 @@ else
 			echo 'auto-install failed. install manually:'; \
 			echo 'sudo apt install libleveldb-dev libssl-dev (debian/ubuntu)'; \
 			echo 'brew install leveldb openssl@3 (macos)'; \
+			echo 'pkg install leveldb openssl (termux)'; \
 			echo 'setup.bat from cmd.exe (windows)'; \
 			exit 1; \
 		}; \
@@ -102,6 +109,7 @@ else
 		echo 'setup.sh not found. install manually:'; \
 		echo 'sudo apt install libleveldb-dev libssl-dev (debian/ubuntu)'; \
 		echo 'brew install leveldb openssl@3 (macos)'; \
+		echo 'pkg install leveldb openssl (termux)'; \
 		echo 'setup.bat from cmd.exe (windows)'; \
 		exit 1; \
 	fi

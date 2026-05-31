@@ -15,6 +15,7 @@ for arg in "$@"; do
 done
 
 OS="$(uname -s)"
+OS_ENV="$(uname -o 2>/dev/null || echo Other)"
 
 if [ "$(id -u)" = "0" ]; then
     SUDO=""
@@ -73,40 +74,48 @@ case "$OS" in
         fi
         ;;
     Linux)
-        echo "[1/3] linux detected"
-        if [ -f /etc/os-release ]; then
-            . /etc/os-release
-            echo "distro: ${ID:-unknown} ${VERSION_ID:-}"
-        fi
-        if command -v apt-get &>/dev/null; then
-            echo "installing dependencies (apt)..."
-            $SUDO apt-get update -qq
-            $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-                build-essential g++ libssl-dev libleveldb-dev pkg-config make curl
-        elif command -v dnf &>/dev/null; then
-            echo "installing dependencies (dnf)..."
-            $SUDO dnf install -y gcc-c++ openssl-devel leveldb-devel make pkgconfig
-        elif command -v yum &>/dev/null; then
-            echo "installing dependencies (yum)..."
-            $SUDO yum install -y gcc-c++ openssl-devel leveldb-devel make pkgconfig
-        elif command -v zypper &>/dev/null; then
-            echo "installing dependencies (zypper)..."
-            $SUDO zypper install -y gcc-c++ libopenssl-devel leveldb-devel make pkg-config
-        elif command -v pacman &>/dev/null; then
-            echo "installing dependencies (pacman)..."
-            $SUDO pacman -S --noconfirm --needed gcc openssl leveldb make pkgconf
-        elif command -v apk &>/dev/null; then
-            echo "installing dependencies (apk)..."
-            $SUDO apk add --no-cache g++ openssl-dev leveldb-dev make pkgconfig musl-dev linux-headers
-        elif command -v emerge &>/dev/null; then
-            echo "installing dependencies (emerge)..."
-            $SUDO emerge --noreplace dev-libs/openssl dev-libs/leveldb sys-devel/gcc sys-devel/make
-        elif command -v xbps-install &>/dev/null; then
-            echo "installing dependencies (xbps)..."
-            $SUDO xbps-install -Sy gcc openssl-devel leveldb-devel make pkgconf
+        # --- BLOK KHUSUS ANDROID (TERMUX) ---
+        if [ "$OS_ENV" = "Android" ] || [ -n "$TERMUX_VERSION" ]; then
+            echo "[1/3] Android (Termux) detected"
+            echo "installing dependencies (pkg)..."
+            pkg update -y -q
+            pkg install -y -q clang make openssl leveldb pkg-config
         else
-            echo "unknown package manager. install manually: g++, libssl-dev, libleveldb-dev, make, pkg-config"
-            exit 1
+            echo "[1/3] linux detected"
+            if [ -f /etc/os-release ]; then
+                . /etc/os-release
+                echo "distro: ${ID:-unknown} ${VERSION_ID:-}"
+            fi
+            if command -v apt-get &>/dev/null; then
+                echo "installing dependencies (apt)..."
+                $SUDO apt-get update -qq
+                $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                    build-essential g++ libssl-dev libleveldb-dev pkg-config make curl
+            elif command -v dnf &>/dev/null; then
+                echo "installing dependencies (dnf)..."
+                $SUDO dnf install -y gcc-c++ openssl-devel leveldb-devel make pkgconfig
+            elif command -v yum &>/dev/null; then
+                echo "installing dependencies (yum)..."
+                $SUDO yum install -y gcc-c++ openssl-devel leveldb-devel make pkgconfig
+            elif command -v zypper &>/dev/null; then
+                echo "installing dependencies (zypper)..."
+                $SUDO zypper install -y gcc-c++ libopenssl-devel leveldb-devel make pkg-config
+            elif command -v pacman &>/dev/null; then
+                echo "installing dependencies (pacman)..."
+                $SUDO pacman -S --noconfirm --needed gcc openssl leveldb make pkgconf
+            elif command -v apk &>/dev/null; then
+                echo "installing dependencies (apk)..."
+                $SUDO apk add --no-cache g++ openssl-dev leveldb-dev make pkgconfig musl-dev linux-headers
+            elif command -v emerge &>/dev/null; then
+                echo "installing dependencies (emerge)..."
+                $SUDO emerge --noreplace dev-libs/openssl dev-libs/leveldb sys-devel/gcc sys-devel/make
+            elif command -v xbps-install &>/dev/null; then
+                echo "installing dependencies (xbps)..."
+                $SUDO xbps-install -Sy gcc openssl-devel leveldb-devel make pkgconf
+            else
+                echo "unknown package manager. install manually: g++, libssl-dev, libleveldb-dev, make, pkg-config"
+                exit 1
+            fi
         fi
         ;;
     FreeBSD)
