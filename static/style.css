@@ -1371,3 +1371,162 @@ td {
   background: #3B567F; color: #fff; border-color: #3B567F;
 }
 .modal-btn-primary:hover { background: #2C4060; }
+
+/* ===== MOBILE PATCH ===== */
+
+@media (max-width: 480px) {
+
+  .wrap {
+    width: 100%;
+    border-left: none;
+    border-right: none;
+  }
+
+  /* HEADER */
+
+  header {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 8px;
+    gap: 8px;
+  }
+
+  header .left {
+    width: 100%;
+  }
+
+  header .subtitle {
+    max-width: 100%;
+    font-size: 9px;
+  }
+
+  .hdr-right-group {
+    width: 100%;
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+
+  .hdr-right-group .right,
+  .hdr-right-group .logout-btn {
+    flex: 1 1 calc(50% - 4px);
+    justify-content: center;
+    text-align: center;
+  }
+
+  /* NAVIGATION */
+
+  .nav-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .nav-tabs a {
+    flex: none;
+    min-width: max-content;
+    padding: 8px 12px;
+  }
+
+  /* DASHBOARD */
+
+  .stat-box {
+    flex: 1 1 50%;
+    min-width: 50%;
+  }
+
+  /* BALANCE STRIP */
+
+  .balance-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    line-height: 1.5;
+  }
+
+  /* BUTTON ROWS */
+
+  .action-row {
+    flex-direction: column;
+  }
+
+  .action-row .action-btn {
+    width: 100%;
+  }
+
+  /* MODAL */
+
+  #modal-box {
+    width: 95%;
+    min-width: auto;
+    padding: 16px;
+  }
+
+  #modal-btns {
+    flex-direction: column;
+  }
+
+  /* MNEMONIC */
+
+  .mnemonic-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  /* TOKENS */
+
+  .token-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .token-balance {
+    align-self: flex-end;
+  }
+
+  .token-actions {
+    flex-wrap: wrap;
+  }
+
+  /* DEV TOOLS */
+
+  .ide-layout {
+    flex-direction: column;
+  }
+
+  .ide-file-tree {
+    width: 100%;
+    min-width: 100%;
+    max-height: 180px;
+    border-right: none;
+    border-bottom: 1px solid #D0D5DD;
+  }
+
+  .editor-wrap {
+    height: 300px;
+  }
+
+  .editor-gutter {
+    min-width: 28px;
+    font-size: 10px;
+  }
+
+  /* CONTRACT TABS */
+
+  .ide-bottom-tabs {
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  /* LONG ADDRESS / HASH */
+
+  .mono {
+    word-break: break-all;
+  }
+
+  input,
+  textarea,
+  select {
+    min-width: 0;
+  }
+
+}
