@@ -380,6 +380,116 @@ body.circle-overlay-open {
     justify-content: flex-start;
   }
 }
+
+@media (max-width: 700px){
+
+  .circle-meta{
+    padding:8px;
+  }
+
+  .circle-preview-head{
+    padding:8px;
+    font-size:10px;
+  }
+
+  .circle-preview-body{
+    min-height:400px;
+  }
+
+  .circle-preview-frame{
+    min-height:400px;
+  }
+
+  .circle-preview-text{
+    min-height:400px;
+    font-size:10px;
+    padding:8px;
+  }
+
+  .circle-browser-actions{
+    width:100%;
+    padding-top:0;
+  }
+
+  .circle-browser-actions .action-btn{
+    width:100%;
+  }
+
+  .circle-browser-overlay{
+    inset:0;
+    border:none;
+  }
+
+  .circle-browser-overlay-top{
+    padding:8px;
+  }
+
+  .circle-browser-overlay-header{
+    flex-direction:column;
+    align-items:flex-start;
+  }
+
+  .circle-browser-overlay-controls{
+    gap:8px;
+  }
+
+  .modal-overlay{
+    padding:10px;
+  }
+
+  .modal-box{
+    width:100%;
+    padding:14px;
+  }
+
+  .modal-buttons{
+    flex-direction:column;
+  }
+
+  .modal-buttons .modal-btn{
+    width:100%;
+  }
+
+}
+
+@media (max-width: 480px){
+
+  header{
+    flex-direction:column;
+    align-items:flex-start;
+    gap:8px;
+  }
+
+  .hdr-right-group{
+    width:100%;
+    margin-left:0;
+  }
+
+  .hdr-right-group .right{
+    width:100%;
+    text-align:center;
+    justify-content:center;
+  }
+
+  header .subtitle{
+    white-space:normal;
+    overflow:visible;
+    text-overflow:unset;
+    line-height:1.4;
+  }
+
+  .circle-summary-line{
+    width:100%;
+  }
+
+  .circle-preview-link{
+    margin-top:4px;
+  }
+
+  .circle-note{
+    line-height:1.6;
+  }
+}
 </style>
 </head>
 <body>

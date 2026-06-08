@@ -25,6 +25,13 @@ brew install openssl@3
 sudo apt install g++ libssl-dev make
 ```
 
+### android (termux)
+
+```
+pkg update
+pkg install clang make openssl leveldb pkg-config
+```
+
 then (valid for both)
 
 ```
