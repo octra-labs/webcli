@@ -154,6 +154,16 @@
   padding-top: 13px;
 }
 
+.circle-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.circle-actions .action-btn {
+  width: auto;
+}
+
 .circle-summary {
   list-style: none;
 }
@@ -203,49 +213,47 @@
   border-bottom: 0;
 }
 
-.circle-authoring-grid {
-  display: grid;
-  grid-template-columns: 220px 1fr;
-  gap: 14px;
-}
-
-.circle-authoring-side {
-  display: grid;
-  align-content: start;
-  gap: 8px;
-}
-
-.circle-authoring-main {
-  min-width: 0;
-}
-
 .circle-note {
   color: #8C9DB6;
   font-size: 11px;
   line-height: 150%;
 }
 
-.circle-select,
 .circle-shell input[type="password"],
 .circle-shell input[type="text"] {
   width: 100%;
   box-sizing: border-box;
 }
 
-.circle-shell input[type="file"] {
-  width: 100%;
-  font-size: 12px;
-  color: #3B567F;
+.circle-authoring-settings td:first-child {
+  width: 110px;
+}
+
+.circle-authoring-settings {
+  margin-bottom: 8px;
 }
 
 .circle-upload-file {
   padding-top: 6px;
 }
 
-.circle-actions {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+.circle-confirm-box {
+  width: min(680px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+}
+
+.circle-status-line + .circle-status-line {
+  margin-top: 2px;
+}
+
+.circle-status-link {
+  color: #3B567F;
+  text-decoration: underline;
+}
+
+.circle-status-link:hover {
+  color: #2C4060;
 }
 
 .circle-browser-overlay {
@@ -371,7 +379,6 @@ body.circle-overlay-open {
 
 @media (max-width: 980px) {
   .circle-browser-fields,
-  .circle-authoring-grid,
   .circle-browser-overlay-controls {
     grid-template-columns: 1fr;
   }
@@ -430,64 +437,156 @@ tr:hover td { background: #F6F7F9; }
       <div class="subtitle">alpha version of the browser for circles and native programs (night build)</div>
     </div>
     <div class="hdr-right-group">
-      <div class="right online">circle viewer</div>
+      <div class="right online">circles</div>
+      <button class="right logout-btn" id="wallet-btn" type="button">wallet</button>
     </div>
   </header>
 
   <div class="nav-tabs">
-    <a href="index.html">wallet</a>
-    <a href="#" class="active">circles</a>
+    <a href="#" class="active" data-circle-view="browse">browse</a>
+    <a href="#" data-circle-view="deploy">deploy</a>
+    <a href="#" data-circle-view="upload">upload</a>
   </div>
 
   <div class="content-area">
-    <div class="circle-stack">
-      <div class="circle-browser-card">
-        <div class="section-title">circle browser</div>
-        <div class="form-area">
-          <div class="circle-browser-fields">
-            <div class="form-row circle-browser-address">
-              <label for="circle-id">circle uri or id</label>
-              <input id="circle-id" type="text" placeholder="oct://oct.../index.html or oct...">
+    <div class="view circle-view active" id="view-browse">
+      <div class="circle-stack">
+        <div class="circle-browser-card">
+          <div class="section-title">circle browser</div>
+          <div class="form-area">
+            <div class="circle-browser-fields">
+              <div class="form-row circle-browser-address">
+                <label for="circle-id">circle uri or id</label>
+                <input id="circle-id" type="text" placeholder="oct://oct.../index.html or oct...">
+              </div>
+              <div class="form-row circle-browser-passphrase">
+                <label for="sealed-passphrase">sealed read passphrase</label>
+                <input id="sealed-passphrase" type="password" placeholder="required for sealed read resources">
+              </div>
+              <div class="circle-browser-actions">
+                <button class="action-btn" id="load-btn" type="button">open</button>
+              </div>
             </div>
-            <div class="form-row circle-browser-passphrase">
-              <label for="sealed-passphrase">sealed read passphrase</label>
-              <input id="sealed-passphrase" type="password" placeholder="required for sealed_read resources">
-            </div>
-            <div class="circle-browser-actions">
-              <button class="action-btn" id="load-btn" type="button">open</button>
-            </div>
+            <div class="circle-note">simple viewing mode: paste an `oct://...` address, enter the sealed read key if needed, this will open the resource.</div>
+            <div class="msg-box" id="status">idle</div>
           </div>
-          <div class="circle-note">simple viewing mode: paste an `oct://...` address, enter the sealed read key if needed, this will open the resource.</div>
-          <div class="msg-box" id="status">idle</div>
+        </div>
+
+        <details class="circle-collapse">
+          <summary class="section-title circle-summary">
+            <span class="circle-summary-line">
+              <span>circle info</span>
+              <span class="circle-summary-note" id="meta-summary-note">no information yet</span>
+              <span class="circle-summary-arrow"></span>
+            </span>
+          </summary>
+          <div class="circle-collapse-body">
+            <div class="circle-meta" id="meta"></div>
+          </div>
+        </details>
+
+        <div class="circle-preview-card">
+          <div class="section-title">
+            <span class="circle-summary-line">
+              <span>resource preview</span>
+              <button class="circle-preview-link" id="preview-expand-btn" type="button" hidden>expand</button>
+            </span>
+          </div>
+          <div class="circle-preview-host" id="preview-inline-host">
+            <div class="circle-preview-head" id="preview-head">no asset loaded</div>
+            <div class="circle-preview-body" id="preview-body"></div>
+          </div>
         </div>
       </div>
+    </div>
 
-      <details class="circle-collapse">
-        <summary class="section-title circle-summary">
-          <span class="circle-summary-line">
-            <span>circle info</span>
-            <span class="circle-summary-note" id="meta-summary-note">no information yet</span>
-            <span class="circle-summary-arrow"></span>
-          </span>
-        </summary>
-        <div class="circle-collapse-body">
-          <div class="circle-meta" id="meta"></div>
+    <div class="view circle-view" id="view-deploy">
+      <div class="section-title">circle deployer</div>
+      <div class="form-area">
+        <div class="form-row">
+          <label for="deploy-mode">circle mode</label>
+          <select id="deploy-mode">
+            <option value="sealed" selected>sealed_read</option>
+            <option value="public">public_resources</option>
+          </select>
         </div>
-      </details>
-
-      <div class="circle-preview-card">
-        <div class="section-title">
-          <span class="circle-summary-line">
-            <span>resource preview</span>
-            <button class="circle-preview-link" id="preview-expand-btn" type="button" hidden>expand</button>
-          </span>
+        <table class="detail-table circle-authoring-settings">
+          <tbody>
+            <tr><td>runtime</td><td class="mono" id="deploy-runtime">octb</td></tr>
+            <tr><td>privacy class</td><td class="mono" id="deploy-privacy-class">sealed</td></tr>
+            <tr><td>browser mode</td><td class="mono" id="deploy-browser-mode">native_sealed</td></tr>
+            <tr><td>resource mode</td><td class="mono" id="deploy-resource-mode">sealed_read</td></tr>
+          </tbody>
+        </table>
+        <div class="form-row">
+          <label for="deploy-fee">fee (ou) - recommended by default</label>
+          <input id="deploy-fee" type="text" value="200000">
         </div>
-        <div class="circle-preview-host" id="preview-inline-host">
-          <div class="circle-preview-head" id="preview-head">no asset loaded</div>
-          <div class="circle-preview-body" id="preview-body"></div>
+        <div class="action-row">
+          <button class="action-btn" id="deploy-btn" type="button">deploy</button>
         </div>
+        <div class="msg-box" id="deploy-status">idle</div>
       </div>
+    </div>
 
+    <div class="view circle-view" id="view-upload">
+      <div class="section-title">circle asset upload</div>
+      <div class="form-area">
+        <div class="form-row">
+          <label for="upload-circle-id">circle id</label>
+          <input id="upload-circle-id" type="text" placeholder="oct...">
+        </div>
+        <div class="form-row">
+          <label for="upload-mode">asset mode</label>
+          <select id="upload-mode">
+            <option value="sealed" selected>sealed_read</option>
+            <option value="plain">plain</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>asset</label>
+          <div class="circle-actions">
+            <label class="action-btn">choose file<input id="upload-file" type="file" style="display:none"></label>
+          </div>
+          <div class="circle-note circle-upload-file" id="upload-file-state">no asset selected</div>
+        </div>
+        <div class="form-row">
+          <label for="upload-path">path</label>
+          <input id="upload-path" type="text" placeholder="/filename.ext">
+        </div>
+        <div class="form-row">
+          <label for="upload-content-type">content type</label>
+          <input id="upload-content-type" type="text" placeholder="application/octet-stream">
+        </div>
+        <div id="upload-sealed-fields">
+          <div class="form-row">
+            <label for="upload-key-id">key id</label>
+            <input id="upload-key-id" type="text" value="main">
+          </div>
+          <div class="form-row">
+            <label for="upload-passphrase">sealed read passphrase</label>
+            <input id="upload-passphrase" type="password">
+          </div>
+          <div class="form-row">
+            <label for="upload-padding">padding class</label>
+            <select id="upload-padding">
+              <option value="">none</option>
+              <option value="4k">4k</option>
+              <option value="16k">16k</option>
+              <option value="32k">32k</option>
+              <option value="128k">128k</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <label for="upload-fee">fee (ou) - calculated from fee tier by default</label>
+          <input id="upload-fee" type="text" placeholder="auto">
+        </div>
+        <div class="action-row">
+          <button class="action-btn" id="upload-btn" type="button">upload</button>
+        </div>
+        <div class="msg-box" id="upload-status">idle</div>
+      </div>
     </div>
   </div>
 
@@ -507,7 +606,7 @@ tr:hover td { background: #F6F7F9; }
       </div>
       <div class="form-row circle-browser-passphrase">
         <label for="overlay-sealed-passphrase">sealed read passphrase</label>
-        <input id="overlay-sealed-passphrase" type="password" placeholder="required for sealed_read resources">
+        <input id="overlay-sealed-passphrase" type="password" placeholder="required for sealed read resources">
       </div>
       <div class="circle-browser-actions circle-browser-actions-inline">
         <button class="action-btn" id="overlay-open-btn" type="button">open</button>
