@@ -7,6 +7,10 @@
     "name": "OCS01 Token",
     "files": ["main.aml", "interfaces/IOCS01.aml"]
   },
+  "nft": {
+    "name": "XNS-1 NFT",
+    "files": ["main.aml", "interfaces/IXNS1.aml"]
+  },
   "vault": {
     "name": "Vault",
     "files": ["main.aml"]
