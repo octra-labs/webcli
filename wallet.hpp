@@ -272,6 +272,8 @@ inline Wallet load_wallet_encrypted(const std::string& path,
     w.rpc_url = j.value("rpc", "https://octra.network/rpc");
     if (w.rpc_url == "http://46.101.86.250:8080" || w.rpc_url == "http://46.101.86.250:8080/")
         w.rpc_url = "https://octra.network/rpc";
+    if (w.rpc_url == "http://165.227.225.79:8080" || w.rpc_url == "http://165.227.225.79:8080/")
+        w.rpc_url = "https://devnet.octrascan.io/rpc";
     w.explorer_url = j.value("explorer", "https://octrascan.io");
     w.bridge_signer_url = j.value("bridge_signer", "");
     w.master_seed_b64 = j.value("master_seed", "");
@@ -370,6 +372,8 @@ inline Wallet load_wallet_legacy(const std::string& path) {
     w.priv_b64 = j.at("priv").get<std::string>();
     w.addr = j.at("addr").get<std::string>();
     w.rpc_url = j.value("rpc", "http://165.227.225.79:8080");
+    if (w.rpc_url == "http://165.227.225.79:8080" || w.rpc_url == "http://165.227.225.79:8080/")
+        w.rpc_url = "https://devnet.octrascan.io/rpc";
     auto raw = base64_decode(w.priv_b64);
     if (raw.size() >= 64) {
         memcpy(w.sk, raw.data(), 64);
@@ -476,7 +480,6 @@ inline void change_pin(const std::string& path, Wallet& w,
                         const std::string& new_pin) {
     save_wallet_encrypted(path, w, new_pin);
 }
-
 
 inline Wallet derive_hd_account(const std::string& master_seed_b64,
                                  uint32_t index,

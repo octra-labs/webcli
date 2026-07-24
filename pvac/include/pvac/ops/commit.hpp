@@ -36,6 +36,14 @@ inline std::array<uint8_t, 32> commit_ct(const PubKey & pk, const Cipher & C)
         }
 
         s.update(L.R_com.data(), 32);
+        sha256_acc_u64(s, (uint64_t)L.R_PC.size());
+        for (const auto& rpc : L.R_PC) {
+            s.update(rpc.data(), 32);
+        }
+        sha256_acc_u64(s, (uint64_t)L.PC.size());
+        for (const auto& pc : L.PC) {
+            s.update(pc.data(), 32);
+        }
     }
 
     sha256_acc_u64(s, (uint64_t)C.slots);

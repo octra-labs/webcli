@@ -39,15 +39,19 @@ CXXFLAGS:=-std=c++17 -O2 $(ARCH) -Wall -pthread
 CFLAGS:=-O2 $(ARCH) -Wall
 PVAC_DIR:=pvac
 PVAC_BUILD:=$(PVAC_DIR)/build
+TEST_BUILD := build
+EMBEDDED_INC := -I$(PVAC_DIR)/include -I$(PVAC_DIR)
 
 ifeq ($(UNAME_S),Darwin)
 
 SHARED_EXT:=dylib
 SHARED_FLAGS:=-dynamiclib
-SSL_PREFIX:=$(shell brew --prefix openssl 2>/dev/null || echo /usr/local/opt/openssl)
+SSL_PREFIX:=$(shell brew --prefix openssl@3 2>/dev/null || brew --prefix openssl 2>/dev/null || echo /opt/homebrew/opt/openssl@3)
 LDB_PREFIX:=$(shell brew --prefix leveldb 2>/dev/null || echo /opt/homebrew/opt/leveldb)
 CXXFLAGS+=-I$(SSL_PREFIX)/include -I$(LDB_PREFIX)/include -DCPPHTTPLIB_OPENSSL_SUPPORT
 LDFLAGS:=-L$(SSL_PREFIX)/lib -lssl -lcrypto -L$(LDB_PREFIX)/lib -lleveldb -L$(PVAC_BUILD) -lpvac -Wl,-rpath,@executable_path/$(PVAC_BUILD)
+TEST_LDFLAGS := -L$(SSL_PREFIX)/lib -lssl -lcrypto
+TEST_PVAC_LDFLAGS := -L$(PVAC_BUILD) -lpvac $(TEST_LDFLAGS) -Wl,-rpath,@loader_path/../$(PVAC_BUILD)
 TARGET:=octra_wallet
 
 else ifneq ($(IS_WIN),)
@@ -58,6 +62,8 @@ SSL_PREFIX:=$(shell echo $$MINGW_PREFIX)
 LDB_PREFIX:=$(shell echo $$MINGW_PREFIX)
 CXXFLAGS+=-I$(SSL_PREFIX)/include -DCPPHTTPLIB_OPENSSL_SUPPORT
 LDFLAGS:=-static -L$(SSL_PREFIX)/lib -L$(PVAC_BUILD) -lpvac -lleveldb -lssl -lcrypto -lws2_32 -lbcrypt -lcrypt32 -lgdi32 -lz
+TEST_LDFLAGS := -L$(SSL_PREFIX)/lib -lssl -lcrypto -lws2_32 -lbcrypt -lcrypt32
+TEST_PVAC_LDFLAGS := -L$(PVAC_BUILD) -lpvac $(TEST_LDFLAGS)
 TARGET:=octra_wallet.exe
 
 else
@@ -66,12 +72,15 @@ SHARED_EXT:=so
 SHARED_FLAGS:=-shared
 CXXFLAGS+=-DCPPHTTPLIB_OPENSSL_SUPPORT
 LDFLAGS:=-lssl -lcrypto -lleveldb -L$(PVAC_BUILD) -lpvac -Wl,-rpath,'$$ORIGIN/$(PVAC_BUILD)'
+TEST_LDFLAGS := -lssl -lcrypto
+TEST_PVAC_LDFLAGS := -L$(PVAC_BUILD) -lpvac $(TEST_LDFLAGS) -Wl,-rpath,'$$ORIGIN/../$(PVAC_BUILD)'
 TARGET:=octra_wallet
 
 endif
 
 CXXFLAGS+=-I$(PVAC_DIR)
 LIBPVAC:=$(PVAC_BUILD)/libpvac.$(SHARED_EXT)
+PVAC_HEADERS:=$(shell find $(PVAC_DIR)/include -type f) $(PVAC_DIR)/pvac_c_api.h $(PVAC_DIR)/pvac_serialize.hpp
 
 all: check-deps $(TARGET)
 
@@ -93,16 +102,16 @@ else
 		./setup.sh --deps-only || { \
 			echo ''; \
 			echo 'auto-install failed. install manually:'; \
-			echo 'sudo apt install libleveldb-dev libssl-dev (debian/ubuntu)'; \
-			echo 'brew install leveldb openssl@3 (macos)'; \
-			echo 'setup.bat from cmd.exe (windows)'; \
+			echo '  sudo apt install libleveldb-dev libssl-dev   (debian/ubuntu)'; \
+			echo '  brew install leveldb openssl@3               (macos)'; \
+			echo '  setup.bat from cmd.exe                       (windows)'; \
 			exit 1; \
 		}; \
 	else \
 		echo 'setup.sh not found. install manually:'; \
-		echo 'sudo apt install libleveldb-dev libssl-dev (debian/ubuntu)'; \
-		echo 'brew install leveldb openssl@3 (macos)'; \
-		echo 'setup.bat from cmd.exe (windows)'; \
+		echo '  sudo apt install libleveldb-dev libssl-dev       (debian/ubuntu)'; \
+		echo '  brew install leveldb openssl@3                   (macos)'; \
+		echo '  setup.bat from cmd.exe                           (windows)'; \
 		exit 1; \
 	fi
 	@ok=no; for p in $(LEVELDB_PATHS); do [ -f "$$p" ] && ok=yes; done; \
@@ -117,7 +126,10 @@ endif
 $(PVAC_BUILD):
 	@mkdir -p $(PVAC_BUILD)
 
-$(LIBPVAC): $(PVAC_DIR)/pvac_c_api.cpp | $(PVAC_BUILD)
+$(TEST_BUILD):
+	@mkdir -p $(TEST_BUILD)
+
+$(LIBPVAC): $(PVAC_DIR)/pvac_c_api.cpp $(PVAC_HEADERS) | $(PVAC_BUILD)
 ifneq ($(IS_WIN),)
 	$(CXX) $(CXXFLAGS) -c -I$(PVAC_DIR)/include -o $(PVAC_BUILD)/pvac_c_api.o $<
 	ar rcs $@ $(PVAC_BUILD)/pvac_c_api.o
@@ -134,14 +146,36 @@ lib/tweetnacl.o: lib/tweetnacl.c
 lib/randombytes.o: lib/randombytes.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(TARGET): main.cpp lib/tweetnacl.o lib/randombytes.o $(LIBPVAC)
+$(TARGET): main.cpp rpc_client.hpp lib/endpoint_policy.hpp lib/pvac_map.hpp lib/pvac_upgrade_policy.hpp lib/stealth_scan.hpp lib/tweetnacl.o lib/randombytes.o $(LIBPVAC)
 	$(CXX) $(CXXFLAGS) -o $@ main.cpp lib/tweetnacl.o lib/randombytes.o $(LDFLAGS)
 
 clean:
 	rm -f $(TARGET) lib/*.o
 	rm -rf $(PVAC_BUILD)
+	rm -rf $(TEST_BUILD)
 
 run: $(TARGET)
 	./$(TARGET) 8420
 
-.PHONY: all clean run check-deps
+test-circle-bridge: | $(TEST_BUILD)
+	node --test tests/circle_bridge_policy.test.js tests/circle_asset_chunks.test.js tests/security_boundaries.test.js
+	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_circle_asset_chunks tests/circle_asset_chunks.cpp $(TEST_LDFLAGS)
+	./$(TEST_BUILD)/test_circle_asset_chunks
+	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_wallet_policy tests/wallet_policy.cpp $(TEST_LDFLAGS)
+	./$(TEST_BUILD)/test_wallet_policy
+
+test-pvac-embedded: | $(TEST_BUILD)
+	$(CXX) $(CXXFLAGS) $(EMBEDDED_INC) -o $(TEST_BUILD)/test_pvac_embedded tests/pvac_embedded_regression.cpp $(TEST_LDFLAGS)
+	./$(TEST_BUILD)/test_pvac_embedded
+
+test-pvac-structure: $(LIBPVAC) | $(TEST_BUILD)
+	$(CXX) $(CXXFLAGS) $(EMBEDDED_INC) -o $(TEST_BUILD)/test_pvac_structure tests/pvac_cipher_structure.cpp $(TEST_PVAC_LDFLAGS)
+	./$(TEST_BUILD)/test_pvac_structure
+
+test-crypto-boundaries: lib/tweetnacl.o lib/randombytes.o | $(TEST_BUILD)
+	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_crypto_boundaries tests/crypto_boundary_regression.cpp lib/tweetnacl.o lib/randombytes.o $(TEST_LDFLAGS)
+	./$(TEST_BUILD)/test_crypto_boundaries
+	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_stealth_scan tests/stealth_scan.cpp $(TEST_LDFLAGS)
+	./$(TEST_BUILD)/test_stealth_scan
+
+.PHONY: all clean run check-deps test-circle-bridge test-pvac-embedded test-pvac-structure test-crypto-boundaries

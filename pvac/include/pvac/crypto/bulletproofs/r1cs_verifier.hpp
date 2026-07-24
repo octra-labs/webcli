@@ -7,16 +7,14 @@
 #include "transcript.hpp"
 #include "generators.hpp"
 #include "inner_product.hpp"
+#include "r1cs_limits.hpp"
 #include "r1cs_types.hpp"
 #include "../ristretto255.hpp"
 
 namespace pvac {
 namespace bp {
 
-inline constexpr size_t R1CS_MAX_GATES = BP_MAX_VECTOR_SIZE;
-inline constexpr size_t R1CS_MAX_COMMITTED = static_cast<size_t>(1) << 16;
-inline constexpr size_t R1CS_MAX_CONSTRAINTS = static_cast<size_t>(1) << 20;
-inline constexpr size_t R1CS_MAX_TERMS = static_cast<size_t>(1) << 22;
+static_assert(R1CS_MAX_GATES == BP_MAX_VECTOR_SIZE);
 
 struct ConstraintSystem {
     size_t num_gates;

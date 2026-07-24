@@ -12,6 +12,7 @@ const sealedMagic = utf8Encoder.encode('OCRS1')
 const keyCache = new Map()
 const decryptedCache = new Map()
 const bridgeGrantState = new Map()
+const bridgeCreatedCircleIds = new Map()
 let activeBridgeWindow = null
 let activeBridgeContext = null
 let expandedPreviewOpen = false
@@ -50,15 +51,6 @@ const u32be = (value) => {
 
 const readU32be = (bytes) => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, false)
 
-const u64be = (value) => {
-  const out = new Uint8Array(8)
-  const view = new DataView(out.buffer)
-  const big = BigInt(value)
-  view.setUint32(0, Number((big >> 32n) & 0xffffffffn), false)
-  view.setUint32(4, Number(big & 0xffffffffn), false)
-  return out
-}
-
 const randomBytes = (size) => {
   const out = new Uint8Array(size)
   crypto.getRandomValues(out)
@@ -85,54 +77,7 @@ const h256Hex = async (tag, parts) => hexOfBytes(await h256Raw(tag, parts))
 const resourceKeyOfPath = (circleId, canonicalPath) => h256Hex('octra:circle_resource_key:v1', [utf8Bytes(circleId), utf8Bytes(canonicalPath)])
 const resourceKeyOfSlotRef = (circleId, slotRef) => h256Hex('octra:circle_resource_key:slot:v1', [utf8Bytes(circleId), utf8Bytes(slotRef)])
 
-const base58Encode = (bytes) => {
-  const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-  let value = 0n
-  bytes.forEach((byte) => {
-    value = (value << 8n) + BigInt(byte)
-  })
-  let encoded = ''
-  while (value > 0n) {
-    const digit = Number(value % 58n)
-    encoded = alphabet[digit] + encoded
-    value /= 58n
-  }
-  let leadingZeros = 0
-  while (leadingZeros < bytes.length && bytes[leadingZeros] === 0) {
-    encoded = `1${encoded}`
-    leadingZeros += 1
-  }
-  return encoded
-}
-
-const buildCircleDeployPayload = () => ({
-  runtime: 'octb',
-  privacy_class: 'sealed',
-  browser_mode: 'native_sealed',
-  resource_mode: 'sealed_read',
-  code_b64: null,
-  policy_hash: null,
-  members_root: null,
-  export_policy: null,
-  limits: {
-    max_stable_bytes: '33554432',
-    max_assets_bytes: '33554432',
-    max_inline_value: '65536',
-    max_wasm_bytes: '33554432'
-  }
-})
-
-const circleIdOfDeploy = async (deployer, nonce, payload) => {
-  const payloadHash = await h256Hex('octra:circle_deploy_payload:v1', [utf8Bytes(JSON.stringify(payload))])
-  const seed = await h256Raw('octra:circle_deploy_id:v1', [utf8Bytes(deployer), u64be(nonce), utf8Bytes(payloadHash)])
-  const base58 = base58Encode(seed)
-  const base58Part = base58.length >= 44
-    ? base58.slice(0, 44)
-    : base58.length === 0
-      ? '1'.repeat(44)
-      : (base58 + base58.repeat(Math.ceil((44 - base58.length) / base58.length))).slice(0, 44)
-  return `oct${base58Part}`
-}
+const buildCircleDeployPayload = () => CircleBridgePolicy.deployPayload('sealed')
 
 const isTextContent = (contentType) => (
   contentType.startsWith('text/')
@@ -154,41 +99,13 @@ const normalizeAssetPath = (rawPath) => {
 
 const circleUriOf = (circleId, path) => `oct://${circleId}${normalizeAssetPath(path)}`
 
-const decodeUriPart = (value) => {
-  try {
-    return decodeURIComponent(value)
-  } catch (err) {
-    return value
-  }
-}
-
 const parseCircleUri = (uri) => {
-  const raw = (uri || '').trim()
-  const decodedRaw = decodeUriPart(raw).trim()
-  if (!decodedRaw.toLowerCase().startsWith('oct://')) {
-    return null
-  }
-  const rest = decodeUriPart(decodedRaw.slice(6)).split(/[?#]/, 1)[0]
-  if (!rest) {
-    return null
-  }
-  const slashIndex = rest.indexOf('/')
-  if (slashIndex === -1) {
-    return {
-      circleId: rest,
-      path: '/index.html',
-      uri: circleUriOf(rest, '/index.html')
-    }
-  }
-  const circleId = rest.slice(0, slashIndex)
-  const path = normalizeAssetPath(rest.slice(slashIndex))
-  if (!circleId) {
-    return null
-  }
+  const parsed = CircleBridgePolicy.parseUri(uri)
+  if (!parsed) return null
   return {
-    circleId,
-    path,
-    uri: circleUriOf(circleId, path)
+    circleId: parsed.circle_id,
+    path: parsed.path,
+    uri: parsed.uri
   }
 }
 
@@ -209,9 +126,8 @@ const parseCircleTarget = (rawCircle, rawPath) => {
 const currentCircleTarget = () => parseCircleTarget($('circle-id').value.trim(), '/index.html')
 
 const circleResourceUrl = (circleId, path) => {
-  const parts = normalizeAssetPath(path).split('/').filter(Boolean).map(encodeURIComponent)
-  if (!parts.length) return `${runtimeBase}/oct/${encodeURIComponent(circleId)}/`
-  return `${runtimeBase}/oct/${encodeURIComponent(circleId)}/${parts.join('/')}`
+  const resourcePath = CircleBridgePolicy.publicResourcePath(circleId, path)
+  return resourcePath ? `${runtimeBase}${resourcePath}` : ''
 }
 
 const setStatus = (nodeId, text, bad) => {
@@ -439,6 +355,14 @@ const clearBridgeContext = () => {
   activeBridgeContext = null
 }
 
+const createdCircleIdsForBridge = () => {
+  const sourceCircleId = activeBridgeContext.circle_id
+  if (!bridgeCreatedCircleIds.has(sourceCircleId)) {
+    bridgeCreatedCircleIds.set(sourceCircleId, new Set())
+  }
+  return bridgeCreatedCircleIds.get(sourceCircleId)
+}
+
 const authBridgeRootForCircle = (circleId) => {
   if (circleId === 'octQXi2RUp2MXDPvFs2YPqhXuoaezq2isFpT8PvoCmacpvQ') {
     return 'http://127.0.0.1:18423'
@@ -462,6 +386,8 @@ const postBridgeReply = (target, token, id, ok, result, error) => {
 
 const bridgeMethodsForInfo = (info) => [
   'circle.context',
+  'circle.deploy',
+  'circle.asset_plain',
   'program.info',
   'program.view',
   'program.call',
@@ -536,6 +462,12 @@ const bridgeMethodsForInfo = (info) => [
 ]
 
 const bridgeGrantTextOf = (context, method) => {
+  if (method === 'circle.deploy') {
+    return `allow this circle to create new circles through the active wallet for this session?\n\n${context.uri}`
+  }
+  if (method === 'circle.asset_plain') {
+    return `allow this circle to upload public assets to its current or newly created circles for this session?\n\n${context.uri}`
+  }
   if (method === 'program.info' || method === 'program.view' || method === 'program.storage' || method === 'program.abi') {
     return `allow this circle to read onchain program state for this session?\n\n${context.uri}`
   }
@@ -607,6 +539,8 @@ const bridgeGrantTextOf = (context, method) => {
 
 const bridgeGrantScopeOf = (method) => {
   if (method === 'circle.context') return 'circle.context'
+  if (method === 'circle.deploy') return 'circle.deploy'
+  if (method === 'circle.asset_plain') return 'circle.asset.write'
   if (method === 'program.call') return 'program.call'
   if (method === 'program.info' || method === 'program.view' || method === 'program.storage' || method === 'program.abi') return 'program.read'
   if (method === 'sealed_slot.put' || method === 'sealed_state.put' || method === 'slot_policy.put' || method === 'state_policy.put' || method === 'state_descriptor.put' || method === 'balance_cell.put' || method === 'register_cell.put' || method === 'outbox.open' || method === 'ingress.commit') return 'circle.write'
@@ -675,6 +609,72 @@ const bridgeResultOf = async (method, payload = {}) => {
     }
     return bridgeCircleId
   }
+  const postWrite = async (path, circleId) => {
+    const pin = await circlePin('confirm circle write', `enter PIN to sign ${method}`)
+    if (!pin) {
+      throw new Error(`${method} cancelled`)
+    }
+    return postJson(path, { ...payload, circle_id: circleId, pin })
+  }
+  if (method === 'circle.deploy') {
+    const profile = payload.profile || 'public'
+    const deployPayload = CircleBridgePolicy.deployPayload(profile)
+    const pin = await circlePin('confirm circle deploy', `enter PIN to create a new ${profile} circle`)
+    if (!pin) {
+      throw new Error('circle deploy cancelled')
+    }
+    const result = await postJson('/api/circle/deploy', {
+      ...deployPayload,
+      ou: '200000',
+      pin
+    })
+    if (!result || !CircleBridgePolicy.validCircleId(result.circle_id)) {
+      throw new Error('circle deploy returned invalid id')
+    }
+    createdCircleIdsForBridge().add(result.circle_id)
+    return { ...result, profile }
+  }
+  if (method === 'circle.asset_plain') {
+    const prepared = CircleBridgePolicy.preparePlainAsset(
+      bridgeCircleId,
+      createdCircleIdsForBridge(),
+      payload,
+      circleAssetMaxB64Bytes)
+    const plan = await CircleAssetChunks.plan(prepared, {
+      decode: base64ToBytes,
+      encode: bytesToBase64,
+      utf8: utf8Bytes,
+      sha256: sha256Hex
+    })
+    const pin = await circlePin(
+      'confirm circle asset',
+      `enter PIN to upload ${prepared.path} | ${plan.raw_bytes} bytes | ${prepared.circle_id}`)
+    if (!pin) {
+      throw new Error('circle asset upload cancelled')
+    }
+    if (plan.direct) {
+      return postJson('/api/circle/asset_plain', { ...plan.asset, pin })
+    }
+    const uploaded = []
+    for (const chunk of plan.chunks) {
+      const result = await postJson('/api/circle/asset_plain', {
+        circle_id: prepared.circle_id,
+        path: chunk.path,
+        content_type: chunk.content_type,
+        body_b64: bytesToBase64(plan.raw.subarray(chunk.offset, chunk.offset + chunk.size_bytes)),
+        encoding: chunk.encoding,
+        pin
+      })
+      uploaded.push(result.tx_hash)
+    }
+    const result = await postJson('/api/circle/asset_plain', { ...plan.asset, pin })
+    return {
+      ...result,
+      chunked: true,
+      chunks: plan.chunks.length,
+      chunk_tx_hashes: uploaded
+    }
+  }
   if (method === 'program.info') {
     const effectiveCircleId = requireBridgeCircleId()
     if (authBridgeRoot) {
@@ -718,7 +718,7 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'sealed_slot.put') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/sealed_slot_put', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/sealed_slot_put', effectiveCircleId)
   }
   if (method === 'sealed_state.read') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -729,7 +729,7 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'sealed_state.put') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/sealed_slot_put', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/sealed_slot_put', effectiveCircleId)
   }
   if (method === 'slot_policy.read') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -740,7 +740,7 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'slot_policy.put') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/slot_policy_put', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/slot_policy_put', effectiveCircleId)
   }
   if (method === 'state_policy.read') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -751,7 +751,7 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'state_policy.put') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/slot_policy_put', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/slot_policy_put', effectiveCircleId)
   }
   if (method === 'state_descriptor.read') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -762,7 +762,7 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'state_descriptor.put') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/state_descriptor_put', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/state_descriptor_put', effectiveCircleId)
   }
   if (method === 'balance_cell.read') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -823,27 +823,27 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'object.policy.define') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/object_policy_define', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/object_policy_define', effectiveCircleId)
   }
   if (method === 'object.bind') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/object_bind', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/object_bind', effectiveCircleId)
   }
   if (method === 'object.member.attach') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/object_member_attach', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/object_member_attach', effectiveCircleId)
   }
   if (method === 'object.member.detach') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/object_member_detach', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/object_member_detach', effectiveCircleId)
   }
   if (method === 'object.transition.apply') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/object_transition_apply', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/object_transition_apply', effectiveCircleId)
   }
   if (method === 'balance_cell.put') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/balance_cell_put', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/balance_cell_put', effectiveCircleId)
   }
   if (method === 'register_cell.read') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -868,7 +868,7 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'register_cell.put') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/register_cell_put', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/register_cell_put', effectiveCircleId)
   }
   if (method === 'transport_policy.read') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -876,7 +876,7 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'transport_policy.put') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/transport_policy_put', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/transport_policy_put', effectiveCircleId)
   }
   if (method === 'hfhe_policy.read') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -884,7 +884,7 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'hfhe_policy.put') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/hfhe_policy_put', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/hfhe_policy_put', effectiveCircleId)
   }
   if (method === 'key_policy.read') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -895,27 +895,27 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'key_policy.put') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/key_policy_put', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/key_policy_put', effectiveCircleId)
   }
   if (method === 'key.grant') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/key_grant', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/key_grant', effectiveCircleId)
   }
   if (method === 'key.extend') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/key_extend', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/key_extend', effectiveCircleId)
   }
   if (method === 'key.revoke') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/key_revoke', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/key_revoke', effectiveCircleId)
   }
   if (method === 'key.erase') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/key_erase', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/key_erase', effectiveCircleId)
   }
   if (method === 'outbox.open') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/outbox_open', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/outbox_open', effectiveCircleId)
   }
   if (method === 'outbox.intent') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -940,15 +940,15 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'relay.claim') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/relay_claim', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/relay_claim', effectiveCircleId)
   }
   if (method === 'relay.cancel') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/relay_cancel', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/relay_cancel', effectiveCircleId)
   }
   if (method === 'ingress.commit') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/ingress_commit', { ...payload, circle_id: effectiveCircleId })
+    return postWrite('/api/circle/ingress_commit', effectiveCircleId)
   }
   if (method === 'ingress.packet') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -985,7 +985,11 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'fhe.decrypt') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/fhe/decrypt', { ...payload, circle_id: effectiveCircleId })
+    const pin = await circlePin('confirm FHE decrypt', 'enter PIN to decrypt this circle ciphertext')
+    if (!pin) {
+      throw new Error('FHE decrypt cancelled')
+    }
+    return postJson('/api/circle/fhe/decrypt', { ...payload, circle_id: effectiveCircleId, pin })
   }
   if (method === 'fhe.commit') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -1569,6 +1573,8 @@ const installPublicPrelude = (doc, circleId, htmlPath, bridgeToken) => {
 const rewriteInternalAnchor = (circleId, basePath, href) => {
   if (!href || href.startsWith('#') || isDataSpec(href)) return href
   if (isBlockedRemoteSpec(href)) return '#'
+  const parsed = parseCircleUri(href)
+  if (parsed) return parsed.uri
   const resolved = resolveCirclePath(basePath, href)
   if (!resolved || isBlockedRemoteSpec(resolved)) return '#'
   return circleUriOf(circleId, resolved)
@@ -1675,6 +1681,11 @@ const rewritePublicAssetRefs = (doc, circleId, htmlPath) => {
       node.removeAttribute(attr)
       return
     }
+    const parsed = parseCircleUri(spec)
+    if (parsed) {
+      node.setAttribute(attr, circleResourceUrl(parsed.circleId, parsed.path))
+      return
+    }
     const resolved = resolveCirclePath(htmlPath, spec)
     if (resolved && !isBlockedRemoteSpec(resolved)) {
       node.setAttribute(attr, circleResourceUrl(circleId, resolved))
@@ -1731,6 +1742,15 @@ const renderPublicAsset = (asset, info) => {
     }
     body.appendChild(frame)
     activeBridgeWindow = frame.contentWindow
+    return
+  }
+  if (CircleBridgePolicy.isPdfContentType(asset.content_type)) {
+    const frame = document.createElement('iframe')
+    frame.className = 'circle-preview-frame'
+    frame.referrerPolicy = 'no-referrer'
+    frame.title = asset.canonical_path
+    frame.src = circleResourceUrl(asset.circle_id, asset.canonical_path)
+    body.appendChild(frame)
     return
   }
   if (asset.content_type.startsWith('image/')) {
@@ -1843,16 +1863,20 @@ const loadCircle = async () => {
 const deploySealedCircle = async () => {
   setStatus('deploy-status', 'preparing deploy...', false)
   try {
-    const wallet = await fetchJson('/api/wallet')
-    const balance = await fetchJson('/api/balance')
     const payload = buildCircleDeployPayload()
-    const nonce = Number(balance.nonce || 0) + 1
-    const circleId = await circleIdOfDeploy(wallet.address, nonce, payload)
+    const pin = await circlePin('confirm circle deploy', 'enter PIN to create a new sealed circle')
+    if (!pin) {
+      throw new Error('circle deploy cancelled')
+    }
     const result = await postJson('/api/circle/deploy', {
-      circle_id: circleId,
       ...payload,
-      ou: '200000'
+      ou: '200000',
+      pin
     })
+    const circleId = result.circle_id
+    if (!CircleBridgePolicy.validCircleId(circleId)) {
+      throw new Error('circle deploy returned invalid id')
+    }
     $('circle-id').value = circleUriOf(circleId, '/index.html')
     setStatus('deploy-status', `submitted ${result.tx_hash || 'tx'} for ${circleId}`, false)
     setStatus('status', `deployed circle shell ${circleId}`, false)
@@ -1884,6 +1908,10 @@ const uploadSealedAsset = async () => {
     }
     const uploadOu = String(circleAssetFeeOfCiphertextB64(sealed.ciphertext_b64))
     setStatus('upload-status', `submitting tx | ou ${uploadOu}`, false)
+    const pin = await circlePin('confirm circle asset', `enter PIN to upload ${path} | ${circleId}`)
+    if (!pin) {
+      throw new Error('circle asset upload cancelled')
+    }
     const result = await postJson('/api/circle/asset_encrypted', {
       circle_id: circleId,
       path,
@@ -1893,7 +1921,8 @@ const uploadSealedAsset = async () => {
       plaintext_hash: sealed.plaintext_hash,
       padding_class: paddingClass,
       ciphertext_b64: sealed.ciphertext_b64,
-      ou: uploadOu
+      ou: uploadOu,
+      pin
     })
     decryptedCache.clear()
     setStatus('upload-status', `submitted ${result.tx_hash || 'tx'}`, false)

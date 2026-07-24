@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <algorithm>
+#include <limits>
 
 #if !defined(__SIZEOF_INT128__) && !(defined(_MSC_VER) && defined(__clang__))
 #error "Needs unsigned __int128"
@@ -18,6 +19,27 @@ struct Fp {
     uint64_t lo;
     uint64_t hi;
 };
+
+inline bool fp_to_i64(const Fp& value, int64_t& out) {
+    u128 p = (u128(1) << 127) - 1;
+    u128 raw = (u128(value.hi) << 64) | value.lo;
+    u128 max_pos = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+    u128 max_neg = u128(1) << 63;
+    if (raw >= p) return false;
+    if (raw <= max_pos) {
+        out = static_cast<int64_t>(raw);
+        return true;
+    }
+    if (raw <= p / 2) return false;
+    u128 magnitude = p - raw;
+    if (magnitude > max_neg) return false;
+    if (magnitude == max_neg) {
+        out = std::numeric_limits<int64_t>::min();
+        return true;
+    }
+    out = -static_cast<int64_t>(magnitude);
+    return true;
+}
 
 inline Fp fp_from_u64(uint64_t x) {
     return Fp{x, 0};

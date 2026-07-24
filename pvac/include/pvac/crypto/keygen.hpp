@@ -2,15 +2,80 @@
 
 #include <cstdint>
 #include <vector>
+#include <stdexcept>
+#include <cstring>
 
 #include "../core/types.hpp"
 #include "../core/ct_safe.hpp"
 #include "../core/seedable_rng.hpp"
 #include "../core/hash.hpp"
 
+#include "ristretto255.hpp"
 #include "matrix.hpp"
 
 namespace pvac {
+
+inline void bytes_from_u64s(uint8_t out[32], const std::array<uint64_t, 4>& words) {
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 8; ++j)
+            out[i * 8 + j] = static_cast<uint8_t>((words[i] >> (8 * j)) & 0xFF);
+    }
+}
+
+inline Scalar scalar_from_key_blind(const std::array<uint8_t, 32>& blind) {
+    return sc_reduce256(blind.data());
+}
+
+inline void set_circuit_prf_commit(PubKey& pk, const SecKey& sk) {
+    pk.circuit_prf_key_commit =
+        pedersen_commit(sc_from_fp_signed(sk.circuit_prf_key), scalar_from_key_blind(sk.circuit_prf_key_blind));
+}
+
+inline void derive_circuit_prf_material_random(PubKey& pk, SecKey& sk) {
+    sk.circuit_prf_key = rand_fp_nonzero();
+    for (int i = 0; i < 4; ++i) {
+        uint64_t w = csprng_u64();
+        for (int j = 0; j < 8; ++j)
+            sk.circuit_prf_key_blind[i * 8 + j] =
+                static_cast<uint8_t>((w >> (8 * j)) & 0xFF);
+    }
+    set_circuit_prf_commit(pk, sk);
+}
+
+inline void derive_circuit_prf_material_seeded(PubKey& pk, SecKey& sk, const uint8_t master[32]) {
+    uint8_t key_bytes[32];
+    {
+        Sha256 h;
+        h.init();
+        h.update(Dom::CIRCUIT_PRF_KEY, std::strlen(Dom::CIRCUIT_PRF_KEY));
+        h.update(master, 32);
+        h.finish(key_bytes);
+    }
+    sk.circuit_prf_key = fp_from_hash32_nonzero(key_bytes);
+    {
+        Sha256 h;
+        h.init();
+        h.update(Dom::CIRCUIT_PRF_BLIND, std::strlen(Dom::CIRCUIT_PRF_BLIND));
+        h.update(master, 32);
+        h.finish(sk.circuit_prf_key_blind.data());
+    }
+    set_circuit_prf_commit(pk, sk);
+}
+
+inline void require_params(const Params& prm) {
+    if (prm.B < 3)
+        throw std::runtime_error("pvac: params basis rejected");
+    if (prm.m_bits <= 0 || prm.n_bits <= 0)
+        throw std::runtime_error("pvac: params matrix shape rejected");
+    if (prm.h_col_wt < 0 || prm.h_col_wt > prm.m_bits)
+        throw std::runtime_error("pvac: params H weight rejected");
+    if (prm.x_col_wt < 0 || prm.x_col_wt > prm.n_bits)
+        throw std::runtime_error("pvac: params X weight rejected");
+    if (prm.err_wt < 0 || prm.err_wt > prm.m_bits)
+        throw std::runtime_error("pvac: params noise weight rejected");
+    if (prm.lpn_n <= 0 || prm.lpn_t <= 0 || prm.lpn_tau_den <= 0)
+        throw std::runtime_error("pvac: params lpn shape rejected");
+}
 
 inline std::vector<int> factor_small(int n) {
     std::vector<int> p;
@@ -33,7 +98,23 @@ inline std::vector<int> factor_small(int n) {
     return p;
 }
 
+inline Fp fp_pow_u128(Fp a, u128 e) {
+    Fp acc = fp_from_u64(1);
+
+    while (e) {
+        if (e & 1) {
+            acc = fp_mul(acc, a);
+        }
+
+        a = fp_mul(a, a);
+        e >>= 1;
+    }
+
+    return acc;
+}
+
 inline void keygen(const Params & prm, PubKey & pk, SecKey & sk) {
+    require_params(prm);
     pk.prm = prm;
 
     if (pk.prm.B == 0)
@@ -54,6 +135,7 @@ inline void keygen(const Params & prm, PubKey & pk, SecKey & sk) {
     for (int i = 0; i < 4; i++) {
         sk.prf_k[i] = csprng_u64();
     }
+    derive_circuit_prf_material_random(pk, sk);
 
     u128 E = pm1 / (u128)pk.prm.B;
 
@@ -73,18 +155,7 @@ inline void keygen(const Params & prm, PubKey & pk, SecKey & sk) {
 
     for (;;) {
         Fp h = rand_fp();
-        Fp base = h;
-        Fp acc = fp_from_u64(1);
-        u128 e = E;
-
-        while (e) {
-            if (e & 1) {
-                acc = fp_mul(acc, base);
-            }
-
-            base = fp_mul(base, base);
-            e >>= 1;
-        }
+        Fp acc = fp_pow_u128(h, E);
 
         if (!ct::fp_is_one(acc)) {
             g = acc;
@@ -103,7 +174,7 @@ inline void keygen(const Params & prm, PubKey & pk, SecKey & sk) {
 
     for (;;) {
         Fp h = rand_fp();
-        Fp w = fp_pow_u64(h, (uint64_t)(pm1 / (u128)pk.prm.B));
+        Fp w = fp_pow_u128(h, E);
 
         if (ct::fp_is_one(w)) {
             continue;
@@ -141,6 +212,7 @@ inline void keygen(const Params & prm, PubKey & pk, SecKey & sk) {
 }
 
 inline void keygen_from_seed(const Params& prm, PubKey& pk, SecKey& sk, const uint8_t wallet_privkey[32]) {
+    require_params(prm);
     pk.prm = prm;
 
     if (pk.prm.B == 0)
@@ -189,6 +261,7 @@ inline void keygen_from_seed(const Params& prm, PubKey& pk, SecKey& sk, const ui
 
     SeedableRng rng = make_seeded_rng(sk_seed);
     for (int i = 0; i < 4; i++) sk.prf_k[i] = rng.u64();
+    derive_circuit_prf_material_seeded(pk, sk, master);
 
     size_t s_words = (pk.prm.lpn_n + 63) / 64;
     sk.lpn_s_bits.resize(s_words);
@@ -222,14 +295,7 @@ inline void keygen_from_seed(const Params& prm, PubKey& pk, SecKey& sk, const ui
     Fp g;
     for (;;) {
         Fp h = rand_fp_det();
-        Fp base = h;
-        Fp acc = fp_from_u64(1);
-        u128 e = E;
-        while (e) {
-            if (e & 1) acc = fp_mul(acc, base);
-            base = fp_mul(base, base);
-            e >>= 1;
-        }
+        Fp acc = fp_pow_u128(h, E);
         if (!ct::fp_is_one(acc)) { g = acc; break; }
     }
 
@@ -240,7 +306,7 @@ inline void keygen_from_seed(const Params& prm, PubKey& pk, SecKey& sk, const ui
     auto primes = factor_small(pk.prm.B);
     for (;;) {
         Fp h = rand_fp_det();
-        Fp w = fp_pow_u64(h, (uint64_t)(pm1 / (u128)pk.prm.B));
+        Fp w = fp_pow_u128(h, E);
         if (ct::fp_is_one(w)) continue;
         bool ok = true;
         for (int p : primes) {

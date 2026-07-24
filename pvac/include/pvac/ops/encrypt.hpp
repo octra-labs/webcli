@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <functional>
 #include <cstring>
+#include <limits>
+#include <stdexcept>
 #include <type_traits>
 
 #include "../core/types.hpp"
@@ -223,29 +225,41 @@ namespace idx {
 class Selector {
     int B_;
     mutable std::vector<uint8_t> taken_;
+    mutable int used_ = 0;
 
 public:
-    explicit Selector(int B) : B_(B), taken_(B, 0) {}
+    explicit Selector(int B) : B_(B), taken_(B > 0 ? B : 0, 0) {
+        if (B_ <= 0)
+            throw std::runtime_error("pvac: selector basis rejected");
+    }
 
     int fresh() const {
+        if (used_ >= B_)
+            throw std::runtime_error("pvac: selector exhausted");
         int x;
         do {
             x = static_cast<int>(csprng_u64() % static_cast<uint64_t>(B_));
         } while (taken_[x]);
         taken_[x] = 1;
+        ++used_;
         return x;
     }
 
     int fresh(SeedableRng& rng) const {
+        if (used_ >= B_)
+            throw std::runtime_error("pvac: selector exhausted");
         int x;
         do {
             x = static_cast<int>(rng.bounded(static_cast<uint64_t>(B_)));
         } while (taken_[x]);
         taken_[x] = 1;
+        ++used_;
         return x;
     }
 
     int avoid(int a) const {
+        if (B_ <= 1)
+            throw std::runtime_error("pvac: selector avoid domain rejected");
         int x;
         do {
             x = static_cast<int>(csprng_u64() % static_cast<uint64_t>(B_));
@@ -254,6 +268,8 @@ public:
     }
 
     int avoid(int a, SeedableRng& rng) const {
+        if (B_ <= 1)
+            throw std::runtime_error("pvac: selector avoid domain rejected");
         int x;
         do {
             x = static_cast<int>(rng.bounded(static_cast<uint64_t>(B_)));
@@ -262,6 +278,8 @@ public:
     }
 
     int avoid(int a, int b) const {
+        if (B_ <= 2 && a != b)
+            throw std::runtime_error("pvac: selector avoid pair domain rejected");
         int x;
         do {
             x = static_cast<int>(csprng_u64() % static_cast<uint64_t>(B_));
@@ -270,6 +288,8 @@ public:
     }
 
     int avoid(int a, int b, SeedableRng& rng) const {
+        if (B_ <= 2 && a != b)
+            throw std::runtime_error("pvac: selector avoid pair domain rejected");
         int x;
         do {
             x = static_cast<int>(rng.bounded(static_cast<uint64_t>(B_)));
@@ -568,13 +588,27 @@ inline alg::Carrier<Edge> merge(alg::Carrier<Edge> edges, const PubKey& pk) {
     if (edges.nil()) return {};
 
     const int B = pk.prm.B;
+    if (B <= 0)
+        throw std::runtime_error("pvac: merge basis rejected");
     size_t S = edges[0].w.size();
+    if (S == 0)
+        throw std::runtime_error("pvac: merge slot shape rejected");
 
     uint32_t maxL = 0;
     for (const auto& e : edges) {
+        if (static_cast<size_t>(e.idx) >= static_cast<size_t>(B))
+            throw std::runtime_error("pvac: merge edge index rejected");
+        if (e.ch != SGN_P && e.ch != SGN_M)
+            throw std::runtime_error("pvac: merge edge sign rejected");
+        if (e.w.size() != S)
+            throw std::runtime_error("pvac: merge edge width rejected");
+        if (e.s.nbits != static_cast<uint64_t>(pk.prm.m_bits))
+            throw std::runtime_error("pvac: merge edge sigma rejected");
         if (e.layer_id > maxL) maxL = e.layer_id;
     }
     const size_t L = static_cast<size_t>(maxL) + 1;
+    if (L > std::numeric_limits<size_t>::max() / static_cast<size_t>(B))
+        throw std::runtime_error("pvac: merge edge domain rejected");
 
     struct Slot {
         bool active = false;
@@ -670,6 +704,50 @@ inline std::vector<Fp> prf_R_slots(const PubKey& pk, const SecKey& sk, const RSe
     return R;
 }
 
+inline Fp circuit_prf_challenge(const PubKey& pk, const RSeed& seed, size_t j) {
+    Sha256 h;
+    h.init();
+    h.update(Dom::CIRCUIT_PRF_CHALLENGE, std::strlen(Dom::CIRCUIT_PRF_CHALLENGE));
+    sha256_acc_u64(h, pk.canon_tag);
+    h.update(pk.H_digest.data(), pk.H_digest.size());
+    sha256_acc_u64(h, seed.ztag);
+    sha256_acc_u64(h, seed.nonce.lo);
+    sha256_acc_u64(h, seed.nonce.hi);
+    sha256_acc_u64(h, static_cast<uint64_t>(j));
+    uint8_t out[32];
+    h.finish(out);
+    return fp_from_hash32_nonzero(out);
+}
+
+static constexpr size_t CIRCUIT_PRF_MIMC_ROUNDS = 91;
+
+inline Fp circuit_prf_round_constant(size_t round) {
+    Sha256 h;
+    h.init();
+    h.update(Dom::CIRCUIT_PRF_ROUND, std::strlen(Dom::CIRCUIT_PRF_ROUND));
+    sha256_acc_u64(h, static_cast<uint64_t>(round));
+    uint8_t out[32];
+    h.finish(out);
+    return fp_from_hash32_nonzero(out);
+}
+
+inline Fp circuit_prf_R(const PubKey& pk, const SecKey& sk, const RSeed& seed, size_t j) {
+    Fp state = circuit_prf_challenge(pk, seed, j);
+    for (size_t round = 0; round < CIRCUIT_PRF_MIMC_ROUNDS; ++round) {
+        Fp t = fp_add(fp_add(state, sk.circuit_prf_key), circuit_prf_round_constant(round));
+        state = fp_mul(fp_mul(t, t), t);
+    }
+    Fp out = fp_add(fp_add(state, sk.circuit_prf_key), fp_from_u64(1));
+    return ct::fp_is_nonzero(out) ? out : fp_from_u64(1);
+}
+
+inline std::vector<Fp> circuit_prf_R_slots(const PubKey& pk, const SecKey& sk, const RSeed& seed, size_t slots) {
+    std::vector<Fp> R(slots);
+    for (size_t j = 0; j < slots; ++j)
+        R[j] = circuit_prf_R(pk, sk, seed, j);
+    return R;
+}
+
 inline Scalar derive_rho_prod(const SecKey& sk, const Layer& L, size_t j) {
     Sha256 h;
     h.init();
@@ -681,6 +759,19 @@ inline Scalar derive_rho_prod(const SecKey& sk, const Layer& L, size_t j) {
     uint8_t rho_bytes[32];
     h.finish(rho_bytes);
     return sc_reduce256(rho_bytes);
+}
+
+inline Scalar derive_r_alpha(const SecKey& sk, const Layer& L, size_t j) {
+    Sha256 h;
+    h.init();
+    h.update(Dom::PRF_R_ALPHA, std::strlen(Dom::PRF_R_ALPHA));
+    for (int k = 0; k < 4; k++) sha256_acc_u64(h, sk.prf_k[k]);
+    sha256_acc_u64(h, L.seed.nonce.lo);
+    sha256_acc_u64(h, L.seed.nonce.hi);
+    sha256_acc_u64(h, static_cast<uint64_t>(j));
+    uint8_t alpha_bytes[32];
+    h.finish(alpha_bytes);
+    return sc_reduce256(alpha_bytes);
 }
 
 inline void compute_prod_layer_PC(Layer& L, const SecKey& sk,
@@ -696,10 +787,13 @@ inline void compute_prod_layer_PC(Layer& L, const SecKey& sk,
 }
 
 inline void compute_layer_PC(Layer& L, const SecKey& sk, const std::vector<Fp>& R, size_t S) {
+    L.R_PC.resize(S);
     L.PC.resize(S);
     for (size_t j = 0; j < S; j++) {
         Fp R_inv_j = fp_inv(R[j]);
+        Scalar sc_r = sc_from_fp_signed(R[j]);
         Scalar sc_rinv = sc_from_fp_signed(R_inv_j);
+        Scalar alpha_j = derive_r_alpha(sk, L, j);
 
         Sha256 h;
         h.init();
@@ -712,6 +806,7 @@ inline void compute_layer_PC(Layer& L, const SecKey& sk, const std::vector<Fp>& 
         h.finish(rho_bytes);
         Scalar rho_j = sc_reduce256(rho_bytes);
 
+        L.R_PC[j] = pedersen_commit(sc_r, alpha_j);
         L.PC[j] = pedersen_commit(sc_rinv, rho_j);
     }
 }
@@ -730,7 +825,7 @@ inline Cipher synth(const PubKey& pk, const SecKey& sk, const std::vector<Fp>& v
     delta::Gen dg{ pk, sk, L.seed };
     delta::Set ds = delta::Set::make(dg, b, S);
 
-    auto R = prf_R_slots(pk, sk, L.seed, S);
+    auto R = circuit_prf_R_slots(pk, sk, L.seed, S);
     L.R_com = compute_R_com_base(pk.canon_tag, L.seed.ztag, L.seed.nonce.lo, L.seed.nonce.hi, R);
     compute_layer_PC(L, sk, R, S);
     auto va = field::Op::sub(v, ds.agg);
@@ -814,7 +909,7 @@ inline Cipher synth_seeded(const PubKey& pk, const SecKey& sk, const std::vector
     delta::Gen dg{ pk, sk, L.seed };
     delta::Set ds = delta::Set::make(dg, b, S);
 
-    auto R = prf_R_slots(pk, sk, L.seed, S);
+    auto R = circuit_prf_R_slots(pk, sk, L.seed, S);
     L.R_com = compute_R_com_base(pk.canon_tag, L.seed.ztag, L.seed.nonce.lo, L.seed.nonce.hi, R);
     compute_layer_PC(L, sk, R, S);
     auto va = field::Op::sub(v, ds.agg);
@@ -871,6 +966,8 @@ inline void compact_edges(const PubKey& pk, Cipher& C) {
 }
 
 inline void compact_layers(Cipher& C) {
+    if (!is_valid_cipher_shape(C))
+        throw std::runtime_error("pvac: compact layers shape rejected");
     size_t L = C.L.size();
     if (L == 0) return;
 
@@ -940,9 +1037,29 @@ inline Cipher combine_ciphers(const PubKey& pk, const Cipher& a, const Cipher& b
     return core::fuse(pk, a, b);
 }
 
+inline Cipher enc_fp_wrapped_depth(const PubKey& pk, const SecKey& sk, const std::vector<Fp>& v, int d) {
+    std::vector<Fp> m(v.size());
+    for (size_t j = 0; j < v.size(); ++j) m[j] = rand_fp_nonzero();
+    return combine_ciphers(pk,
+        enc_fp_depth(pk, sk, field::Op::add(v, m), d),
+        enc_fp_depth(pk, sk, field::Op::neg(m), d));
+}
+
+inline Cipher enc_fp_wrapped_depth(const PubKey& pk, const SecKey& sk, const Fp& v, int d) {
+    return enc_fp_wrapped_depth(pk, sk, std::vector<Fp>{v}, d);
+}
+
+inline Cipher enc_fp_raw_depth(const PubKey& pk, const SecKey& sk, const std::vector<Fp>& v, int d) {
+    return enc_fp_depth(pk, sk, v, d);
+}
+
+inline Cipher enc_fp_raw_depth(const PubKey& pk, const SecKey& sk, const Fp& v, int d) {
+    return enc_fp_depth(pk, sk, v, d);
+}
+
 inline Cipher enc_value_depth(const PubKey& pk, const SecKey& sk, uint64_t v, int d) {
     std::vector<Fp> vals = {fp_from_u64(v)};
-    std::vector<Fp> m = {field::Op::rnd()};
+    std::vector<Fp> m = {rand_fp_nonzero()};
     return combine_ciphers(pk,
         enc_fp_depth(pk, sk, field::Op::add(vals, m), d),
         enc_fp_depth(pk, sk, field::Op::neg(m), d));
@@ -955,7 +1072,7 @@ inline Cipher enc_value(const PubKey& pk, const SecKey& sk, uint64_t v) {
 inline Cipher enc_values_depth(const PubKey& pk, const SecKey& sk, const std::vector<uint64_t>& v, int d) {
     size_t S = v.size();
     std::vector<Fp> vals(S), m(S);
-    for (size_t j = 0; j < S; ++j) { vals[j] = fp_from_u64(v[j]); m[j] = field::Op::rnd(); }
+    for (size_t j = 0; j < S; ++j) { vals[j] = fp_from_u64(v[j]); m[j] = rand_fp_nonzero(); }
     return combine_ciphers(pk,
         enc_fp_depth(pk, sk, field::Op::add(vals, m), d),
         enc_fp_depth(pk, sk, field::Op::neg(m), d));
@@ -966,7 +1083,7 @@ inline Cipher enc_values(const PubKey& pk, const SecKey& sk, const std::vector<u
 }
 
 inline Cipher enc_zero_depth(const PubKey& pk, const SecKey& sk, int d) {
-    std::vector<Fp> m = {field::Op::rnd()};
+    std::vector<Fp> m = {rand_fp_nonzero()};
     return combine_ciphers(pk, enc_fp_depth(pk, sk, m, d), enc_fp_depth(pk, sk, field::Op::neg(m), d));
 }
 
@@ -1008,9 +1125,9 @@ inline Cipher enc_value_seeded(const PubKey& pk, const SecKey& sk, uint64_t v, c
     auto scoped = enc_seed_scope(pk, seed, "value", vals.size(), 0, vals);
     SeedableRng rng = make_seeded_rng(scoped.data());
     std::vector<Fp> m = {rng.fp_nonzero()};
-    return combine_ciphers(pk,
-        enc_fp_depth_seeded(pk, sk, field::Op::add(vals, m), 0, rng),
-        enc_fp_depth_seeded(pk, sk, field::Op::neg(m), 0, rng));
+    auto pos = enc_fp_depth_seeded(pk, sk, field::Op::add(vals, m), 0, rng);
+    auto neg = enc_fp_depth_seeded(pk, sk, field::Op::neg(m), 0, rng);
+    return combine_ciphers(pk, pos, neg);
 }
 
 inline Cipher enc_value_depth_seeded(const PubKey& pk, const SecKey& sk, uint64_t v, int d, const uint8_t seed[32]) {
@@ -1018,9 +1135,9 @@ inline Cipher enc_value_depth_seeded(const PubKey& pk, const SecKey& sk, uint64_
     auto scoped = enc_seed_scope(pk, seed, "value_depth", vals.size(), d, vals);
     SeedableRng rng = make_seeded_rng(scoped.data());
     std::vector<Fp> m = {rng.fp_nonzero()};
-    return combine_ciphers(pk,
-        enc_fp_depth_seeded(pk, sk, field::Op::add(vals, m), d, rng),
-        enc_fp_depth_seeded(pk, sk, field::Op::neg(m), d, rng));
+    auto pos = enc_fp_depth_seeded(pk, sk, field::Op::add(vals, m), d, rng);
+    auto neg = enc_fp_depth_seeded(pk, sk, field::Op::neg(m), d, rng);
+    return combine_ciphers(pk, pos, neg);
 }
 
 inline Cipher enc_values_seeded(const PubKey& pk, const SecKey& sk, const std::vector<uint64_t>& v, const uint8_t seed[32]) {
@@ -1030,9 +1147,9 @@ inline Cipher enc_values_seeded(const PubKey& pk, const SecKey& sk, const std::v
     auto scoped = enc_seed_scope(pk, seed, "values", vals.size(), 0, vals);
     SeedableRng rng = make_seeded_rng(scoped.data());
     for (size_t j = 0; j < S; ++j) m[j] = rng.fp_nonzero();
-    return combine_ciphers(pk,
-        enc_fp_depth_seeded(pk, sk, field::Op::add(vals, m), 0, rng),
-        enc_fp_depth_seeded(pk, sk, field::Op::neg(m), 0, rng));
+    auto pos = enc_fp_depth_seeded(pk, sk, field::Op::add(vals, m), 0, rng);
+    auto neg = enc_fp_depth_seeded(pk, sk, field::Op::neg(m), 0, rng);
+    return combine_ciphers(pk, pos, neg);
 }
 
 inline Cipher enc_zero_seeded(const PubKey& pk, const SecKey& sk, const uint8_t seed[32]) {
@@ -1040,9 +1157,9 @@ inline Cipher enc_zero_seeded(const PubKey& pk, const SecKey& sk, const uint8_t 
     auto scoped = enc_seed_scope(pk, seed, "zero", vals.size(), 0, vals);
     SeedableRng rng = make_seeded_rng(scoped.data());
     std::vector<Fp> m = {rng.fp_nonzero()};
-    return combine_ciphers(pk,
-        enc_fp_depth_seeded(pk, sk, m, 0, rng),
-        enc_fp_depth_seeded(pk, sk, field::Op::neg(m), 0, rng));
+    auto pos = enc_fp_depth_seeded(pk, sk, m, 0, rng);
+    auto neg = enc_fp_depth_seeded(pk, sk, field::Op::neg(m), 0, rng);
+    return combine_ciphers(pk, pos, neg);
 }
 
 }

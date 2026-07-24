@@ -1,4 +1,4 @@
-contract Multisig {
+Program Multisig {
   const MAX_OWNERS: int = 5
   state {
     owners: map[address]bool

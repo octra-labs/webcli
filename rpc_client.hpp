@@ -26,14 +26,12 @@
 */
 
 #pragma once
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <atomic>
-
-
-
-    #include <mutex>
-    #include <shared_mutex>
+#include <mutex>
+#include <shared_mutex>
 #include <memory>
 #include "lib/json.hpp"
 
@@ -85,7 +83,7 @@ class RpcClient {
 public:
     RpcClient() : path_("/rpc"), ssl_(true), port_(443) {}
     explicit RpcClient(const std::string& url) { parse_url(url); }
-        void set_url(const std::string& url) { std::unique_lock<std::shared_mutex> lk(url_mtx_); parse_url(url); }
+    void set_url(const std::string& url) { std::unique_lock<std::shared_mutex> lk(url_mtx_); parse_url(url); }
 
     RpcResult call(const std::string& method,
                    const nlohmann::json& params = nlohmann::json::array(),
@@ -97,20 +95,20 @@ public:
         req["id"] = ++id_;
         std::string body = req.dump();
         httplib::Headers hdrs = {{"Content-Type", "application/json"}};
-            
-            std::string host, path;
-            bool ssl;
-            int port;
-            {
-                std::shared_lock<std::shared_mutex> lk(url_mtx_);
-                host = host_;
-                path = path_;
-                ssl = ssl_;
-                port = port_;
-            }
-            if (ssl) {
+        std::string host, path;
+        bool ssl;
+        int port;
+        {
+            std::shared_lock<std::shared_mutex> lk(url_mtx_);
+            host = host_;
+            path = path_;
+            ssl = ssl_;
+            port = port_;
+        }
+        const int connect_timeout_sec = timeout_sec < 5 ? timeout_sec : 5;
+        if (ssl) {
             httplib::SSLClient cli(host, port);
-            cli.set_connection_timeout(timeout_sec, 0);
+            cli.set_connection_timeout(connect_timeout_sec, 0);
             cli.set_read_timeout(timeout_sec, 0);
             if (cli.ssl_context()) SSL_CTX_set_default_verify_paths(cli.ssl_context());
             cli.enable_server_certificate_verification(true);
@@ -120,7 +118,7 @@ public:
             return parse_response(res->body);
         } else {
             httplib::Client cli(host, port);
-            cli.set_connection_timeout(timeout_sec, 0);
+            cli.set_connection_timeout(connect_timeout_sec, 0);
             cli.set_read_timeout(timeout_sec, 0);
             auto res = cli.Post(path, hdrs, body, "application/json");
             if (!res) return {false, {}, "connection failed"};
@@ -156,7 +154,7 @@ public:
     RpcResult get_encrypted_balance(const std::string& addr,
                                     const std::string& sig_b64,
                                     const std::string& pub_b64) {
-        return call("octra_encryptedBalance", {addr, sig_b64, pub_b64});
+        return call("octra_encryptedBalance", {addr, sig_b64, pub_b64}, 8);
     }
 
     RpcResult get_encrypted_cipher(const std::string& addr) {
@@ -171,8 +169,16 @@ public:
         return call("octra_registerPvacPubkey", {addr, pk_b64, sig_b64, pub_b64, aes_kat_hex});
     }
 
-    RpcResult get_pvac_pubkey(const std::string& addr) {
-        return call("octra_pvacPubkey", {addr});
+    RpcResult get_pvac_pubkey(const std::string& addr, int timeout_sec = 30) {
+        return call("octra_pvacPubkey", {addr}, timeout_sec);
+    }
+
+    RpcResult get_pvac_migration_status(const std::string& addr, int timeout_sec = 30) {
+        return call("octra_pvacMigrationStatus", {addr}, timeout_sec);
+    }
+
+    RpcResult node_status(int timeout_sec = 5) {
+        return call("node_status", nlohmann::json::array(), timeout_sec);
     }
 
     RpcResult register_public_key(const std::string& addr,
@@ -181,8 +187,20 @@ public:
         return call("octra_registerPublicKey", {addr, pub_b64, sig_b64});
     }
 
-    RpcResult get_stealth_outputs(int from_epoch = 0) {
-        return call("octra_stealthOutputs", {from_epoch});
+    RpcResult get_stealth_outputs(int from_epoch = 0, int timeout_sec = 30) {
+        return call("octra_stealthOutputs", {from_epoch}, timeout_sec);
+    }
+
+    RpcResult get_stealth_outputs_page(int from_epoch,
+                                       int64_t before_id,
+                                       int limit = 256,
+                                       int timeout_sec = 10) {
+        nlohmann::json before = before_id < 0 ? nlohmann::json(nullptr) : nlohmann::json(before_id);
+        return call("octra_stealthOutputsPage", {from_epoch, before, limit}, timeout_sec);
+    }
+
+    RpcResult get_stealth_outputs_by_id(const nlohmann::json& ids, int timeout_sec = 10) {
+        return call("octra_stealthOutputsById", nlohmann::json::array({ids}), timeout_sec);
     }
 
     RpcResult staging_view() {
@@ -650,26 +668,24 @@ public:
         std::string body = batch.dump();
         httplib::Headers hdrs = {{"Content-Type", "application/json"}};
         std::string resp_body;
+        const int connect_timeout_sec = timeout_sec < 5 ? timeout_sec : 5;
         if (ssl_) {
             httplib::SSLClient cli(host_, port_);
-            cli.set_connection_timeout(timeout_sec, 0);
+            cli.set_connection_timeout(connect_timeout_sec, 0);
             cli.set_read_timeout(timeout_sec, 0);
             if (cli.ssl_context()) SSL_CTX_set_default_verify_paths(cli.ssl_context());
             cli.enable_server_certificate_verification(true);
             auto r = cli.Post(path_, hdrs, body, "application/json");
             if (!r) { for (auto& o : out) o.error = "connection failed"; return out; }
-
-             if (r->body.size() > max_body) { for (auto& o : out) o.error = "rpc response too large"; return out; }
+            if (r->body.size() > max_body) { for (auto& o : out) o.error = "rpc response too large"; return out; }
             resp_body = r->body;
         } else {
             httplib::Client cli(host_, port_);
-            cli.set_connection_timeout(timeout_sec, 0);
+            cli.set_connection_timeout(connect_timeout_sec, 0);
             cli.set_read_timeout(timeout_sec, 0);
             auto r = cli.Post(path_, hdrs, body, "application/json");
             if (!r) { for (auto& o : out) o.error = "connection failed"; return out; }
-
             if (r->body.size() > max_body) { for (auto& o : out) o.error = "rpc response too large"; return out; }
-
             resp_body = r->body;
         }
         try {

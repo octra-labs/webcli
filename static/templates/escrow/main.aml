@@ -1,4 +1,4 @@
-contract Escrow {
+Program Escrow {
   state {
     seller: address
     buyer: address

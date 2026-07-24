@@ -32,6 +32,11 @@ namespace Dom {
     inline constexpr const char* R_COM = "pvac.dom.r_com";
     inline constexpr const char* PRF_RHO = "pvac.prf.rho";
     inline constexpr const char* PRF_RHO_PROD = "pvac.prf.rho.prod";
+    inline constexpr const char* CIRCUIT_PRF_KEY = "pvac.v6.circuit_prf.key";
+    inline constexpr const char* CIRCUIT_PRF_BLIND = "pvac.v6.circuit_prf.blind";
+    inline constexpr const char* CIRCUIT_PRF_CHALLENGE = "pvac.v6.circuit_prf.challenge";
+    inline constexpr const char* CIRCUIT_PRF_ROUND = "pvac.v6.circuit_prf.mimc.round";
+    inline constexpr const char* PRF_R_ALPHA = "pvac.v6.prf.r.alpha";
 }
 
 struct Params {
@@ -64,6 +69,15 @@ struct Nonce128 {
     uint64_t hi;
 };
 
+inline Fp fp_from_hash32_nonzero(const uint8_t in[32]) {
+    uint64_t lo = 0;
+    uint64_t hi = 0;
+    for (int i = 0; i < 8; ++i) lo |= static_cast<uint64_t>(in[i]) << (8 * i);
+    for (int i = 0; i < 8; ++i) hi |= static_cast<uint64_t>(in[8 + i]) << (8 * i);
+    Fp out = fp_from_words(lo, hi & MASK63);
+    return (out.lo || out.hi) ? out : fp_from_u64(1);
+}
+
 inline Nonce128 make_nonce128() {
     return Nonce128 { csprng_u64(), csprng_u64() };
 }
@@ -89,6 +103,7 @@ struct Layer {
     uint32_t pa;
     uint32_t pb;
     std::array<uint8_t, 32> R_com = {};
+    std::vector<std::array<uint8_t, 32>> R_PC;
     std::vector<std::array<uint8_t, 32>> PC;
 };
 
@@ -120,6 +135,7 @@ struct PubKey {
     std::array<uint8_t, 32> H_digest;
     Fp omega_B;
     std::vector<Fp> powg_B;
+    std::array<uint8_t, 32> circuit_prf_key_commit = {};
 };
 
 inline bool is_valid_cipher_shape(const Cipher& cipher) {
@@ -135,7 +151,11 @@ inline bool is_valid_cipher_shape(const Cipher& cipher) {
             return false;
         if (layer.rule == RRule::PROD && !layer.PC.empty())
             return false;
+        if (layer.rule == RRule::PROD && !layer.R_PC.empty())
+            return false;
         if (!layer.PC.empty() && layer.PC.size() != cipher.slots)
+            return false;
+        if (!layer.R_PC.empty() && layer.R_PC.size() != cipher.slots)
             return false;
     }
     for (const auto& edge : cipher.E) {
@@ -157,6 +177,22 @@ inline bool is_valid_pubkey_shape(const PubKey& pk) {
     if (pk.ubk.perm.size() != static_cast<size_t>(pk.prm.m_bits) ||
         pk.ubk.inv.size() != static_cast<size_t>(pk.prm.m_bits))
         return false;
+    std::vector<uint8_t> seen_perm(pk.ubk.perm.size(), 0);
+    std::vector<uint8_t> seen_inv(pk.ubk.inv.size(), 0);
+    for (size_t i = 0; i < pk.ubk.perm.size(); ++i) {
+        int p = pk.ubk.perm[i];
+        int q = pk.ubk.inv[i];
+        if (p < 0 || q < 0 || p >= pk.prm.m_bits || q >= pk.prm.m_bits)
+            return false;
+        if (seen_perm[static_cast<size_t>(p)] || seen_inv[static_cast<size_t>(q)])
+            return false;
+        seen_perm[static_cast<size_t>(p)] = 1;
+        seen_inv[static_cast<size_t>(q)] = 1;
+    }
+    for (size_t i = 0; i < pk.ubk.perm.size(); ++i) {
+        if (pk.ubk.inv[static_cast<size_t>(pk.ubk.perm[i])] != static_cast<int>(i))
+            return false;
+    }
     if (pk.powg_B.size() != static_cast<size_t>(pk.prm.B))
         return false;
     for (const auto& column : pk.H) {
@@ -180,6 +216,8 @@ inline bool is_cipher_compatible_with_pubkey(const PubKey& pk, const Cipher& cip
 
 struct SecKey {
     std::array<uint64_t, 4> prf_k;
+    Fp circuit_prf_key = {0, 0};
+    std::array<uint8_t, 32> circuit_prf_key_blind = {};
     std::vector<uint64_t> lpn_s_bits;
 };
 

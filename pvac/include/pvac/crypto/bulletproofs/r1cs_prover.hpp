@@ -4,9 +4,11 @@
 #include <vector>
 #include <tuple>
 #include <cassert>
+#include <stdexcept>
 #include "transcript.hpp"
 #include "generators.hpp"
 #include "inner_product.hpp"
+#include "r1cs_limits.hpp"
 #include "r1cs_types.hpp"
 #include "../ristretto255.hpp"
 
@@ -66,6 +68,15 @@ public:
     size_t num_gates() const { return gates_.size(); }
     size_t num_constraints() const { return constraints_.size(); }
     size_t num_committed() const { return committed_.size(); }
+    size_t constraint_terms() const {
+        size_t count = 0;
+        for (const auto& constraint : constraints_) {
+            if (constraint.lc.terms.size() > R1CS_MAX_TERMS - count)
+                return R1CS_MAX_TERMS + 1;
+            count += constraint.lc.terms.size();
+        }
+        return count;
+    }
     std::vector<Constraint> get_constraints() const { return constraints_; }
 
     R1CSProof prove(Transcript& transcript) {
@@ -73,6 +84,10 @@ public:
         const size_t n = gates_.size();
         const size_t m = committed_.size();
         const size_t q = constraints_.size();
+        const size_t terms = constraint_terms();
+        if (n > R1CS_MAX_GATES || m > R1CS_MAX_COMMITTED ||
+            q > R1CS_MAX_CONSTRAINTS || terms > R1CS_MAX_TERMS)
+            throw std::runtime_error("pvac: r1cs prover limits exceeded");
         const size_t N = next_power_of_2(n > 0 ? n : 1);
 
         proof.V.resize(m);

@@ -74,6 +74,12 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 .unlock-screen button:hover{background:#2B4060}
 .pool-info{padding:8px 20px;font-size:11px;color:#8C9DB6;border-top:1px solid #E5E9EF;text-align:center;font-family:monospace}
 @media(max-width:500px){body{padding:0;align-items:stretch}.swap-wrap{border:none;min-height:100vh}}
+
+a, button, input, select, textarea, [class*="btn"], [class*="tab"] { transition: background .12s ease, color .12s ease, border-color .12s ease, box-shadow .12s ease, transform .08s ease; }
+button:not(:disabled):active, [class*="btn"]:not(:disabled):active { transform: translateY(1px); }
+input:focus, select:focus, textarea:focus { box-shadow: inset 0 0 0 1px rgba(81, 110, 154, .35); }
+button:focus-visible, a:focus-visible, [class*="btn"]:focus-visible { outline: 1px solid #516E9A; outline-offset: -2px; }
+tr:hover td { background: #F6F7F9; }
 </style>
 </head>
 <body>

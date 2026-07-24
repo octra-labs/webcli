@@ -1,4 +1,4 @@
-contract MyContract {
+Program MyProgram {
   state { owner: address }
   constructor() {
     self.owner = caller

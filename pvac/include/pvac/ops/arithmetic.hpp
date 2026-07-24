@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <functional>
 #include <numeric>
+#include <stdexcept>
 #include <utility>
 
 #include "../core/types.hpp"
@@ -439,6 +440,9 @@ inline Cipher ct_square_seeded(const PubKey& pk, const Cipher& A, const uint8_t 
 }
 
 inline Cipher ct_div_const(const PubKey& pk, const Cipher& A, const Fp& k) {
+    if ((k.lo | k.hi) == 0) {
+        throw std::runtime_error("pvac: zero divisor");
+    }
     return ct_scale(pk, A, fp_inv(k));
 }
 

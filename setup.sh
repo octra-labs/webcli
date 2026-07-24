@@ -7,8 +7,8 @@ for arg in "$@"; do
         --deps-only|--no-build) MODE="deps" ;;
         --help|-h)
             echo "usage: $0 [--deps-only]"
-            echo "(no args) install deps + build"
-            echo "--deps-only install deps only (no make)"
+            echo "  (no args)     install deps + build"
+            echo "  --deps-only   install deps only (no make)"
             exit 0
             ;;
     esac

@@ -2,9 +2,11 @@
 
 #include <cstdint>
 #include <cstring>
+#include <array>
 #include <vector>
 #include <unordered_set>
 #include <numeric>
+#include <stdexcept>
 
 #include "../core/types.hpp"
 #include "../core/hash.hpp"
@@ -17,6 +19,11 @@ inline std::vector<int> prg_choose_k(
     const char * label,
     const std::vector<uint64_t> & words
 ) {
+    if (k < 0 || N < 0)
+        throw std::runtime_error("pvac: unique sample negative domain rejected");
+    if (k > N)
+        throw std::runtime_error("pvac: unique sample exceeds domain");
+
     struct Ctr {
         const char * L;
         std::vector<uint64_t>   w;
@@ -88,6 +95,37 @@ inline std::vector<int> prg_choose_k(
     }
 
     return out;
+}
+
+inline uint64_t prg_u64(
+    const char * label,
+    const std::vector<uint64_t> & words
+) {
+    Sha256 s;
+
+    s.init();
+    s.update(label, std::strlen(label));
+
+    for (uint64_t x : words) {
+        uint8_t b[8];
+        store_le64(b, x);
+        s.update(b, 8);
+    }
+
+    std::array<uint8_t, 32> out{};
+    s.finish(out.data());
+    return load_le64(out.data());
+}
+
+inline int mixed_weight(
+    int base,
+    int limit,
+    const char * label,
+    const std::vector<uint64_t> & words
+) {
+    if (base < limit && (prg_u64(label, words) & 1ull))
+        return base + 1;
+    return base;
 }
 
 inline Ubk gen_ubk_public(uint64_t canon_tag, int m_bits) {
@@ -187,8 +225,6 @@ inline BitVec apply_perm_sigma(const BitVec & v, const std::vector<int> & inv) {
 inline void gen_H(PubKey & pk) {
     int m = pk.prm.m_bits;
     int n = pk.prm.n_bits;
-    int wt = pk.prm.h_col_wt;
-
     pk.H.resize(n, BitVec::make(m));
 
     for (int c = 0; c < n; c++) {
@@ -197,11 +233,12 @@ inline void gen_H(PubKey & pk) {
         std::vector<uint64_t> words {
             (uint64_t)m,
             (uint64_t)n,
-            (uint64_t)wt,
+            (uint64_t)pk.prm.h_col_wt,
             (uint64_t)c,
             pk.canon_tag
         };
 
+        int wt = mixed_weight(pk.prm.h_col_wt, m, "pvac.H.weight", words);
         auto rows = prg_choose_k(wt, m, Dom::H_GEN, words);
 
         for (int r : rows) {
@@ -286,7 +323,8 @@ inline BitVec sigma_from_H(
         s.xor_with(pk.H[c]);
     }
 
-    auto noise = prg_choose_k(pk.prm.err_wt, m, Dom::NOISE, words);
+    int noise_wt = mixed_weight(pk.prm.err_wt, m, "pvac.noise.weight", words);
+    auto noise = prg_choose_k(noise_wt, m, Dom::NOISE, words);
 
     for (int r : noise) {
         s.w[(size_t)r >> 6] ^= (1ull << (r & 63));

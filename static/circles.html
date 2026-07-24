@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octra circles</title>
-<link rel="stylesheet" href="style.css?v=3">
+<link rel="stylesheet" href="style.css?v=13">
 <style>
 .circle-shell {
   display: block;
@@ -380,6 +380,46 @@ body.circle-overlay-open {
     justify-content: flex-start;
   }
 }
+
+a, button, input, select, textarea, [class*="btn"], [class*="tab"] { transition: background .12s ease, color .12s ease, border-color .12s ease, box-shadow .12s ease, transform .08s ease; }
+button:not(:disabled):active, [class*="btn"]:not(:disabled):active { transform: translateY(1px); }
+input:focus, select:focus, textarea:focus { box-shadow: inset 0 0 0 1px rgba(81, 110, 154, .35); }
+button:focus-visible, a:focus-visible, [class*="btn"]:focus-visible { outline: 1px solid #516E9A; outline-offset: -2px; }
+tr:hover td { background: #F6F7F9; }
+
+#load-btn, #overlay-open-btn {
+  background: #516E9A;
+  color: #fff;
+  border: 1px solid #516E9A;
+  min-width: 96px;
+}
+#load-btn:hover, #overlay-open-btn:hover { background: #3B567F; border-color: #3B567F; }
+
+.circle-note {
+  border-left: 2px solid #D0D7E2;
+  padding-left: 8px;
+}
+
+.msg-box#status { border-left: 2px solid #516E9A; }
+
+.circle-summary { cursor: pointer; }
+.circle-summary:hover { background: #C7D0DE; }
+.circle-collapse[open] > .circle-summary { box-shadow: inset 3px 0 0 #516E9A; }
+
+.circle-preview-head { letter-spacing: .5px; }
+.circle-preview-body:empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 640px;
+}
+.circle-preview-body:empty::before {
+  content: 'load an oct:// resource to preview';
+  color: #C0C6D0;
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: lowercase;
+}
 </style>
 </head>
 <body>
@@ -479,6 +519,8 @@ body.circle-overlay-open {
   </div>
 </div>
 
-<script src="circles.js?v=1"></script>
+<script src="circle_bridge_policy.js?v=3"></script>
+<script src="circle_asset_chunks.js?v=1"></script>
+<script src="circles.js?v=3"></script>
 </body>
 </html>

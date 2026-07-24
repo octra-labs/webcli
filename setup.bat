@@ -41,7 +41,7 @@ if %errorlevel% equ 0 (
 echo no package manager found (winget / choco / scoop).
 echo.
 echo please install MSYS2 manually from:
-echo https://www.msys2.org/
+echo   https://www.msys2.org/
 echo.
 echo after installing, re-run this script.
 pause
@@ -88,7 +88,7 @@ echo.
 echo [3/3] done
 echo.
 echo start the wallet:
-echo octra_wallet.exe
+echo   octra_wallet.exe
 echo.
 echo then open http://127.0.0.1:8420 in your browser
 echo.

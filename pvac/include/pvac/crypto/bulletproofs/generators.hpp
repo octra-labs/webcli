@@ -64,24 +64,24 @@ class GeneratorTable {
     mutable std::vector<RistrettoPoint> H_;
     mutable std::mutex mtx_;
 
-        void ensure_size(size_t n) const {
-            if (n > BP_MAX_VECTOR_SIZE)
-                throw std::runtime_error("pvac: generator size rejected");
-            if (G_.size() != H_.size())
-                throw std::runtime_error("pvac: generator table shape rejected");
-            if (G_.size() >= n) return;
-            size_t old = G_.size();
-            auto next_G = G_;
-            auto next_H = H_;
-            next_G.resize(n);
-            next_H.resize(n);
-            for (size_t i = old; i < n; i++) {
-                next_G[i] = hash_to_ristretto_point("pvac.bp.gen.G", i);
-                next_H[i] = hash_to_ristretto_point("pvac.bp.gen.H", i);
-            }
-            G_.swap(next_G);
-            H_.swap(next_H);
+    void ensure_size(size_t n) const {
+        if (n > BP_MAX_VECTOR_SIZE)
+            throw std::runtime_error("pvac: generator size rejected");
+        if (G_.size() != H_.size())
+            throw std::runtime_error("pvac: generator table shape rejected");
+        if (G_.size() >= n) return;
+        size_t old = G_.size();
+        auto next_G = G_;
+        auto next_H = H_;
+        next_G.resize(n);
+        next_H.resize(n);
+        for (size_t i = old; i < n; i++) {
+            next_G[i] = hash_to_ristretto_point("pvac.bp.gen.G", i);
+            next_H[i] = hash_to_ristretto_point("pvac.bp.gen.H", i);
         }
+        G_.swap(next_G);
+        H_.swap(next_H);
+    }
 
 public:
     GeneratorTable() = default;

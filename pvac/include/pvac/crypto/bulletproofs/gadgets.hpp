@@ -21,6 +21,10 @@ inline Scalar sc_mersenne_p() {
     return Scalar{{UINT64_MAX, 0x7FFFFFFFFFFFFFFFULL, 0, 0}};
 }
 
+inline Scalar sc_mersenne_p_inv() {
+    return sc_inv(sc_mersenne_p());
+}
+
 inline void range_check(
     R1CSProver& prover,
     const Variable& v_var,
@@ -159,6 +163,15 @@ inline FpMulResult fp_mul_gadget(
     range_check(prover, q_var, q_val, 66);
 
     return {c_var, c_val};
+}
+
+inline FpMulResult fp_cube_gadget(
+    R1CSProver& prover,
+    const Variable& x_var,
+    const Scalar& x_val
+) {
+    auto x2 = fp_mul_gadget(prover, x_var, x_val, x_var, x_val);
+    return fp_mul_gadget(prover, x2.var, x2.val, x_var, x_val);
 }
 
 struct FpLimbs {

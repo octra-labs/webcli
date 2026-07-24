@@ -202,7 +202,6 @@ inline bool verify_range(
     return true;
 }
 
-
 struct AggregatedRangeProof {
     std::vector<Cipher> ct_bit;
     bp::R1CSProof proof;
@@ -302,7 +301,7 @@ inline void append_transcript_params(
     transcript.append_u64("nB", lc_data.bases.size());
 }
 
-}  // namespace detail
+}
 
 inline AggregatedRangeProof make_aggregated_range_proof(
     const PubKey& pk,
@@ -369,82 +368,10 @@ inline bool verify_aggregated_range(
     const Cipher& ct_value,
     const AggregatedRangeProof& arp
 ) {
-    if (!range_value_cipher_ok(pk, ct_value)) return false;
-    if (arp.ct_bit.size() != RANGE_BITS) return false;
-    for (const auto& ct_bit : arp.ct_bit)
-        if (!range_bit_cipher_ok(pk, ct_bit, ct_value.slots))
-            return false;
-
-    std::vector<detail::BitPrepData> vdata(RANGE_BITS);
-    for (size_t i = 0; i < RANGE_BITS; ++i) {
-        auto ct_b_m1 = ct_sub_const(pk, arp.ct_bit[i], (uint64_t)1);
-        uint8_t mul_seed[32];
-        for (int k = 0; k < 32; ++k)
-            mul_seed[k] = (uint8_t)((i * 37 + k * 13 + 0xA0) & 0xFF);
-        vdata[i].ct_check = ct_mul_seeded(pk, arp.ct_bit[i], ct_b_m1, mul_seed);
-        vdata[i].A = compute_layer_coeffs(pk, vdata[i].ct_check);
-        vdata[i].bases = base_layer_indices(vdata[i].ct_check);
-    }
-
-    auto ct_lc_diff = detail::compute_lc_diff(pk, arp.ct_bit, ct_value);
-    detail::BitPrepData lc_data;
-    lc_data.ct_check = ct_lc_diff;
-    lc_data.A = compute_layer_coeffs(pk, ct_lc_diff);
-    lc_data.bases = base_layer_indices(ct_lc_diff);
-
-    bp::R1CSProver dummy;
-    for (size_t i = 0; i < RANGE_BITS; ++i) {
-        detail::build_circuit(dummy, vdata[i].ct_check,
-                              vdata[i].A, vdata[i].bases,
-                              nullptr, nullptr);
-    }
-    detail::build_circuit(dummy, lc_data.ct_check,
-                          lc_data.A, lc_data.bases,
-                          nullptr, nullptr);
-
-    size_t expected_v = dummy.num_committed();
-    if (expected_v > bp::R1CS_MAX_COMMITTED) return false;
-    if (arp.proof.V.size() != expected_v) return false;
-
-    size_t v_offset = 0;
-    for (size_t i = 0; i < RANGE_BITS; ++i) {
-        auto& ct = vdata[i].ct_check;
-        auto& bases = vdata[i].bases;
-        size_t nB = bases.size();
-        size_t S = ct.slots;
-        for (size_t bi = 0; bi < nB; bi++) {
-            size_t lid = bases[bi];
-            if (ct.L[lid].PC.size() != S) return false;
-            for (size_t j = 0; j < S; j++) {
-                if (arp.proof.V[v_offset + bi * S + j] != ct.L[lid].PC[j])
-                    return false;
-            }
-        }
-        v_offset += nB * S;
-    }
-
-    {
-        size_t nB = lc_data.bases.size();
-        size_t S = ct_lc_diff.slots;
-        for (size_t bi = 0; bi < nB; bi++) {
-            size_t lid = lc_data.bases[bi];
-            if (ct_lc_diff.L[lid].PC.size() != S) return false;
-            for (size_t j = 0; j < S; j++) {
-                if (arp.proof.V[v_offset + bi * S + j] != ct_lc_diff.L[lid].PC[j])
-                    return false;
-            }
-        }
-    }
-
-    bp::ConstraintSystem cs;
-    cs.num_gates = dummy.num_gates();
-    cs.num_committed = dummy.num_committed();
-    cs.constraints = dummy.get_constraints();
-
-    bp::Transcript transcript("pvac.range_proof.aggregated");
-    detail::append_transcript_params(transcript, vdata, lc_data);
-
-    return bp::r1cs_verify(transcript, cs, arp.proof);
+    (void)pk;
+    (void)ct_value;
+    (void)arp;
+    return false;
 }
 
 }

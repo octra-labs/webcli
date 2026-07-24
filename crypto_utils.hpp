@@ -286,8 +286,11 @@ inline bool ed25519_pub_to_x25519(const uint8_t ed_pub[32], uint8_t x_pub[32]) {
         if (!BN_bin2bn(y_be, 32, y)) goto done;
     }
 
+    if (BN_cmp(y, p) >= 0) goto done;
+
     if (!BN_mod_add(one_plus_y, one, y, p, ctx)) goto done;
     if (!BN_mod_sub(one_minus_y, one, y, p, ctx)) goto done;
+    if (BN_is_zero(one_minus_y)) goto done;
     if (!BN_copy(p_minus_2, p)) goto done;
     if (!BN_sub_word(p_minus_2, 2)) goto done;
     if (!BN_mod_exp(inv, one_minus_y, p_minus_2, p, ctx)) goto done;
@@ -297,6 +300,11 @@ inline bool ed25519_pub_to_x25519(const uint8_t ed_pub[32], uint8_t x_pub[32]) {
         uint8_t u_be[32] = {0};
         if (BN_bn2binpad(u, u_be, 32) != 32) goto done;
         for (int i = 0; i < 32; ++i) x_pub[i] = u_be[31 - i];
+    }
+    {
+        uint8_t any = 0;
+        for (size_t i = 0; i < 32; ++i) any |= x_pub[i];
+        if (any == 0) goto done;
     }
     ok = true;
 
@@ -311,6 +319,17 @@ done:
     BN_free(p);
     BN_CTX_free(ctx);
     return ok;
+}
+
+inline bool ed25519_public_key_safe(const uint8_t ed_pub[32]) {
+    uint8_t x_pub[32];
+    if (!ed25519_pub_to_x25519(ed_pub, x_pub)) return false;
+    uint8_t probe_sk[32] = {9};
+    uint8_t shared[32];
+    if (crypto_scalarmult(shared, probe_sk, x_pub) != 0) return false;
+    uint8_t any = 0;
+    for (size_t i = 0; i < 32; ++i) any |= shared[i];
+    return any != 0;
 }
 
 inline void secure_zero(void* ptr, size_t len) {
@@ -415,7 +434,6 @@ inline std::vector<uint8_t> wallet_decrypt(
     return plain;
 }
 
-
 inline std::array<uint8_t, 64> hmac_sha512(const uint8_t* key, size_t key_len,
                                             const uint8_t* data, size_t data_len) {
     std::array<uint8_t, 64> out;
@@ -450,7 +468,6 @@ inline std::array<uint8_t, 32> derive_hd_seed(const uint8_t master_seed[64],
     }
     return result;
 }
-
 
 #include "lib/bip39_wordlist.hpp"
 

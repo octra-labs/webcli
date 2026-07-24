@@ -7,34 +7,9 @@
 #include "../core/hash.hpp"
 #include "../crypto/ristretto255.hpp"
 #include "decrypt.hpp"
+#include "layer_coeffs.hpp"
 
 namespace pvac {
-
-inline std::vector<std::vector<Fp>> compute_layer_coeffs(
-    const PubKey& pk, const Cipher& ct
-) {
-    size_t S = ct.slots;
-    size_t nL = ct.L.size();
-    std::vector<std::vector<Fp>> A(nL, std::vector<Fp>(S, Fp{0,0}));
-
-    for (const auto& e : ct.E) {
-        if (e.layer_id >= nL)
-            throw std::runtime_error("pvac: edge layer out of range");
-        if (e.idx >= pk.powg_B.size())
-            throw std::runtime_error("pvac: edge public-key index out of range");
-        if (e.w.size() != S)
-            throw std::runtime_error("pvac: edge weight/slots size mismatch");
-        Fp gp = pk.powg_B[e.idx];
-        int sg = sgn_val(e.ch);
-        for (size_t j = 0; j < S; j++) {
-            Fp term = fp_mul(e.w[j], gp);
-            A[e.layer_id][j] = sg > 0 ?
-                fp_add(A[e.layer_id][j], term) :
-                fp_sub(A[e.layer_id][j], term);
-        }
-    }
-    return A;
-}
 
 inline Scalar derive_rho(const SecKey& sk, const Layer& L, size_t j) {
     Sha256 h;

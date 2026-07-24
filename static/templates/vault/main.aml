@@ -1,4 +1,4 @@
-contract Vault {
+Program Vault {
   state {
     owner: address
     deposits: map[address]u128

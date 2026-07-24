@@ -3,6 +3,7 @@ const WOCT_ADDR = '0x4647e1fE715c9e23959022C2416C71867F5a6E80';
 const ETH_BRIDGE = '0xE7eD69b852fd2a1406080B26A37e8E04e7dA4caE';
 const SIGNER_URL = '/api/bridge/signer';
 const RECOVERY_URL = 'https://relayer-002838819188.octra.network/recovery.json';
+const ETH_RPC_URL = 'https://ethereum-rpc.publicnode.com';
 const MAINNET_CHAIN_ID = '0x1';
 const ETHEREUM_MAINNET_PARAMS = {
   chainId: MAINNET_CHAIN_ID,
@@ -31,6 +32,21 @@ const ETH_CHAIN_NAMES = {
   '0x66eee': 'Arbitrum Sepolia'
 };
 const OCT_DECIMALS = 6;
+const MAX_BRIDGE_RAW = (1n << 128n) - 1n;
+const CAP_SELECTORS = Object.freeze({
+  mint: Object.freeze({
+    perTx: '0x77ca7344',
+    daily: '0x7c215818',
+    used: '0xb7c140dd',
+    day: '0xe27cafb9'
+  }),
+  burn: Object.freeze({
+    perTx: '0x5af7840d',
+    daily: '0xe084e7b0',
+    used: '0x0ab5f7ed',
+    day: '0xe1bd9ccb'
+  })
+});
 
 let _currentChainId = null;
 
@@ -40,6 +56,127 @@ let _ethAddr = '';
 let _octBalance = '0';
 let _woctBalance = '0';
 let _ethProvider = null;
+let _ethRpcId = 0;
+let _capRequest = null;
+let _bridgeCaps = Object.freeze({ status: 'loading', mint: null, burn: null });
+
+const ethRpc = async (method, params) => {
+  const id = ++_ethRpcId;
+  const response = await fetch(ETH_RPC_URL, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({jsonrpc: '2.0', id, method, params}),
+    cache: 'no-store'
+  });
+  if (!response.ok) throw new Error('ethereum rpc unavailable');
+  const body = await response.json();
+  if (!body || body.id !== id || body.error || body.result === undefined) {
+    throw new Error('invalid ethereum rpc response');
+  }
+  return body.result;
+};
+
+const uintFromHex = value => {
+  if (typeof value !== 'string' || !/^0x[0-9a-fA-F]+$/.test(value)) {
+    throw new Error('invalid contract value');
+  }
+  return BigInt(value);
+};
+
+const readContractUint = selector =>
+  ethRpc('eth_call', [{to: ETH_BRIDGE, data: selector}, 'latest']).then(uintFromHex);
+
+const capFor = direction => direction === 'o2e' ? _bridgeCaps.mint : _bridgeCaps.burn;
+
+const capState = (perTx, daily, storedUsed, storedDay, currentDay) => {
+  const used = storedDay === currentDay ? storedUsed : 0n;
+  const remaining = daily > used ? daily - used : 0n;
+  return Object.freeze({perTx, daily, used, remaining});
+};
+
+const readBridgeCaps = async () => {
+  const mint = CAP_SELECTORS.mint;
+  const burn = CAP_SELECTORS.burn;
+  const values = await Promise.all([
+    readContractUint(mint.perTx),
+    readContractUint(mint.daily),
+    readContractUint(mint.used),
+    readContractUint(mint.day),
+    readContractUint(burn.perTx),
+    readContractUint(burn.daily),
+    readContractUint(burn.used),
+    readContractUint(burn.day),
+    ethRpc('eth_getBlockByNumber', ['latest', false])
+  ]);
+  const block = values[8];
+  if (!block || typeof block !== 'object') throw new Error('invalid ethereum block');
+  const timestamp = uintFromHex(block.timestamp);
+  const currentDay = timestamp / 86400n;
+  return Object.freeze({
+    status: 'ready',
+    mint: capState(values[0], values[1], values[2], values[3], currentDay),
+    burn: capState(values[4], values[5], values[6], values[7], currentDay)
+  });
+};
+
+const renderCapacity = () => {
+  const mode = _dir === 'o2e' ? 'mint' : 'burn';
+  const cap = capFor(_dir);
+  $('capacity-label').textContent = 'ethereum ' + mode + ' left today';
+  if (_bridgeCaps.status !== 'ready' || !cap) {
+    $('capacity-value').textContent = _bridgeCaps.status === 'loading' ? 'loading...' : 'unavailable';
+    $('capacity-tx').textContent = 'per tx: -';
+    $('capacity-meter').style.width = '0';
+    return;
+  }
+  $('capacity-value').textContent = fmtU(cap.remaining, OCT_DECIMALS) + ' wOCT';
+  $('capacity-tx').textContent = 'per tx: ' + fmtU(cap.perTx, OCT_DECIMALS) + ' wOCT';
+  const basisPoints = cap.daily > 0n ? Number(cap.remaining * 10000n / cap.daily) : 0;
+  $('capacity-meter').style.width = Math.max(0, Math.min(100, basisPoints / 100)) + '%';
+};
+
+const refreshBridgeCapacity = async () => {
+  if (_capRequest) return _capRequest;
+  _capRequest = readBridgeCaps()
+    .then(state => {
+      _bridgeCaps = state;
+      renderCapacity();
+      validateForm();
+      return true;
+    })
+    .catch(() => {
+      _bridgeCaps = Object.freeze({status: 'error', mint: null, burn: null});
+      renderCapacity();
+      validateForm();
+      return false;
+    })
+    .finally(() => {
+      _capRequest = null;
+    });
+  return _capRequest;
+};
+
+const parseAmount = value => {
+  const text = String(value || '').trim();
+  if (!/^(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{0,6})?$/.test(text)) return null;
+  const normalized = text.replace(/,/g, '');
+  const parts = normalized.split('.');
+  if (parts[0].length > 33) return null;
+  const fraction = (parts[1] || '').padEnd(OCT_DECIMALS, '0');
+  const raw = BigInt(parts[0]) * 1000000n + BigInt(fraction);
+  if (raw > MAX_BRIDGE_RAW) return null;
+  return Object.freeze({text: normalized, raw});
+};
+
+const capError = raw => {
+  if (_bridgeCaps.status === 'loading') return 'loading ethereum capacity';
+  if (_bridgeCaps.status !== 'ready') return 'ethereum capacity unavailable';
+  const cap = capFor(_dir);
+  if (!cap) return 'ethereum capacity unavailable';
+  if (raw > cap.perTx) return 'amount exceeds transaction cap';
+  if (raw > cap.remaining) return 'amount exceeds daily cap';
+  return '';
+};
 
 async function wcli(method, path, body) {
   var opts = { method: method, headers: {} };
@@ -94,7 +231,8 @@ async function _connectEthInner() {
 
   var html = '';
   _detectedWallets.forEach(function(w, i) {
-    var iconHtml = w.icon ? '<img src="' + w.icon + '" width="20" height="20" style="vertical-align:middle;margin-right:8px;border-radius:4px">' : '';
+    var icon = safeIconUrl(w.icon);
+    var iconHtml = icon ? '<img src="' + escAttr(icon) + '" width="20" height="20" style="vertical-align:middle;margin-right:8px;border-radius:4px">' : '';
     html += '<button data-action="selectWallet" data-arg="' + i + '" style="display:flex;align-items:center;width:100%;padding:10px;margin:4px 0;font-size:13px;font-weight:500;border:1px solid #D0D7E2;background:#fff;color:#2B3A52;cursor:pointer;text-align:left;font-family:Tahoma,arial,sans-serif">' + iconHtml + esc(w.name) + '</button>';
   });
   $('wallet-list').innerHTML = html;
@@ -263,6 +401,7 @@ function setDir(d) {
   $('bridge-amount').value = '';
   $('output-val').textContent = '0';
   clearStatus();
+  renderCapacity();
   validateForm();
 }
 
@@ -270,34 +409,48 @@ function validateForm() {
   const btn = $('bridge-btn');
   const amtStr = $('bridge-amount').value.trim();
   const recip = $('recipient').value.trim();
-  const amt = parseFloat(amtStr);
-  $('output-val').textContent = (amtStr && !isNaN(amt) && amt > 0) ? addCommas(amtStr) : '0';
+  const amount = parseAmount(amtStr);
+  $('output-val').textContent = amount && amount.raw > 0n ? addCommas(amount.text) : '0';
   if (!_octraAddr || !_ethAddr) { btn.disabled = true; btn.textContent = 'connect both wallets'; return; }
-  if (!amtStr || isNaN(amt) || amt <= 0) { btn.disabled = true; btn.textContent = 'enter amount'; return; }
-  const rawAmt = parseU(amtStr, OCT_DECIMALS);
+  if (!amount || amount.raw <= 0n) { btn.disabled = true; btn.textContent = 'enter valid amount'; return; }
+  const rawAmt = amount.raw;
+  const capacityError = capError(rawAmt);
+  if (capacityError) { btn.disabled = true; btn.textContent = capacityError; return; }
   if (_dir === 'o2e') {
-    if (BigInt(rawAmt) > BigInt(_octBalance)) { btn.disabled = true; btn.textContent = 'insufficient OCT'; return; }
+    if (rawAmt > BigInt(_octBalance)) { btn.disabled = true; btn.textContent = 'insufficient OCT'; return; }
     if (!recip || !/^0x[0-9a-fA-F]{40}$/.test(recip)) { btn.disabled = true; btn.textContent = 'enter valid ETH address'; return; }
     if (_currentChainId && _currentChainId !== MAINNET_CHAIN_ID) { btn.disabled = false; btn.textContent = 'switch to ethereum mainnet'; return; }
     btn.disabled = false; btn.textContent = 'bridge ' + amtStr + ' OCT';
   } else {
-    if (BigInt(rawAmt) > BigInt(_woctBalance)) { btn.disabled = true; btn.textContent = 'insufficient wOCT'; return; }
-    if (!recip || recip.length !== 47 || recip.substring(0, 3) !== 'oct') { btn.disabled = true; btn.textContent = 'enter valid octra address'; return; }
+    if (rawAmt > BigInt(_woctBalance)) { btn.disabled = true; btn.textContent = 'insufficient wOCT'; return; }
+    if (!recip || !/^oct[1-9A-HJ-NP-Za-km-z]{44}$/.test(recip)) { btn.disabled = true; btn.textContent = 'enter valid octra address'; return; }
     if (_currentChainId && _currentChainId !== MAINNET_CHAIN_ID) { btn.disabled = false; btn.textContent = 'switch to ethereum mainnet'; return; }
     btn.disabled = false; btn.textContent = 'bridge ' + amtStr + ' wOCT';
   }
 }
 
 function setMax() {
-  if (_dir === 'o2e') $('bridge-amount').value = fmtU(_octBalance, OCT_DECIMALS);
-  else $('bridge-amount').value = fmtU(_woctBalance, OCT_DECIMALS);
+  const balance = BigInt(_dir === 'o2e' ? _octBalance : _woctBalance);
+  const cap = capFor(_dir);
+  const allowed = _bridgeCaps.status === 'ready' && cap
+    ? [balance, cap.perTx, cap.remaining].reduce((a, b) => a < b ? a : b)
+    : balance;
+  $('bridge-amount').value = fmtU(allowed, OCT_DECIMALS);
   validateForm();
 }
 
 async function doBridge() {
   if (!await ensureCorrectChain()) return;
+  await refreshBridgeCapacity();
   const amt = $('bridge-amount').value.trim();
   const recip = $('recipient').value.trim();
+  const amount = parseAmount(amt);
+  const capacityError = amount ? capError(amount.raw) : 'enter valid amount';
+  if (capacityError) {
+    showStatus('err', capacityError);
+    validateForm();
+    return;
+  }
   if (_dir === 'o2e') {
     $('cm-title').textContent = 'confirm: lock OCT';
     $('cm-action').textContent = 'lock OCT -> mint wOCT';
@@ -305,7 +458,7 @@ async function doBridge() {
     $('cm-from').textContent = _octraAddr.substring(0, 14) + '...';
     $('cm-to').textContent = recip;
     $('cm-receive').textContent = amt + ' wOCT';
-    $('cm-warning').textContent = 'OCT will be locked on octra. wOCT will be minted on ethereum.';
+    $('cm-warning').textContent = 'OCT will be locked on octra. Ethereum rechecks the live mint cap at claim.';
     $('cm-confirm-btn').textContent = 'lock & bridge';
   } else {
     $('cm-title').textContent = 'confirm: burn wOCT';
@@ -324,6 +477,14 @@ function closeModal() { $('confirm-modal').classList.remove('show'); }
 
 async function confirmBridge() {
   closeModal();
+  await refreshBridgeCapacity();
+  const amount = parseAmount($('bridge-amount').value);
+  const capacityError = amount ? capError(amount.raw) : 'enter valid amount';
+  if (capacityError) {
+    showStatus('err', capacityError);
+    validateForm();
+    return;
+  }
   if (_dir === 'o2e') await doForward();
   else await doReverse();
 }
@@ -537,14 +698,23 @@ async function doClaim() {
     _activeHistoryId = null;
   }
   await refreshBalances();
+  await refreshBridgeCapacity();
 }
 
 function historyLoad() {
-  try { return JSON.parse(localStorage.getItem('bridge_history') || '[]'); } catch(e) { return []; }
+  try {
+    const rows = JSON.parse(localStorage.getItem('bridge_history') || '[]');
+    return Array.isArray(rows) ? rows.slice(0, 50) : [];
+  } catch(e) {
+    return [];
+  }
 }
 
 function historySave(arr) {
-  try { localStorage.setItem('bridge_history', JSON.stringify(arr.slice(0, 50))); } catch(e) {}
+  try {
+    const rows = Array.isArray(arr) ? arr.slice(0, 50) : [];
+    localStorage.setItem('bridge_history', JSON.stringify(rows));
+  } catch(e) {}
 }
 
 var _historyShowAll = false;
@@ -607,9 +777,11 @@ function historyRender() {
   for (var i = 0; i < visible.length; i++) {
     var e = visible[i];
     var d = new Date(e.locked_at);
-    var hh = String(d.getHours()).padStart(2, '0');
-    var mm = String(d.getMinutes()).padStart(2, '0');
-    var toShort = e.recipient ? (e.recipient.substr(0, 6) + '...' + e.recipient.substr(-4)) : '';
+    var validDate = Number.isFinite(d.getTime());
+    var hh = validDate ? String(d.getHours()).padStart(2, '0') : '--';
+    var mm = validDate ? String(d.getMinutes()).padStart(2, '0') : '--';
+    var recipient = typeof e.recipient === 'string' ? e.recipient : '';
+    var toShort = recipient ? (recipient.substr(0, 6) + '...' + recipient.substr(-4)) : '';
     var cls = 'pending';
     if (e.status === 'claimable') cls = 'claimable';
     else if (e.status === 'claimed' || e.status === 'unlocked') cls = 'claimed';
@@ -618,24 +790,30 @@ function historyRender() {
     else if (e.status === 'claiming' || e.status === 'burn_pending') cls = 'claiming';
     var isReverse = e.direction === 'e2o';
     var srcToken = isReverse ? 'wOCT' : 'OCT';
-    var topLine = '<div class="hs-top"><span class="hs-amount">' + e.amt_display + ' ' + srcToken + '</span> -&gt; <span class="hs-to">' + toShort + '</span></div>';
+    var amount = typeof e.amt_display === 'string' ? e.amt_display : '?';
+    var topLine = '<div class="hs-top"><span class="hs-amount">' + esc(amount) + ' ' + srcToken + '</span> -&gt; <span class="hs-to">' + esc(toShort) + '</span></div>';
     var midLine;
     if (isReverse) {
-      var burnLink = e.burn_tx_hash ? ('<a href="https://etherscan.io/tx/' + e.burn_tx_hash + '" target="_blank" style="color:#3B567F;text-decoration:none">' + hh + ':' + mm + '</a>') : (hh + ':' + mm);
-      var burnTag = e.burn_tx_hash ? (' | burn ' + e.burn_tx_hash.slice(0, 8) + '...') : '';
-      var unlockInfo = (e.status === 'unlocked' && e.recipient) ? (' | <a href="https://octrascan.io/address.html?addr=' + e.recipient + '" target="_blank" style="color:#4CAF50;text-decoration:none">view</a>') : '';
+      var burnHash = typeof e.burn_tx_hash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(e.burn_tx_hash) ? e.burn_tx_hash : '';
+      var burnLink = burnHash ? ('<a href="https://etherscan.io/tx/' + burnHash + '" target="_blank" rel="noopener noreferrer" style="color:#3B567F;text-decoration:none">' + hh + ':' + mm + '</a>') : (hh + ':' + mm);
+      var burnTag = burnHash ? (' | burn ' + burnHash.slice(0, 8) + '...') : '';
+      var validRecipient = /^oct[1-9A-HJ-NP-Za-km-z]{44}$/.test(recipient);
+      var unlockInfo = e.status === 'unlocked' && validRecipient ? (' | <a href="https://octrascan.io/address.html?addr=' + recipient + '" target="_blank" rel="noopener noreferrer" style="color:#4CAF50;text-decoration:none">view</a>') : '';
       midLine = '<div class="hs-time">' + burnLink + burnTag + unlockInfo + '</div>';
     } else {
-      var lockLink = e.lock_tx_hash ? ('<a href="https://octrascan.io/tx.html?hash=' + e.lock_tx_hash + '" target="_blank" style="color:#3B567F;text-decoration:none">' + hh + ':' + mm + '</a>') : (hh + ':' + mm);
-      var claimInfo = e.claim_tx_hash ? (' | <a href="https://etherscan.io/tx/' + e.claim_tx_hash + '" target="_blank" style="color:#4CAF50;text-decoration:none">view</a>') : '';
-      var epTag = e.epoch ? (' | ep ' + e.epoch) : ' | ep pending';
+      var lockHash = typeof e.lock_tx_hash === 'string' && /^[0-9a-fA-F]{64}$/.test(e.lock_tx_hash) ? e.lock_tx_hash : '';
+      var claimHash = typeof e.claim_tx_hash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(e.claim_tx_hash) ? e.claim_tx_hash : '';
+      var lockLink = lockHash ? ('<a href="https://octrascan.io/tx.html?hash=' + lockHash + '" target="_blank" rel="noopener noreferrer" style="color:#3B567F;text-decoration:none">' + hh + ':' + mm + '</a>') : (hh + ':' + mm);
+      var claimInfo = claimHash ? (' | <a href="https://etherscan.io/tx/' + claimHash + '" target="_blank" rel="noopener noreferrer" style="color:#4CAF50;text-decoration:none">view</a>') : '';
+      var epoch = Number.isSafeInteger(e.epoch) && e.epoch > 0 ? e.epoch : 0;
+      var epTag = epoch ? (' | ep ' + epoch) : ' | ep pending';
       midLine = '<div class="hs-time">' + lockLink + epTag + claimInfo + '</div>';
     }
     var row = document.createElement('div');
     row.className = 'hs-item';
     row.innerHTML =
       '<div class="hs-main">' + topLine + midLine + '</div>' +
-      '<div class="hs-status ' + cls + '" data-id="' + e.id + '">' + (labels[e.status] || e.status) + '</div>';
+      '<div class="hs-status ' + cls + '">' + esc(labels[e.status] || 'waiting') + '</div>';
     var statusEl = row.querySelector('.hs-status');
     if (e.status === 'claimable') {
       statusEl.onclick = (function(id) { return function() { historyClaim(id); }; })(e.id);
@@ -795,14 +973,20 @@ async function historyRefreshAll() {
 async function historyClaim(id) {
   var entry = historyGet(id);
   if (!entry) return;
-  if (!entry.claim_data) { showStatus('err', 'no claim data cached, click refresh status'); return; }
   if (!_ethProvider || !_ethAddr) { showStatus('err', 'connect metamask first'); return; }
   if (!await ensureCorrectChain()) return;
   historyUpdate(id, {status:'claiming'});
   showStatus('info', 'submitting claim: ' + entry.amt_display + ' wOCT ep ' + entry.epoch);
   try {
+    var claimData = await buildClaimCalldata(entry.epoch, _ethAddr, entry.amount_raw, null);
+    if (!claimData) {
+      historyUpdate(id, {status:'claimable', last_error:'canonical claim data unavailable'});
+      showStatus('err', 'canonical claim data unavailable');
+      return;
+    }
+    historyUpdate(id, {claim_data:claimData});
     try {
-      await _ethProvider.request({method:'eth_call', params:[{from:_ethAddr, to:ETH_BRIDGE, data:entry.claim_data.calldata}, 'latest']});
+      await _ethProvider.request({method:'eth_call', params:[{from:_ethAddr, to:ETH_BRIDGE, data:claimData.calldata}, 'latest']});
     } catch(simErr) {
       var em = (simErr && (simErr.message || String(simErr))) || '';
       var ed = (simErr && simErr.data) ? (typeof simErr.data === 'string' ? simErr.data : (simErr.data.data || simErr.data.originalError && simErr.data.originalError.data || '')) : '';
@@ -819,7 +1003,7 @@ async function historyClaim(id) {
       return;
     }
     var gasFees = await getSafeGas();
-    var txReq = {from:_ethAddr, to:ETH_BRIDGE, data:entry.claim_data.calldata};
+    var txReq = {from:_ethAddr, to:ETH_BRIDGE, data:claimData.calldata};
     for (var k in gasFees) txReq[k] = gasFees[k];
     var txHash = await _ethProvider.request({method:'eth_sendTransaction', params:[txReq]});
     historyUpdate(id, {claim_tx_hash:txHash});
@@ -838,6 +1022,7 @@ async function historyClaim(id) {
     historyUpdate(id, {status:'claimed', claim_tx_hash:txHash});
     showStatus('ok', 'wOCT claimed! <a href="https://etherscan.io/tx/' + txHash + '" target="_blank" style="color:#4CAF50">view</a>');
     await refreshBalances();
+    await refreshBridgeCapacity();
   } catch(e) {
     historyUpdate(id, {status:'claimable', last_error:e.message});
     showStatus('err', 'claim failed: ' + e.message);
@@ -919,20 +1104,23 @@ async function recoveryFetch(silent) {
       return 0;
     }
     var added = 0;
-    for (var i = 0; i < bucket.length; i++) {
-      var m = bucket[i];
+    var candidates = bucket.slice(0, 100);
+    for (var i = 0; i < candidates.length; i++) {
+      var m = candidates[i];
       if (!m || typeof m !== 'object') continue;
-      var mid = m.message_id || '';
+      var mid = typeof m.message_id === 'string' && /^0x[0-9a-fA-F]{64}$/.test(m.message_id) ? m.message_id : '';
       var ep = typeof m.epoch === 'number' ? m.epoch : parseInt(m.epoch, 10);
-      var amtRaw = String(m.amount_raw || '0');
-      if (!ep || !amtRaw || amtRaw === '0') continue;
+      var amtRaw = String(m.amount_raw || '');
+      if (!Number.isSafeInteger(ep) || ep <= 0 || !/^[1-9]\d{0,38}$/.test(amtRaw)) continue;
       if (historyHasMessage(mid, ep, target, amtRaw)) continue;
       var amtDisplay = fmtU(amtRaw, OCT_DECIMALS);
-      var lockedAt = m.found_at ? (m.found_at * 1000) : Date.now();
+      var foundAt = Number(m.found_at);
+      var lockedAt = Number.isSafeInteger(foundAt) && foundAt > 0 ? foundAt * 1000 : Date.now();
+      var txHash = typeof m.tx_hash === 'string' && /^[0-9a-fA-F]{64}$/.test(m.tx_hash) ? m.tx_hash : '';
       historyAdd({
         id: 'recovered_' + (mid ? mid.substring(2, 12) : ep + '_' + i) + '_' + Date.now(),
         locked_at: lockedAt,
-        lock_tx_hash: m.tx_hash || '',
+        lock_tx_hash: txHash,
         epoch: ep,
         recipient: _ethAddr,
         amount_raw: amtRaw,
@@ -997,7 +1185,8 @@ async function buildClaimCalldata(epochId, recipient, rawAmt, headerData) {
     var msgData = await msgResp.json();
     var messages = msgData.result.messages;
     var myMsg = messages.find(function(m) {
-      return m.recipient.toLowerCase() === recipient.toLowerCase();
+      return m.recipient.toLowerCase() === recipient.toLowerCase()
+        && String(m.amount) === String(rawAmt);
     });
     if (!myMsg) return null;
 
@@ -1083,10 +1272,14 @@ async function doReverse() {
       return;
     }
     if (burnHistoryId) historyUpdate(burnHistoryId, {status:'burn_pending'});
+    await refreshBridgeCapacity();
     setStep('burn', 'done'); setStep('unlock', 'active');
     showStatus('info', 'wOCT burned. waiting for OCT unlock on octra... <a href="' + explorerBase2 + '/tx/' + burnTx + '" target="_blank" style="color:#3B567F">view tx</a>');
-    var prevOct = _octBalance;
-    var unlocked = await pollUntilChange(function() { return getOctBalance(); }, prevOct, 180);
+    var ownRecipient = recip === _octraAddr;
+    var expectedOct = ownRecipient ? BigInt(_octBalance) + BigInt(rawAmt) : 0n;
+    var unlocked = ownRecipient
+      ? await pollUntilAtLeast(function() { return getOctBalance(); }, expectedOct, 180)
+      : false;
     if (unlocked) {
       setStep('unlock', 'done');
       showStatus('ok', 'OCT unlocked! <a href="https://octrascan.io/address.html?addr=' + _octraAddr + '" target="_blank" style="color:#3B567F">view on octra</a>');
@@ -1112,14 +1305,6 @@ async function waitReceipt(hash, maxWait) {
   return null;
 }
 
-function keccak256(sig) {
-  var encoder = new TextEncoder();
-  var data = encoder.encode(sig);
-  var hash = '';
-  var h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-  return '00000000';
-}
-
 function abiEncodeStringUint(str, uint) {
   var offset = '0000000000000000000000000000000000000000000000000000000000000040';
   var uintHex = BigInt(uint).toString(16).padStart(64, '0');
@@ -1138,6 +1323,51 @@ function setCurrentStepFail() { _steps.forEach(function(s) { var el = document.g
 function $(id) { return document.getElementById(id); }
 function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function escAttr(s) {
+  return String(s || '').replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+function safeIconUrl(url) {
+  url = String(url || '');
+  if (/^data:image\/(png|jpeg|webp|gif);base64,[a-z0-9+/=]+$/i.test(url)) return url;
+  if (/^https:\/\/[^\s"'<>()]+$/i.test(url)) return url;
+  return '';
+}
+function sanitizeStatusHtml(msg) {
+  var tpl = document.createElement('template');
+  tpl.innerHTML = String(msg || '');
+  var allowed = { A: true, B: true };
+  function clean(node) {
+    var children = Array.from(node.childNodes);
+    children.forEach(function(child) {
+      if (child.nodeType === Node.ELEMENT_NODE) {
+        clean(child);
+        if (!allowed[child.tagName]) {
+          child.replaceWith(document.createTextNode(child.textContent || ''));
+          return;
+        }
+        var href = child.tagName === 'A' ? (child.getAttribute('href') || '') : '';
+        Array.from(child.attributes).forEach(function(attr) { child.removeAttribute(attr.name); });
+        if (child.tagName === 'A') {
+          try {
+            var u = new URL(href, window.location.href);
+            if (u.protocol === 'http:' || u.protocol === 'https:') {
+              child.setAttribute('href', u.href);
+              child.setAttribute('target', '_blank');
+              child.setAttribute('rel', 'noopener noreferrer');
+            }
+          } catch (e) {}
+          if (!child.getAttribute('href')) child.replaceWith(document.createTextNode(child.textContent || ''));
+        }
+      } else if (child.nodeType !== Node.TEXT_NODE) {
+        child.remove();
+      }
+    });
+  }
+  clean(tpl.content);
+  return tpl.innerHTML;
+}
 async function getWoctBalance() {
   if (!_ethAddr || !_ethProvider || !WOCT_ADDR) return '0';
   try {
@@ -1153,25 +1383,32 @@ async function getOctBalance() {
   try { var b = await wcli('GET', '/balance'); return b.public_balance || '0'; } catch(e) { return '0'; }
 }
 
-async function pollUntilChange(getFn, prevVal, maxSec) {
+async function pollUntilAtLeast(getFn, target, maxSec) {
   var start = Date.now();
   while (Date.now() - start < maxSec * 1000) {
     await sleep(5000);
     var cur = await getFn();
-    if (cur !== prevVal && BigInt(cur) !== BigInt(prevVal)) return true;
+    if (BigInt(cur) >= target) return true;
   }
   return false;
 }
 
-function showStatus(type, msg) { var el = $('status-area'); el.className = 'status-msg ' + type; el.innerHTML = msg; }
+function showStatus(type, msg) { var el = $('status-area'); el.className = 'status-msg ' + type; el.innerHTML = sanitizeStatusHtml(msg); }
 function clearStatus() { $('status-area').className = 'status-msg'; $('status-area').textContent = ''; $('progress-area').style.display = 'none'; }
 function fmtU(raw, dec) { var s = raw.toString().padStart(dec + 1, '0'); var i = s.slice(0, s.length - dec) || '0'; var f = s.slice(s.length - dec).replace(/0+$/, ''); return f ? addCommas(i) + '.' + f : addCommas(i); }
-function parseU(h, dec) { h = h.replace(/,/g, ''); var p = h.split('.'); var i = p[0] || '0'; var f = (p[1] || '').padEnd(dec, '0').substring(0, dec); return (BigInt(i) * BigInt(10 ** dec) + BigInt(f)).toString(); }
+function parseU(value, dec) {
+  if (dec !== OCT_DECIMALS) throw new Error('unsupported amount precision');
+  const amount = parseAmount(value);
+  if (!amount || amount.raw <= 0n) throw new Error('invalid amount');
+  return amount.raw.toString();
+}
 function addCommas(s) { var p = s.split('.'); p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ','); return p.join('.'); }
 
 connectOctra().catch(function(){});
 checkPendingClaim();
+refreshBridgeCapacity();
 setInterval(function() { refreshBalances(); }, 10000);
+setInterval(function() { refreshBridgeCapacity(); }, 60000);
 setTimeout(function() {
   var saved = null;
   try { saved = localStorage.getItem('bridge_eth_wallet'); } catch(e) {}

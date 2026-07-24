@@ -1,6 +1,6 @@
 import IOCS01 from "interfaces/IOCS01.aml"
 
-contract Token implements IOCS01 {
+Program Token implements IOCS01 {
   invariant supply_conserved = sum(balances) == total_supply
 
   const MAX_U128 = 340282366920938463463374607431768211455

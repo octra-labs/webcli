@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ciphertext map | octra_wallet</title>
+  <link rel="stylesheet" href="style.css?v=13">
+  <link rel="stylesheet" href="cipher.css?v=2">
+  <script src="cipher.js?v=2" defer></script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="left">
+        <div class="title">octra_wallet</div>
+        <div class="subtitle">ciphertext structure</div>
+      </div>
+      <div class="hdr-right-group">
+        <div class="right hero-state">
+          <span id="load-state">loading</span>
+        </div>
+        <button class="right logout-btn" id="reload-btn" type="button">refresh</button>
+        <a class="right cipher-nav" href="index.html">back to wallet</a>
+      </div>
+    </header>
+
+    <main class="content-area">
+      <section class="metrics stats-row" aria-label="ciphertext metrics">
+        <article class="metric stat-box">
+          <span class="label">layers</span>
+          <strong class="value" id="metric-layers">-</strong>
+          <span id="metric-layer-mix">base - | prod -</span>
+        </article>
+        <article class="metric stat-box">
+          <span class="label">public edges</span>
+          <strong class="value" id="metric-edges">-</strong>
+          <span id="metric-edge-sample">visual sample -</span>
+        </article>
+        <article class="metric stat-box">
+          <span class="label">sigma density</span>
+          <strong class="value" id="metric-sigma">-</strong>
+          <span id="metric-sigma-mode">public field occupancy</span>
+        </article>
+        <article class="metric stat-box">
+          <span class="label">refresh pressure</span>
+          <strong class="value" id="metric-pressure">-</strong>
+          <span id="metric-pressure-detail">base layers</span>
+        </article>
+        <article class="metric stat-box">
+          <span class="label">wire size</span>
+          <strong class="value" id="metric-wire">-</strong>
+          <span id="metric-slots">slots - | c0 -</span>
+        </article>
+      </section>
+
+      <section class="section">
+        <div class="section-title">public encrypted balance structure</div>
+        <div class="cipher-intro">
+          <strong>ciphertext incidence map</strong>
+          <span>layers, sampled public indices and product relations</span>
+        </div>
+        <div class="identity">
+          <div>
+            <b>address:</b>
+            <span class="mono" id="address">-</span>
+          </div>
+          <div>
+            <b>wire hash:</b>
+            <span class="mono" id="wire-hash">-</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="map-section section">
+        <div class="section-title">interactive hypergraph projection</div>
+        <div class="map-toolbar">
+          <span>large nodes = layers | outer nodes = idx | surfaces = PROD</span>
+          <div class="map-actions">
+            <button class="action-btn" id="deepest-btn" type="button">focus deepest</button>
+            <button class="action-btn" id="reset-btn" type="button">reset view</button>
+          </div>
+        </div>
+        <div class="map-layout">
+          <div class="canvas-wrap">
+            <svg id="cipher-map" viewBox="0 0 1200 660" role="img" aria-label="Ciphertext incidence map">
+              <defs>
+                <pattern id="map-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+                  <path d="M 40 0 L 0 0 0 40" class="grid-path"></path>
+                </pattern>
+                <filter id="node-glow" x="-40%" y="-40%" width="180%" height="180%">
+                  <feGaussianBlur stdDeviation="6" result="blur"></feGaussianBlur>
+                  <feMerge>
+                    <feMergeNode in="blur"></feMergeNode>
+                    <feMergeNode in="SourceGraphic"></feMergeNode>
+                  </feMerge>
+                </filter>
+              </defs>
+              <rect width="1200" height="660" class="map-bg"></rect>
+              <rect width="1200" height="660" fill="url(#map-grid)"></rect>
+              <g id="map-viewport">
+                <g id="map-links"></g>
+                <g id="map-nodes"></g>
+              </g>
+            </svg>
+          </div>
+
+          <aside class="inspector">
+            <div class="inspector-title">selected layer</div>
+            <strong id="selected-title">waiting for data</strong>
+            <div id="selected-detail" class="detail-list"></div>
+            <div class="layer-list-head">
+              <span>layers</span>
+              <span id="layer-list-count">-</span>
+            </div>
+            <div id="layer-list" class="layer-list"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="empty-state note-box" id="empty-state" hidden>
+        <strong id="empty-title">no encrypted ciphertext</strong>
+        <p id="empty-detail">The active wallet has no public ciphertext structure to inspect.</p>
+      </section>
+    </main>
+
+    <footer class="cipher-footer">octra_wallet | local read-only ciphertext inspector</footer>
+  </div>
+</body>
+
+</html>

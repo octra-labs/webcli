@@ -69,9 +69,6 @@ inline std::string json_escape(const std::string& s) {
             case '\n': r += "\\n";  break;
             case '\r': r += "\\r";  break;
             case '\t': r += "\\t";  break;
-
-
-            
             default:   r += c;
         }
     }
@@ -151,15 +148,23 @@ inline std::string sha256_hex(const std::string& data) {
     return hex;
 }
 
+inline std::string frame_v2(const std::string& domain,
+                            const std::vector<std::string>& fields) {
+    std::string out = domain;
+    for (const auto& field : fields) {
+        out += "|" + std::to_string(field.size()) + ":" + field;
+    }
+    return out;
+}
+
 inline std::string sign_circle_read_request(const std::string& op,
                                             const std::string& circle_id,
                                             const std::string& addr,
                                             const std::string& subject,
                                             const uint8_t sk[64]) {
-    std::string msg = op + "|" + circle_id + "|" + addr;
-    if (!subject.empty()) {
-        msg += "|" + subject;
-    }
+    const std::string msg = frame_v2(
+        "octra_circle_auth_v2",
+        {op, circle_id, addr, subject});
     return ed25519_sign_detached(
         reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), sk);
 }
@@ -173,4 +178,4 @@ inline std::string sign_register_request(const std::string& addr,
         reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), sk);
 }
 
-} // namespace octra
+}

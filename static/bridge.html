@@ -3,15 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; connect-src 'self' http://178.62.60.204:8090 https://ethereum-sepolia-rpc.publicnode.com https://*.infura.io https://*.publicnode.com https://*.octra.network wss://* ws://*;">
-<title>octra bridge</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://ethereum-rpc.publicnode.com https://relayer-002838819188.octra.network; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none';">
+<title>octra bridge v1.05 beta</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-height:100vh;display:flex;justify-content:center;align-items:flex-start;padding:40px 16px;font-size:12px;letter-spacing:0.5px}
-.bridge-wrap{width:100%;max-width:460px;background:#fff;border:1px solid #D0D7E2;overflow:hidden}
-.bridge-header{padding:14px 20px;border-bottom:1px solid #E5E9EF;display:flex;align-items:center;justify-content:space-between}
-.bridge-header h1{font-size:14px;font-weight:600;color:#2B3A52}
-.connect-section{border-bottom:1px solid #E5E9EF}
+body{font-family:Tahoma,arial,sans-serif;background:linear-gradient(135deg,#E9EDF2 0%,#F6F7F9 46%,#E4E9F0 100%);color:#2B3A52;min-height:100vh;display:flex;justify-content:center;align-items:flex-start;padding:40px 16px;font-size:12px;letter-spacing:0.5px}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;background:linear-gradient(rgba(59,86,127,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(59,86,127,.035) 1px,transparent 1px);background-size:28px 28px}
+.bridge-wrap{position:relative;width:100%;max-width:480px;background:#fff;border:1px solid #BCC6D3;box-shadow:0 18px 45px rgba(43,58,82,.14);overflow:hidden}
+.bridge-wrap:before{content:"";display:block;height:3px;background:#516E9A}
+.bridge-header{padding:16px 20px;background:#2B3A52;border-bottom:1px solid #243247;display:flex;align-items:center;justify-content:space-between}
+.bridge-header h1{font-size:15px;font-weight:600;color:#fff;letter-spacing:.8px}
+.bridge-version{font-size:10px;color:#DCE4EE;border:1px solid #637895;padding:3px 7px;background:#344762}
+.connect-section{border-bottom:1px solid #D8DEE7;background:#FBFCFD}
 .connect-row{display:flex;align-items:center;justify-content:space-between;padding:10px 20px;border-bottom:1px solid #F0F2F5}
 .connect-row:last-child{border-bottom:none}
 .connect-row .cr-left{display:flex;align-items:center;gap:8px}
@@ -24,7 +27,7 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 .connect-btn{padding:5px 12px;font-size:11px;font-weight:500;border:1px solid #D0D7E2;background:#fff;color:#3B567F;cursor:pointer;font-family:Tahoma,arial,sans-serif;letter-spacing:0.5px}
 .connect-btn:hover{background:#F7F8FA}
 .connect-btn.connected{border-color:#4CAF50;color:#4CAF50;cursor:default}
-.dir-tabs{display:flex;border-bottom:1px solid #E5E9EF}
+.dir-tabs{display:flex;border-bottom:1px solid #D8DEE7;background:#F7F9FB}
 .dir-tabs button{flex:1;padding:10px;font-size:12px;font-weight:500;border:none;background:#fff;cursor:pointer;color:#8C9DB6;border-bottom:2px solid transparent;transition:all 0.15s;font-family:Tahoma,arial,sans-serif;letter-spacing:0.5px}
 .dir-tabs button.active{color:#3B567F;border-bottom-color:#3B567F}
 .dir-tabs button:hover{background:#F7F8FA}
@@ -34,11 +37,18 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 .chain-box .chain-name{font-size:13px;font-weight:600;color:#2B3A52}
 .chain-box .chain-token{font-size:11px;color:#516E9A;margin-top:2px}
 .chain-arrow{width:40px;display:flex;align-items:center;justify-content:center;font-size:16px;color:#8C9DB6;flex-shrink:0}
-.notice-bar{padding:10px 20px;background:#F7F8FA;border-bottom:1px solid #E5E9EF;font-size:11px;color:#8C9DB6;line-height:170%}
-.notice-bar .disclaimer{color:#B0B8C8;font-size:10px;margin-top:4px}
-.bridge-body{padding:16px 20px}
+.notice-bar{padding:10px 20px;background:#F7F8FA;border-bottom:1px solid #E5E9EF;font-size:11px;color:#6E7F98;line-height:170%}
+.capacity-panel{padding:13px 20px;border-bottom:1px solid #D8DEE7;background:#EEF2F7}
+.capacity-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.capacity-copy{min-width:0}
+.capacity-label{font-size:10px;color:#6E7F98;text-transform:uppercase;letter-spacing:.9px}
+.capacity-value{margin-top:3px;font-family:monospace;font-size:15px;font-weight:600;color:#2B3A52}
+.capacity-meta{text-align:right;font-size:10px;color:#6E7F98;line-height:1.6}
+.capacity-meter{height:3px;margin-top:10px;background:#D6DEE8;overflow:hidden}
+.capacity-meter span{display:block;width:0;height:100%;background:#516E9A;transition:width .2s ease}
+.bridge-body{padding:18px 20px}
 .input-group{margin-bottom:14px}
-.input-group label{display:block;font-size:11px;color:#8C9DB6;letter-spacing:0.5px;margin-bottom:4px}
+.input-group label{display:block;font-size:11px;font-weight:600;color:#516E9A;letter-spacing:0.5px;margin-bottom:6px}
 .input-row{display:flex;align-items:center;border:1px solid #C0C6D0;overflow:hidden;transition:border-color 0.15s}
 .input-row:focus-within{border-color:#3B567F}
 .input-row input{flex:1;padding:10px;font-size:14px;font-family:monospace;border:none;outline:none;background:transparent}
@@ -48,8 +58,8 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 .output-box{padding:10px;background:#F7F8FA;border:1px solid #E5E9EF;font-family:monospace;font-size:14px;color:#2B3A52;min-height:40px;display:flex;align-items:center;justify-content:space-between}
 .output-box .out-val{font-weight:600}
 .output-box .out-token{color:#8C9DB6;font-size:12px}
-.info-rows{margin:14px 0;font-size:12px;color:#516E9A}
-.info-rows .info-row{display:flex;justify-content:space-between;padding:3px 0}
+.info-rows{margin:14px 0;padding:9px 10px;background:#F7F8FA;border:1px solid #E5E9EF;font-size:11px;color:#6E7F98}
+.info-rows .info-row{display:flex;justify-content:space-between;padding:3px 0;gap:16px}
 .info-rows .info-row .val{font-family:monospace;color:#2B3A52}
 .bridge-btn{width:100%;padding:12px;font-size:13px;font-weight:600;border:none;cursor:pointer;background:#3B567F;color:#fff;transition:background 0.15s;font-family:Tahoma,arial,sans-serif;letter-spacing:0.5px}
 .bridge-btn:hover{background:#2B4060}
@@ -57,7 +67,7 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 .bridge-btn.loading{opacity:0.7;pointer-events:none}
 .balance-bar{padding:10px 20px;border-top:1px solid #E5E9EF;font-size:12px;color:#8C9DB6;display:flex;justify-content:space-between}
 .balance-bar .bal-val{font-family:monospace;color:#2B3A52;font-weight:500}
-.status-msg{padding:10px 20px;font-size:12px;text-align:center;display:none}
+.status-msg{padding:11px 20px;font-size:11px;text-align:left;line-height:1.6;border-top:1px solid #E5E9EF;display:none}
 .status-msg.ok{color:#4CAF50;display:block}
 .status-msg.err{color:#E57373;display:block}
 .status-msg.info{color:#516E9A;display:block}
@@ -74,8 +84,8 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 .modal-btns .btn-cancel:hover{background:#D0D7E2}
 .modal-btns .btn-confirm{background:#3B567F;color:#fff}
 .modal-btns .btn-confirm:hover{background:#2B4060}
-.progress-steps{margin:10px 0;font-size:12px;color:#8C9DB6}
-.progress-steps .step{padding:4px 0;display:flex;align-items:center;gap:8px}
+.progress-steps{margin:12px 0;font-size:11px;color:#8C9DB6}
+.progress-steps .step{padding:5px 0;display:flex;align-items:center;gap:8px}
 .progress-steps .step .dot{width:8px;height:8px;border-radius:50%;background:#C0C6D0;flex-shrink:0}
 .progress-steps .step.active .dot{background:#3B567F}
 .progress-steps .step.done .dot{background:#4CAF50}
@@ -83,7 +93,7 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 .progress-steps .step.active{color:#3B567F;font-weight:500}
 .progress-steps .step.done{color:#4CAF50}
 .progress-steps .step.fail{color:#E57373}
-.warning-box{margin:10px 0;padding:10px;background:#FFF8E1;border:1px solid #FFE082;font-size:11px;color:#795548;line-height:160%}
+.warning-box{margin:10px 0;padding:10px;background:#F7F8FA;border:1px solid #D8DEE7;font-size:11px;color:#516E9A;line-height:160%}
 .footer-bar{padding:10px 20px;border-top:1px solid #E5E9EF;text-align:center;font-size:10px;color:#8C9DB6}
 .footer-bar a{color:#8C9DB6;text-decoration:none;border-bottom:1px solid #D0D7E2}
 .history-section{border-top:1px solid #E5E9EF;padding:10px 20px}
@@ -105,14 +115,20 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 .history-list .hs-item .hs-status.claiming{color:#FF9800;border-color:#FFE0B2;cursor:wait}
 .hs-actions{display:flex;justify-content:space-between;margin-top:8px;font-size:10px;color:#8C9DB6}
 .hs-actions a{color:#8C9DB6;cursor:pointer;text-decoration:underline}
-@media(max-width:500px){body{padding:0;align-items:stretch}.bridge-wrap{border:none;min-height:100vh}}
+@media(max-width:500px){body{padding:0;align-items:stretch}.bridge-wrap{max-width:none;border:none;box-shadow:none;min-height:100vh}.bridge-wrap:before{height:2px}.capacity-top{gap:10px}.capacity-value{font-size:14px}}
+
+a, button, input, select, textarea, [class*="btn"], [class*="tab"] { transition: background .12s ease, color .12s ease, border-color .12s ease, box-shadow .12s ease, transform .08s ease; }
+button:not(:disabled):active, [class*="btn"]:not(:disabled):active { transform: translateY(1px); }
+input:focus, select:focus, textarea:focus { box-shadow: inset 0 0 0 1px rgba(81, 110, 154, .35); }
+button:focus-visible, a:focus-visible, [class*="btn"]:focus-visible { outline: 1px solid #516E9A; outline-offset: -2px; }
+tr:hover td { background: #F6F7F9; }
 </style>
 </head>
 <body>
 <div class="bridge-wrap" id="app">
   <div class="bridge-header">
-    <h1>octra bridge</h1>
-    <span style="font-size:10px;color:#8C9DB6">v1 experimental</span>
+    <h1>octra bridge v1.05 beta</h1>
+    <span class="bridge-version">two-way</span>
   </div>
 
   <div class="connect-section">
@@ -155,6 +171,20 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
 
   <div class="notice-bar">
     <div id="notice-text">lock OCT on octra, receive wOCT on ethereum</div>
+  </div>
+
+  <div class="capacity-panel" aria-live="polite">
+    <div class="capacity-top">
+      <div class="capacity-copy">
+        <div class="capacity-label" id="capacity-label">ethereum mint left today</div>
+        <div class="capacity-value" id="capacity-value">loading...</div>
+      </div>
+      <div class="capacity-meta">
+        <div id="capacity-tx">per tx: -</div>
+        <div>contract state | resets 00:00 UTC</div>
+      </div>
+    </div>
+    <div class="capacity-meter" aria-hidden="true"><span id="capacity-meter"></span></div>
   </div>
 
   <div class="bridge-body">
@@ -208,9 +238,9 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
   </div>
 
   <div class="footer-bar">
-    octra bridge v1 | this project is in beta | use at your own risk<br>
-    <a href="https://octrascan.io" target="_blank">octra explorer</a> |
-    <a href="https://etherscan.io" target="_blank">etherscan</a>
+    octra bridge v1.05 beta | use at your own risk<br>
+    <a href="https://octrascan.io" target="_blank" rel="noopener noreferrer">octra explorer</a> |
+    <a href="https://etherscan.io" target="_blank" rel="noopener noreferrer">etherscan</a>
   </div>
 
   <div class="modal-bg" id="confirm-modal">
@@ -242,6 +272,6 @@ body{font-family:Tahoma,arial,sans-serif;background:#F0F2F5;color:#2B3A52;min-he
   </div>
 </div>
 
-<script src="bridge.js?v=1"></script>
+<script src="bridge.js?v=3"></script>
 </body>
 </html>
