@@ -186,6 +186,14 @@ inline void fe_tobytes(uint8_t s[32], Fe25519 h) {
     }
 }
 
+inline bool fe_has_canonical_encoding(const uint8_t bytes[32], const Fe25519& value) {
+    uint8_t canonical[32];
+    fe_tobytes(canonical, value);
+    uint8_t mismatch = 0;
+    for (size_t i = 0; i < 32; ++i) mismatch |= bytes[i] ^ canonical[i];
+    return mismatch == 0;
+}
+
 inline bool fe_is_zero(const Fe25519& f) {
     uint8_t s[32];
     fe_tobytes(s, f);
@@ -639,6 +647,7 @@ inline RistrettoPoint rist_encode(const ExtPoint& P) {
 inline bool rist_decode(ExtPoint& P, const RistrettoPoint& bytes) {
     Fe25519 s = fe_frombytes(bytes.data());
 
+    if (!fe_has_canonical_encoding(bytes.data(), s)) return false;
     if (fe_is_negative(s)) return false;
 
     Fe25519 ss = fe_sq(s);
