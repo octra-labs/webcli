@@ -96,12 +96,7 @@ inline std::string derive_address_from_pubkey_b64(const std::string& pub_b64) {
     if (raw.size() != 32) {
         return "";
     }
-    auto h = sha256(raw.data(), raw.size());
-    std::string b58 = base58_encode(h.data(), 32);
-    while (b58.size() < 44) {
-        b58 = "1" + b58;
-    }
-    return "oct" + b58;
+    return derive_address_from_pubkey(raw.data());
 }
 
 inline bool ed25519_verify_detached(const std::string& message,

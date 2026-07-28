@@ -18,6 +18,7 @@
 #include "../core/hash.hpp"
 #include "../crypto/lpn.hpp"
 #include "../crypto/matrix.hpp"
+#include "../crypto/circuit_prf_profile.hpp"
 #include "../core/ct_safe.hpp"
 #include "../core/seedable_rng.hpp"
 
@@ -705,9 +706,10 @@ inline std::vector<Fp> prf_R_slots(const PubKey& pk, const SecKey& sk, const RSe
 }
 
 inline Fp circuit_prf_challenge(const PubKey& pk, const RSeed& seed, size_t j) {
+    const char* domain = circuit_prf_challenge_domain(pk.circuit_prf_profile);
     Sha256 h;
     h.init();
-    h.update(Dom::CIRCUIT_PRF_CHALLENGE, std::strlen(Dom::CIRCUIT_PRF_CHALLENGE));
+    h.update(domain, std::strlen(domain));
     sha256_acc_u64(h, pk.canon_tag);
     h.update(pk.H_digest.data(), pk.H_digest.size());
     sha256_acc_u64(h, seed.ztag);
@@ -719,12 +721,11 @@ inline Fp circuit_prf_challenge(const PubKey& pk, const RSeed& seed, size_t j) {
     return fp_from_hash32_nonzero(out);
 }
 
-static constexpr size_t CIRCUIT_PRF_MIMC_ROUNDS = 91;
-
-inline Fp circuit_prf_round_constant(size_t round) {
+inline Fp circuit_prf_round_constant(CircuitPrfProfile profile, size_t round) {
+    const char* domain = circuit_prf_round_domain(profile);
     Sha256 h;
     h.init();
-    h.update(Dom::CIRCUIT_PRF_ROUND, std::strlen(Dom::CIRCUIT_PRF_ROUND));
+    h.update(domain, std::strlen(domain));
     sha256_acc_u64(h, static_cast<uint64_t>(round));
     uint8_t out[32];
     h.finish(out);
@@ -732,13 +733,17 @@ inline Fp circuit_prf_round_constant(size_t round) {
 }
 
 inline Fp circuit_prf_R(const PubKey& pk, const SecKey& sk, const RSeed& seed, size_t j) {
+    const CircuitPrfProfile profile = pk.circuit_prf_profile;
+    const Fp& key = circuit_prf_key_for_profile(sk, profile);
     Fp state = circuit_prf_challenge(pk, seed, j);
-    for (size_t round = 0; round < CIRCUIT_PRF_MIMC_ROUNDS; ++round) {
-        Fp t = fp_add(fp_add(state, sk.circuit_prf_key), circuit_prf_round_constant(round));
-        state = fp_mul(fp_mul(t, t), t);
+    for (size_t round = 0; round < circuit_prf_rounds(profile); ++round) {
+        Fp t = fp_add(fp_add(state, key), circuit_prf_round_constant(profile, round));
+        state = circuit_prf_power(profile, t);
     }
-    Fp out = fp_add(fp_add(state, sk.circuit_prf_key), fp_from_u64(1));
-    return ct::fp_is_nonzero(out) ? out : fp_from_u64(1);
+    Fp out = fp_add(fp_add(state, key), fp_from_u64(1));
+    if (profile == CircuitPrfProfile::MIMC_X3_V6)
+        return ct::fp_is_nonzero(out) ? out : fp_from_u64(1);
+    return out;
 }
 
 inline std::vector<Fp> circuit_prf_R_slots(const PubKey& pk, const SecKey& sk, const RSeed& seed, size_t slots) {
@@ -746,6 +751,14 @@ inline std::vector<Fp> circuit_prf_R_slots(const PubKey& pk, const SecKey& sk, c
     for (size_t j = 0; j < slots; ++j)
         R[j] = circuit_prf_R(pk, sk, seed, j);
     return R;
+}
+
+inline bool circuit_prf_slots_nonzero(const std::vector<Fp>& slots) {
+    for (const auto& value : slots) {
+        if (!ct::fp_is_nonzero(value))
+            return false;
+    }
+    return true;
 }
 
 inline Scalar derive_rho_prod(const SecKey& sk, const Layer& L, size_t j) {
@@ -818,14 +831,21 @@ inline Cipher synth(const PubKey& pk, const SecKey& sk, const std::vector<Fp>& v
 
     Layer L{};
     L.rule = RRule::BASE;
-    L.seed.nonce = make_nonce128();
-    L.seed.ztag = prg_layer_ztag(pk.canon_tag, L.seed.nonce);
+    std::vector<Fp> R;
+    for (size_t attempt = 0; attempt < 16 && R.empty(); ++attempt) {
+        L.seed.nonce = make_nonce128();
+        L.seed.ztag = prg_layer_ztag(pk.canon_tag, L.seed.nonce);
+        auto candidate = circuit_prf_R_slots(pk, sk, L.seed, S);
+        if (circuit_prf_slots_nonzero(candidate))
+            R = std::move(candidate);
+    }
+    if (R.empty())
+        throw std::runtime_error("pvac: circuit prf nonzero mask generation failed");
 
     entropy::Budget b = entropy::Budget::compute(pk.prm, depth);
     delta::Gen dg{ pk, sk, L.seed };
     delta::Set ds = delta::Set::make(dg, b, S);
 
-    auto R = circuit_prf_R_slots(pk, sk, L.seed, S);
     L.R_com = compute_R_com_base(pk.canon_tag, L.seed.ztag, L.seed.nonce.lo, L.seed.nonce.hi, R);
     compute_layer_PC(L, sk, R, S);
     auto va = field::Op::sub(v, ds.agg);
@@ -902,14 +922,21 @@ inline Cipher synth_seeded(const PubKey& pk, const SecKey& sk, const std::vector
 
     Layer L{};
     L.rule = RRule::BASE;
-    L.seed.nonce = rng.nonce128();
-    L.seed.ztag = prg_layer_ztag(pk.canon_tag, L.seed.nonce);
+    std::vector<Fp> R;
+    for (size_t attempt = 0; attempt < 16 && R.empty(); ++attempt) {
+        L.seed.nonce = rng.nonce128();
+        L.seed.ztag = prg_layer_ztag(pk.canon_tag, L.seed.nonce);
+        auto candidate = circuit_prf_R_slots(pk, sk, L.seed, S);
+        if (circuit_prf_slots_nonzero(candidate))
+            R = std::move(candidate);
+    }
+    if (R.empty())
+        throw std::runtime_error("pvac: circuit prf nonzero mask generation failed");
 
     entropy::Budget b = entropy::Budget::compute(pk.prm, depth);
     delta::Gen dg{ pk, sk, L.seed };
     delta::Set ds = delta::Set::make(dg, b, S);
 
-    auto R = circuit_prf_R_slots(pk, sk, L.seed, S);
     L.R_com = compute_R_com_base(pk.canon_tag, L.seed.ztag, L.seed.nonce.lo, L.seed.nonce.hi, R);
     compute_layer_PC(L, sk, R, S);
     auto va = field::Op::sub(v, ds.agg);

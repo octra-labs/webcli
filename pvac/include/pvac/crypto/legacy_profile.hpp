@@ -5,6 +5,8 @@
 #include <vector>
 
 #include "matrix.hpp"
+#include "ristretto255.hpp"
+#include "circuit_prf_profile.hpp"
 
 namespace pvac {
 
@@ -97,11 +99,10 @@ inline bool legacy_v1_pubkey_matches(const PubKey& legacy, const PubKey& current
     return legacy.omega_B.hi <= MASK63 && (legacy.omega_B.lo != 0 || legacy.omega_B.hi != 0);
 }
 
-inline bool proof_profile_matches(const PubKey& a, const PubKey& b) {
+inline bool public_profile_matches(const PubKey& a, const PubKey& b) {
     if (!legacy_params_equal(a.prm, b.prm)) return false;
     if (a.canon_tag != b.canon_tag) return false;
     if (a.H_digest != b.H_digest) return false;
-    if (a.circuit_prf_key_commit != b.circuit_prf_key_commit) return false;
     if (a.powg_B.size() != b.powg_B.size()) return false;
     for (size_t i = 0; i < a.powg_B.size(); ++i) {
         if (a.powg_B[i].lo != b.powg_B[i].lo ||
@@ -114,6 +115,27 @@ inline bool proof_profile_matches(const PubKey& a, const PubKey& b) {
             return false;
     }
     return a.ubk.perm == b.ubk.perm && a.ubk.inv == b.ubk.inv;
+}
+
+inline bool proof_profile_matches(const PubKey& a, const PubKey& b) {
+    return public_profile_matches(a, b) &&
+        a.circuit_prf_key_commit == b.circuit_prf_key_commit &&
+        a.circuit_prf_profile == b.circuit_prf_profile;
+}
+
+inline bool secret_profile_matches(
+    const PubKey& candidate,
+    const PubKey& current,
+    const SecKey& sk
+) {
+    if (!public_profile_matches(candidate, current))
+        return false;
+    if (!valid_circuit_prf_profile(candidate.circuit_prf_profile))
+        return false;
+    const Fp& key = circuit_prf_key_for_profile(sk, candidate.circuit_prf_profile);
+    const auto& blind = circuit_prf_blind_for_profile(sk, candidate.circuit_prf_profile);
+    return candidate.circuit_prf_key_commit ==
+        pedersen_commit(sc_from_fp_signed(key), sc_reduce256(blind.data()));
 }
 
 }

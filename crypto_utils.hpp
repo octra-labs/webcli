@@ -28,6 +28,7 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <array>
@@ -223,6 +224,18 @@ inline std::string base58_encode(const uint8_t* data, size_t len) {
     for (size_t i = 0; i < zeroes; i++) result += '1';
     std::reverse(result.begin(), result.end());
     return result;
+}
+
+inline std::string derive_address_from_pubkey(const uint8_t pubkey[32]) {
+    const auto hash = sha256(pubkey, 32);
+    std::string encoded = base58_encode(hash.data(), hash.size());
+    if (encoded.size() < 44) {
+        encoded.insert(0, 44 - encoded.size(), '1');
+    }
+    if (encoded.size() != 44) {
+        throw std::runtime_error("invalid address encoding width");
+    }
+    return "oct" + encoded;
 }
 
 inline std::string hex_encode(const uint8_t* data, size_t len) {
@@ -434,6 +447,7 @@ inline std::vector<uint8_t> wallet_decrypt(
     return plain;
 }
 
+
 inline std::array<uint8_t, 64> hmac_sha512(const uint8_t* key, size_t key_len,
                                             const uint8_t* data, size_t data_len) {
     std::array<uint8_t, 64> out;
@@ -468,6 +482,7 @@ inline std::array<uint8_t, 32> derive_hd_seed(const uint8_t master_seed[64],
     }
     return result;
 }
+
 
 #include "lib/bip39_wordlist.hpp"
 
@@ -513,19 +528,41 @@ inline bool validate_mnemonic(const std::string& mnemonic) {
         if (c == ' ' || c == '\n' || c == '\t') {
             if (!w.empty()) { words.push_back(w); w.clear(); }
         } else {
-            w += (char)tolower(c);
+            w += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
     }
     if (!w.empty()) words.push_back(w);
     if (words.size() != 12 && words.size() != 15 &&
         words.size() != 18 && words.size() != 21 && words.size() != 24)
         return false;
+    std::vector<uint16_t> indices;
+    indices.reserve(words.size());
     for (auto& word : words) {
-        bool found = false;
+        int index = -1;
         for (int i = 0; i < 2048; i++) {
-            if (bip39::wordlist[i] == word) { found = true; break; }
+            if (bip39::wordlist[i] == word) {
+                index = i;
+                break;
+            }
         }
-        if (!found) return false;
+        if (index < 0) return false;
+        indices.push_back(static_cast<uint16_t>(index));
+    }
+    const size_t total_bits = indices.size() * 11;
+    const size_t checksum_bits = total_bits / 33;
+    const size_t entropy_bits = total_bits - checksum_bits;
+    std::vector<uint8_t> entropy(entropy_bits / 8, 0);
+    auto mnemonic_bit = [&indices](size_t bit) {
+        const uint16_t index = indices[bit / 11];
+        return static_cast<uint8_t>((index >> (10 - (bit % 11))) & 1);
+    };
+    for (size_t bit = 0; bit < entropy_bits; ++bit) {
+        entropy[bit / 8] |= mnemonic_bit(bit) << (7 - (bit % 8));
+    }
+    const auto digest = sha256(entropy.data(), entropy.size());
+    for (size_t bit = 0; bit < checksum_bits; ++bit) {
+        const uint8_t expected = (digest[bit / 8] >> (7 - (bit % 8))) & 1;
+        if (mnemonic_bit(entropy_bits + bit) != expected) return false;
     }
     return true;
 }

@@ -12,6 +12,7 @@
 
 #include "ristretto255.hpp"
 #include "matrix.hpp"
+#include "circuit_prf_profile.hpp"
 
 namespace pvac {
 
@@ -27,11 +28,31 @@ inline Scalar scalar_from_key_blind(const std::array<uint8_t, 32>& blind) {
 }
 
 inline void set_circuit_prf_commit(PubKey& pk, const SecKey& sk) {
+    const Fp& key = circuit_prf_key_for_profile(sk, pk.circuit_prf_profile);
+    const auto& blind = circuit_prf_blind_for_profile(sk, pk.circuit_prf_profile);
     pk.circuit_prf_key_commit =
-        pedersen_commit(sc_from_fp_signed(sk.circuit_prf_key), scalar_from_key_blind(sk.circuit_prf_key_blind));
+        pedersen_commit(sc_from_fp_signed(key), scalar_from_key_blind(blind));
+}
+
+inline void set_circuit_prf_profile(
+    PubKey& pk,
+    const SecKey& sk,
+    CircuitPrfProfile profile
+) {
+    if (!valid_circuit_prf_profile(profile))
+        throw std::runtime_error("pvac: circuit prf profile rejected");
+    pk.circuit_prf_profile = profile;
+    set_circuit_prf_commit(pk, sk);
 }
 
 inline void derive_circuit_prf_material_random(PubKey& pk, SecKey& sk) {
+    sk.circuit_prf_key_v6 = rand_fp_nonzero();
+    for (int i = 0; i < 4; ++i) {
+        uint64_t w = csprng_u64();
+        for (int j = 0; j < 8; ++j)
+            sk.circuit_prf_key_blind_v6[i * 8 + j] =
+                static_cast<uint8_t>((w >> (8 * j)) & 0xFF);
+    }
     sk.circuit_prf_key = rand_fp_nonzero();
     for (int i = 0; i < 4; ++i) {
         uint64_t w = csprng_u64();
@@ -39,26 +60,44 @@ inline void derive_circuit_prf_material_random(PubKey& pk, SecKey& sk) {
             sk.circuit_prf_key_blind[i * 8 + j] =
                 static_cast<uint8_t>((w >> (8 * j)) & 0xFF);
     }
+    pk.circuit_prf_profile = CircuitPrfProfile::MIMC_X5_V7;
     set_circuit_prf_commit(pk, sk);
 }
 
 inline void derive_circuit_prf_material_seeded(PubKey& pk, SecKey& sk, const uint8_t master[32]) {
-    uint8_t key_bytes[32];
+    uint8_t key_v6_bytes[32];
     {
         Sha256 h;
         h.init();
         h.update(Dom::CIRCUIT_PRF_KEY, std::strlen(Dom::CIRCUIT_PRF_KEY));
         h.update(master, 32);
-        h.finish(key_bytes);
+        h.finish(key_v6_bytes);
     }
-    sk.circuit_prf_key = fp_from_hash32_nonzero(key_bytes);
+    sk.circuit_prf_key_v6 = fp_from_hash32_nonzero(key_v6_bytes);
     {
         Sha256 h;
         h.init();
         h.update(Dom::CIRCUIT_PRF_BLIND, std::strlen(Dom::CIRCUIT_PRF_BLIND));
         h.update(master, 32);
+        h.finish(sk.circuit_prf_key_blind_v6.data());
+    }
+    uint8_t key_v7_bytes[32];
+    {
+        Sha256 h;
+        h.init();
+        h.update(Dom::CIRCUIT_PRF_KEY_V7, std::strlen(Dom::CIRCUIT_PRF_KEY_V7));
+        h.update(master, 32);
+        h.finish(key_v7_bytes);
+    }
+    sk.circuit_prf_key = fp_from_hash32_nonzero(key_v7_bytes);
+    {
+        Sha256 h;
+        h.init();
+        h.update(Dom::CIRCUIT_PRF_BLIND_V7, std::strlen(Dom::CIRCUIT_PRF_BLIND_V7));
+        h.update(master, 32);
         h.finish(sk.circuit_prf_key_blind.data());
     }
+    pk.circuit_prf_profile = CircuitPrfProfile::MIMC_X5_V7;
     set_circuit_prf_commit(pk, sk);
 }
 

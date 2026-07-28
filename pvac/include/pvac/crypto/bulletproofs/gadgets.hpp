@@ -65,6 +65,26 @@ inline void range_check(
     prover.constrain(reconstruction);
 }
 
+inline void reject_mersenne_modulus_alias(
+    R1CSProver& prover,
+    const Variable& v_var,
+    const Scalar& v_val
+) {
+    const Scalar one = sc_from_u64(1);
+    const Scalar delta = sc_sub(sc_mersenne_p(), v_val);
+    const Scalar inverse = sc_inv(delta);
+    auto [delta_var, inverse_var, product_var] = prover.allocate(delta, inverse);
+
+    LinearCombination delta_lc(delta_var);
+    delta_lc += LinearCombination(v_var);
+    delta_lc -= LinearCombination(Variable::one(), sc_mersenne_p());
+    prover.constrain(delta_lc);
+
+    LinearCombination product_lc(product_var);
+    product_lc -= LinearCombination(Variable::one(), one);
+    prover.constrain(product_lc);
+}
+
 struct FpMulResult {
     Variable var;
     Scalar val;
@@ -73,7 +93,8 @@ struct FpMulResult {
 inline FpMulResult fp_mul_gadget(
     R1CSProver& prover,
     const Variable& a_var, const Scalar& a_val,
-    const Variable& b_var, const Scalar& b_val
+    const Variable& b_var, const Scalar& b_val,
+    bool canonical = false
 ) {
     Scalar one_sc = sc_from_u64(1);
 
@@ -92,6 +113,8 @@ inline FpMulResult fp_mul_gadget(
 
     range_check(prover, a0_var, a0_val, 64);
     range_check(prover, a1_var, a1_val, 63);
+    if (canonical)
+        reject_mersenne_modulus_alias(prover, a_var, a_val);
 
     Scalar b0_val = sc_from_u64(b_val.v[0]);
     Scalar b1_val = sc_from_u64(b_val.v[1]);
@@ -108,6 +131,8 @@ inline FpMulResult fp_mul_gadget(
 
     range_check(prover, b0_var, b0_val, 64);
     range_check(prover, b1_var, b1_val, 63);
+    if (canonical)
+        reject_mersenne_modulus_alias(prover, b_var, b_val);
 
     auto [p00_l, p00_r, p00_out] = prover.multiply(
         LinearCombination(a0_var), LinearCombination(b0_var));
@@ -160,6 +185,8 @@ inline FpMulResult fp_mul_gadget(
     }
 
     range_check(prover, c_var, c_val, 127);
+    if (canonical)
+        reject_mersenne_modulus_alias(prover, c_var, c_val);
     range_check(prover, q_var, q_val, 66);
 
     return {c_var, c_val};
@@ -168,10 +195,22 @@ inline FpMulResult fp_mul_gadget(
 inline FpMulResult fp_cube_gadget(
     R1CSProver& prover,
     const Variable& x_var,
-    const Scalar& x_val
+    const Scalar& x_val,
+    bool canonical = false
 ) {
-    auto x2 = fp_mul_gadget(prover, x_var, x_val, x_var, x_val);
-    return fp_mul_gadget(prover, x2.var, x2.val, x_var, x_val);
+    auto x2 = fp_mul_gadget(prover, x_var, x_val, x_var, x_val, canonical);
+    return fp_mul_gadget(prover, x2.var, x2.val, x_var, x_val, canonical);
+}
+
+inline FpMulResult fp_fifth_gadget(
+    R1CSProver& prover,
+    const Variable& x_var,
+    const Scalar& x_val,
+    bool canonical
+) {
+    auto x2 = fp_mul_gadget(prover, x_var, x_val, x_var, x_val, canonical);
+    auto x4 = fp_mul_gadget(prover, x2.var, x2.val, x2.var, x2.val, canonical);
+    return fp_mul_gadget(prover, x4.var, x4.val, x_var, x_val, canonical);
 }
 
 struct FpLimbs {
@@ -182,7 +221,8 @@ struct FpLimbs {
 inline FpLimbs fp127_decompose(
     R1CSProver& prover,
     const Variable& x_var,
-    const Scalar& x_val
+    const Scalar& x_val,
+    bool canonical = false
 ) {
     Scalar x0_val = sc_from_u64(x_val.v[0]);
     Scalar x1_val = sc_from_u64(x_val.v[1]);
@@ -200,6 +240,8 @@ inline FpLimbs fp127_decompose(
 
     range_check(prover, x0_var, x0_val, 64);
     range_check(prover, x1_var, x1_val, 63);
+    if (canonical)
+        reject_mersenne_modulus_alias(prover, x_var, x_val);
 
     return {x0_var, x1_var, x0_val, x1_val};
 }
@@ -213,7 +255,8 @@ struct BoundPcResult {
 inline BoundPcResult bind_pc_value(
     R1CSProver& prover,
     const Variable& v_signed,
-    const Fp& x_fp
+    const Fp& x_fp,
+    bool canonical = false
 ) {
     Scalar x_val = Scalar{{x_fp.lo, x_fp.hi, 0, 0}};
     bool is_high = (x_fp.hi & (1ULL << 62)) != 0;
@@ -238,7 +281,7 @@ inline BoundPcResult bind_pc_value(
         prover.constrain(lc);
     }
 
-    auto limbs = fp127_decompose(prover, x_var, x_val);
+    auto limbs = fp127_decompose(prover, x_var, x_val, canonical);
 
     return {x_var, x_val, limbs};
 }

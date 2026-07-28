@@ -1,8 +1,3 @@
-/*
- * Octra Labs
- * December 2025
- */
-
 #pragma once
 
 #include <cstdint>
@@ -59,8 +54,14 @@ inline void append_key_bound_transcript_context(
     const char* proof_kind,
     const RistrettoPoint* amount_commitment = nullptr
 ) {
-    transcript.append_message("proof_version", reinterpret_cast<const uint8_t*>("pvac-v6-key-bound"), 17);
+    const char* proof_version = circuit_prf_proof_version(pk.circuit_prf_profile);
+    transcript.append_message(
+        "proof_version",
+        reinterpret_cast<const uint8_t*>(proof_version),
+        std::strlen(proof_version));
     transcript.append_message("proof_kind", reinterpret_cast<const uint8_t*>(proof_kind), std::strlen(proof_kind));
+    if (pk.circuit_prf_profile == CircuitPrfProfile::MIMC_X5_V7)
+        transcript.append_u64("circuit_prf_profile", static_cast<uint64_t>(pk.circuit_prf_profile));
     transcript.append_point("registered_key_commitment", pk.circuit_prf_key_commit);
     auto ct_hash = commit_ct(pk, ct);
     transcript.append_message("commit_ct", ct_hash.data(), ct_hash.size());
@@ -209,6 +210,7 @@ inline KeyBoundCircuitWiring build_key_bound_circuit(
     size_t nL = ct.L.size();
     size_t S = ct.slots;
     size_t nB = bases.size();
+    const bool canonical = pk.circuit_prf_profile == CircuitPrfProfile::MIMC_X5_V7;
 
     if (A.size() != nL)
         throw std::runtime_error("pvac: coefficient/layer size mismatch");
@@ -230,11 +232,15 @@ inline KeyBoundCircuitWiring build_key_bound_circuit(
     for (size_t lid = 0; lid < nL; lid++)
         w.layer_vars[lid].resize(S);
 
-    Fp key_fp = sk_ptr ? sk_ptr->circuit_prf_key : Fp{0, 0};
+    Fp key_fp = sk_ptr
+        ? circuit_prf_key_for_profile(*sk_ptr, pk.circuit_prf_profile)
+        : Fp{0, 0};
     Scalar key_signed = sk_ptr ? sc_from_fp_signed(key_fp) : sc_zero();
-    Scalar key_blind = sk_ptr ? sc_reduce256(sk_ptr->circuit_prf_key_blind.data()) : sc_zero();
+    Scalar key_blind = sk_ptr
+        ? sc_reduce256(circuit_prf_blind_for_profile(*sk_ptr, pk.circuit_prf_profile).data())
+        : sc_zero();
     bp::Variable key_signed_var = prover.commit(key_signed, key_blind);
-    auto key_bound = bp::bind_pc_value(prover, key_signed_var, key_fp);
+    auto key_bound = bp::bind_pc_value(prover, key_signed_var, key_fp, canonical);
 
     auto constrain_add_key_const = [&](
         const bp::LinearCombination& state_lc,
@@ -306,24 +312,26 @@ inline KeyBoundCircuitWiring build_key_bound_circuit(
             bp::Variable r_signed = prover.commit(r_signed_val, alpha_j);
             bp::Variable rinv_signed = prover.commit(rinv_signed_val, rho_j);
 
-            auto r_bound = bp::bind_pc_value(prover, r_signed, r_fp);
-            auto rinv_bound = bp::bind_pc_value(prover, rinv_signed, rinv_fp);
+            auto r_bound = bp::bind_pc_value(prover, r_signed, r_fp, canonical);
+            auto rinv_bound = bp::bind_pc_value(prover, rinv_signed, rinv_fp, canonical);
 
             Fp state_fp = circuit_prf_challenge(pk, ct.L[lid].seed, j);
             Scalar state_val = Scalar{{state_fp.lo, state_fp.hi, 0, 0}};
             bp::LinearCombination state_lc(bp::Variable::one(), state_val);
 
-            for (size_t round = 0; round < CIRCUIT_PRF_MIMC_ROUNDS; ++round) {
-                Fp c_fp = circuit_prf_round_constant(round);
+            for (size_t round = 0; round < circuit_prf_rounds(pk.circuit_prf_profile); ++round) {
+                Fp c_fp = circuit_prf_round_constant(pk.circuit_prf_profile, round);
                 Fp t_fp = fp_add(fp_add(state_fp, key_fp), c_fp);
                 auto [t_var, t_val] = constrain_add_key_const(
                     state_lc, state_val, state_fp, c_fp,
                     nullptr, nullptr, nullptr
                 );
-                auto t_cube = bp::fp_cube_gadget(prover, t_var, t_val);
-                state_fp = fp_mul(fp_mul(t_fp, t_fp), t_fp);
-                state_val = t_cube.val;
-                state_lc = bp::LinearCombination(t_cube.var);
+                auto t_power = pk.circuit_prf_profile == CircuitPrfProfile::MIMC_X3_V6
+                    ? bp::fp_cube_gadget(prover, t_var, t_val, canonical)
+                    : bp::fp_fifth_gadget(prover, t_var, t_val, canonical);
+                state_fp = circuit_prf_power(pk.circuit_prf_profile, t_fp);
+                state_val = t_power.val;
+                state_lc = bp::LinearCombination(t_power.var);
             }
 
             Fp one_fp = fp_from_u64(1);
@@ -333,7 +341,8 @@ inline KeyBoundCircuitWiring build_key_bound_circuit(
             );
 
             auto inv_prod = bp::fp_mul_gadget(prover, r_bound.x_var, r_bound.x_val,
-                                                      rinv_bound.x_var, rinv_bound.x_val);
+                                                      rinv_bound.x_var, rinv_bound.x_val,
+                                                      canonical);
             bp::LinearCombination inv_lc(inv_prod.var);
             inv_lc -= bp::LinearCombination(bp::Variable::one());
             prover.constrain(inv_lc);
@@ -358,17 +367,21 @@ inline KeyBoundCircuitWiring build_key_bound_circuit(
             auto& rb = w.layer_vars[pb][j];
 
             auto r_prod = bp::fp_mul_gadget(prover, ra.r_var, ra.r_val,
-                                                    rb.r_var, rb.r_val);
+                                                    rb.r_var, rb.r_val,
+                                                    canonical);
             auto rinv_prod = bp::fp_mul_gadget(prover, ra.rinv_var, ra.rinv_val,
-                                                       rb.rinv_var, rb.rinv_val);
+                                                       rb.rinv_var, rb.rinv_val,
+                                                       canonical);
 
             auto inv_prod = bp::fp_mul_gadget(prover, r_prod.var, r_prod.val,
-                                                      rinv_prod.var, rinv_prod.val);
+                                                      rinv_prod.var, rinv_prod.val,
+                                                      canonical);
             bp::LinearCombination inv_lc(inv_prod.var);
             inv_lc -= bp::LinearCombination(bp::Variable::one());
             prover.constrain(inv_lc);
 
-            auto rinv_limbs = bp::fp127_decompose(prover, rinv_prod.var, rinv_prod.val);
+            auto rinv_limbs = bp::fp127_decompose(
+                prover, rinv_prod.var, rinv_prod.val, canonical);
             w.layer_vars[lid][j] = {
                 r_prod.var,
                 r_prod.val,
@@ -431,9 +444,58 @@ inline KeyBoundCircuitWiring build_key_bound_circuit(
 
 }
 
+inline size_t key_bound_base_layer_limit(CircuitPrfProfile profile) {
+    if (profile == CircuitPrfProfile::MIMC_X3_V6)
+        return 8;
+    if (profile == CircuitPrfProfile::MIMC_X5_V7)
+        return 5;
+    return 0;
+}
+
+inline size_t key_bound_key_switch_base_layer_limit(CircuitPrfProfile profile) {
+    if (profile == CircuitPrfProfile::MIMC_X3_V6)
+        return 8;
+    if (profile == CircuitPrfProfile::MIMC_X5_V7)
+        return 6;
+    return 0;
+}
+
+inline bool key_bound_verify_shape_ok_with_limit(
+    const PubKey& pk,
+    const Cipher& ct,
+    size_t base_layer_limit
+) {
+    if (ct.slots != 1 || ct.L.empty() || ct.L.size() > 16 || ct.E.size() > 4096)
+        return false;
+    size_t base_layers = 0;
+    for (const auto& layer : ct.L) {
+        if (layer.rule == RRule::BASE)
+            ++base_layers;
+        else if (layer.rule != RRule::PROD)
+            return false;
+    }
+    return base_layers > 0 && base_layers <= base_layer_limit;
+}
+
+inline bool key_bound_verify_shape_ok(const PubKey& pk, const Cipher& ct) {
+    return key_bound_verify_shape_ok_with_limit(
+        pk,
+        ct,
+        key_bound_base_layer_limit(pk.circuit_prf_profile));
+}
+
+inline bool key_bound_key_switch_shape_ok(const PubKey& pk, const Cipher& ct) {
+    return key_bound_verify_shape_ok_with_limit(
+        pk,
+        ct,
+        key_bound_key_switch_base_layer_limit(pk.circuit_prf_profile));
+}
+
 inline ZeroProof make_zero_proof(
     const PubKey& pk, const SecKey& sk, const Cipher& ct
 ) {
+    if (!key_bound_verify_shape_ok(pk, ct))
+        throw std::runtime_error("pvac: key-bound proof shape rejected");
     size_t nL = ct.L.size();
     size_t S = ct.slots;
 
@@ -473,6 +535,7 @@ inline bool verify_zero(
     const ZeroProof& proof
 ) {
     if (!is_cipher_compatible_with_pubkey(pk, ct)) return false;
+    if (!key_bound_verify_shape_ok(pk, ct)) return false;
     if (pk.circuit_prf_key_commit == std::array<uint8_t, 32>{}) return false;
     size_t nL = ct.L.size();
     size_t S = ct.slots;
@@ -514,10 +577,13 @@ inline bool verify_zero(
     return bp::r1cs_verify(transcript, cs, proof.proof);
 }
 
-inline ZeroProof make_zero_proof_bound(
+inline ZeroProof make_zero_proof_bound_checked(
     const PubKey& pk, const SecKey& sk, const Cipher& ct,
-    uint64_t amount, const Scalar& amount_blinding
+    uint64_t amount, const Scalar& amount_blinding,
+    size_t base_layer_limit, bp::R1CSLimitProfile limit_profile
 ) {
+    if (!key_bound_verify_shape_ok_with_limit(pk, ct, base_layer_limit))
+        throw std::runtime_error("pvac: key-bound proof shape rejected");
     size_t nL = ct.L.size();
     size_t S = ct.slots;
 
@@ -552,17 +618,46 @@ inline ZeroProof make_zero_proof_bound(
     detail::append_key_bound_transcript_context(transcript, pk, ct, "bound", &amount_commitment);
 
     ZeroProof result;
-    result.proof = prover.prove(transcript);
+    result.proof = prover.prove(transcript, limit_profile);
     result.is_bound = true;
     return result;
 }
 
-inline bool verify_zero_bound(
+inline ZeroProof make_zero_proof_bound(
+    const PubKey& pk, const SecKey& sk, const Cipher& ct,
+    uint64_t amount, const Scalar& amount_blinding
+) {
+    return make_zero_proof_bound_checked(
+        pk,
+        sk,
+        ct,
+        amount,
+        amount_blinding,
+        key_bound_base_layer_limit(pk.circuit_prf_profile),
+        bp::R1CSLimitProfile::Default);
+}
+
+inline ZeroProof make_zero_proof_bound_key_switch(
+    const PubKey& pk, const SecKey& sk, const Cipher& ct,
+    uint64_t amount, const Scalar& amount_blinding
+) {
+    return make_zero_proof_bound_checked(
+        pk,
+        sk,
+        ct,
+        amount,
+        amount_blinding,
+        key_bound_key_switch_base_layer_limit(pk.circuit_prf_profile),
+        bp::R1CSLimitProfile::KeySwitchRefresh);
+}
+
+inline bool verify_zero_bound_checked(
     const PubKey& pk, const Cipher& ct,
-    const ZeroProof& proof,
-    const RistrettoPoint& amount_commitment
+    const ZeroProof& proof, const RistrettoPoint& amount_commitment,
+    size_t base_layer_limit, bp::R1CSLimitProfile limit_profile
 ) {
     if (!is_cipher_compatible_with_pubkey(pk, ct)) return false;
+    if (!key_bound_verify_shape_ok_with_limit(pk, ct, base_layer_limit)) return false;
     if (pk.circuit_prf_key_commit == std::array<uint8_t, 32>{}) return false;
     size_t nL = ct.L.size();
     size_t S = ct.slots;
@@ -605,13 +700,43 @@ inline bool verify_zero_bound(
     transcript.append_u64("nB", nB);
     detail::append_key_bound_transcript_context(transcript, pk, ct, "bound", &amount_commitment);
 
-    return bp::r1cs_verify(transcript, cs, proof.proof);
+    return bp::r1cs_verify(transcript, cs, proof.proof, limit_profile);
+}
+
+inline bool verify_zero_bound(
+    const PubKey& pk, const Cipher& ct,
+    const ZeroProof& proof,
+    const RistrettoPoint& amount_commitment
+) {
+    return verify_zero_bound_checked(
+        pk,
+        ct,
+        proof,
+        amount_commitment,
+        key_bound_base_layer_limit(pk.circuit_prf_profile),
+        bp::R1CSLimitProfile::Default);
+}
+
+inline bool verify_zero_bound_key_switch(
+    const PubKey& pk, const Cipher& ct,
+    const ZeroProof& proof,
+    const RistrettoPoint& amount_commitment
+) {
+    return verify_zero_bound_checked(
+        pk,
+        ct,
+        proof,
+        amount_commitment,
+        key_bound_key_switch_base_layer_limit(pk.circuit_prf_profile),
+        bp::R1CSLimitProfile::KeySwitchRefresh);
 }
 
 inline ZeroProof make_zero_proof_bound_range(
     const PubKey& pk, const SecKey& sk, const Cipher& ct,
     uint64_t amount, const Scalar& amount_blinding
 ) {
+    if (!key_bound_verify_shape_ok(pk, ct))
+        throw std::runtime_error("pvac: key-bound proof shape rejected");
     size_t nL = ct.L.size();
     size_t S = ct.slots;
 
@@ -654,9 +779,11 @@ inline ZeroProof make_zero_proof_bound_range(
 
 inline bool verify_zero_bound_range(
     const PubKey& pk, const Cipher& ct,
-    const ZeroProof& proof
+    const ZeroProof& proof,
+    const RistrettoPoint& amount_commitment
 ) {
     if (!is_cipher_compatible_with_pubkey(pk, ct)) return false;
+    if (!key_bound_verify_shape_ok(pk, ct)) return false;
     if (pk.circuit_prf_key_commit == std::array<uint8_t, 32>{}) return false;
     size_t nL = ct.L.size();
     size_t S = ct.slots;
@@ -681,7 +808,7 @@ inline bool verify_zero_bound_range(
         }
     }
 
-    RistrettoPoint amount_commitment = proof.proof.V[amount_idx];
+    if (proof.proof.V[amount_idx] != amount_commitment) return false;
 
     auto A = compute_layer_coeffs(pk, ct);
     detail::AmountBinding dummy_bind;
@@ -701,6 +828,22 @@ inline bool verify_zero_bound_range(
     detail::append_key_bound_transcript_context(transcript, pk, ct, "bound_range", &amount_commitment);
 
     return bp::r1cs_verify(transcript, cs, proof.proof);
+}
+
+inline bool verify_zero_bound_range(
+    const PubKey& pk, const Cipher& ct,
+    const ZeroProof& proof
+) {
+    if (!is_cipher_compatible_with_pubkey(pk, ct)) return false;
+    if (!key_bound_verify_shape_ok(pk, ct)) return false;
+    const auto bases = base_layer_indices(ct);
+    const size_t amount_idx = 1 + bases.size() * ct.slots * 2;
+    if (proof.proof.V.size() != amount_idx + 1) return false;
+    return verify_zero_bound_range(
+        pk,
+        ct,
+        proof,
+        proof.proof.V[amount_idx]);
 }
 
 }

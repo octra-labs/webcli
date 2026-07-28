@@ -94,7 +94,10 @@ public:
         req["params"] = params;
         req["id"] = ++id_;
         std::string body = req.dump();
-        httplib::Headers hdrs = {{"Content-Type", "application/json"}};
+        httplib::Headers hdrs = {
+            {"Content-Type", "application/json"},
+            {"User-Agent", "Octra-Wallet/0.04.10"}
+        };
         std::string host, path;
         bool ssl;
         int port;
@@ -211,14 +214,18 @@ public:
         return call("octra_compileAssembly", {source}, 10);
     }
 
-    RpcResult compile_aml(const std::string& source) {
-        return call("octra_compileAml", {source}, 10);
+    RpcResult compile_aml(const std::string& source, bool program) {
+        return call("octra_compileAml", {source, program}, 10);
     }
 
-    RpcResult compile_aml_multi(const nlohmann::json& files, const std::string& main_path) {
+    RpcResult compile_aml_multi(
+        const nlohmann::json& files,
+        const std::string& main_path,
+        bool program) {
         nlohmann::json payload;
         payload["files"] = files;
         payload["main"] = main_path;
+        payload["program"] = program;
         return call("octra_compileAmlMulti", nlohmann::json::array({payload}), 15);
     }
 
@@ -666,24 +673,37 @@ public:
             batch.push_back(std::move(req));
         }
         std::string body = batch.dump();
-        httplib::Headers hdrs = {{"Content-Type", "application/json"}};
+        httplib::Headers hdrs = {
+            {"Content-Type", "application/json"},
+            {"User-Agent", "Octra-Wallet/0.04.10"}
+        };
         std::string resp_body;
+        std::string host, path;
+        bool ssl;
+        int port;
+        {
+            std::shared_lock<std::shared_mutex> lk(url_mtx_);
+            host = host_;
+            path = path_;
+            ssl = ssl_;
+            port = port_;
+        }
         const int connect_timeout_sec = timeout_sec < 5 ? timeout_sec : 5;
-        if (ssl_) {
-            httplib::SSLClient cli(host_, port_);
+        if (ssl) {
+            httplib::SSLClient cli(host, port);
             cli.set_connection_timeout(connect_timeout_sec, 0);
             cli.set_read_timeout(timeout_sec, 0);
             if (cli.ssl_context()) SSL_CTX_set_default_verify_paths(cli.ssl_context());
             cli.enable_server_certificate_verification(true);
-            auto r = cli.Post(path_, hdrs, body, "application/json");
+            auto r = cli.Post(path, hdrs, body, "application/json");
             if (!r) { for (auto& o : out) o.error = "connection failed"; return out; }
             if (r->body.size() > max_body) { for (auto& o : out) o.error = "rpc response too large"; return out; }
             resp_body = r->body;
         } else {
-            httplib::Client cli(host_, port_);
+            httplib::Client cli(host, port);
             cli.set_connection_timeout(connect_timeout_sec, 0);
             cli.set_read_timeout(timeout_sec, 0);
-            auto r = cli.Post(path_, hdrs, body, "application/json");
+            auto r = cli.Post(path, hdrs, body, "application/json");
             if (!r) { for (auto& o : out) o.error = "connection failed"; return out; }
             if (r->body.size() > max_body) { for (auto& o : out) o.error = "rpc response too large"; return out; }
             resp_body = r->body;
@@ -701,9 +721,11 @@ public:
                 if (item.contains("result")) {
                     out[id - 1] = {true, item["result"], ""};
                 } else if (item.contains("error")) {
-                    auto& e = item["error"];
-                    std::string msg = e.is_object() ? e.value("message", "rpc error") : e.dump();
-                    out[id - 1] = {false, {}, msg};
+                    out[id - 1] = {
+                        false,
+                        {},
+                        error_message(item["error"])
+                    };
                 }
             }
         } catch (const std::exception& ex) {
@@ -713,16 +735,25 @@ public:
     }
 
 private:
+    static std::string error_message(const nlohmann::json& error) {
+        if (!error.is_object()) return error.dump();
+        std::string message = error.value("message", "rpc error");
+        auto data = error.find("data");
+        if (data != error.end() && data->is_string()) {
+            std::string detail = data->get<std::string>();
+            if (!detail.empty() && detail != message)
+                message += ": " + detail;
+        }
+        return message;
+    }
+
     RpcResult parse_response(const std::string& body) {
         try {
             auto j = nlohmann::json::parse(body);
             if (j.contains("result"))
                 return {true, j["result"], ""};
-            if (j.contains("error")) {
-                auto& e = j["error"];
-                std::string msg = e.is_object() ? e.value("message", "rpc error") : e.dump();
-                return {false, {}, msg};
-            }
+            if (j.contains("error"))
+                return {false, {}, error_message(j["error"])};
             return {false, {}, "unknown rpc response"};
         } catch (const std::exception& ex) {
             return {false, {}, std::string("parse error: ") + ex.what()};

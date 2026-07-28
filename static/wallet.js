@@ -124,6 +124,8 @@ var _encKnown = false;
 var _unclaimedCount = 0;
 var _pendingClaimIds = {};
 var _pendingClaimTxs = {};
+let _pendingClaimPoll = null;
+let _stealthScanInFlight = null;
 var _explorerUrl = 'https://octrascan.io';
 var _tokens = [];
 var _selectedToken = null;
@@ -134,6 +136,9 @@ var _tokTxGen = 0;
 var _compiledAbi = null;
 var _compiledVerification = null;
 var _compiledCertificate = null;
+let _compiledDeployPayload = null;
+let _compiledProgramEnvelope = null;
+let _compiledProgramMinimum = null;
 var _fees = {};
 var _rpcHost = '';
 var _hasMasterSeed = false;
@@ -149,6 +154,33 @@ var BALANCE_CACHE_TTL_MS = 5000;
 var TOKEN_CACHE_TTL_MS = 15000;
 var TOKEN_STALE_REFRESH_MS = 3000;
 var PERSISTED_CACHE_TTL_MS = 300000;
+let _balanceFailures = 0;
+let _balanceSuccessAt = 0;
+const BALANCE_OFFLINE_GRACE_MS = 45000;
+
+const setConnectionStatus = state => {
+  const status = $('hdr-status');
+  if (!status) return;
+  const suffix = _rpcHost ? ' | ' + networkLabel(_rpcHost) : '';
+  status.textContent = state + suffix;
+  status.className = state === 'online'
+    ? 'right online'
+    : state === 'offline'
+      ? 'right error'
+      : 'right';
+};
+
+const markBalanceOnline = () => {
+  _balanceFailures = 0;
+  _balanceSuccessAt = Date.now();
+  setConnectionStatus('online');
+};
+
+const markBalanceFailure = () => {
+  _balanceFailures += 1;
+  const stale = Date.now() - _balanceSuccessAt > BALANCE_OFFLINE_GRACE_MS;
+  setConnectionStatus(_balanceFailures >= 2 && stale ? 'offline' : 'syncing');
+};
 
 function ensureAddressRuntime(addr) {
   if (!addr) return null;
@@ -739,10 +771,6 @@ function ideRenderFileTree() {
   var html = '<div class="ide-tree-header">files <button class="ide-btn-small" data-action="ideNewFile"><span class="ide-icon ico-plus"></span></button>' +
     '<label class="ide-btn-small" style="cursor:pointer" title="import .aml files"><span class="ide-icon ico-upload"></span><input type="file" accept=".aml,.json,.aml-project.json" multiple style="display:none" data-change="importFiles"></label>' +
     '<label class="ide-btn-small" style="cursor:pointer" title="import folder"><span class="ide-icon ico-folder-import"></span><input type="file" webkitdirectory style="display:none" data-change="importFiles"></label></div>';
-  
-  
-  
-  
     rootFiles.forEach(function(p) {
     var cls = p === _ideActiveFile ? ' active' : '';
     html += '<div class="ide-tree-file' + cls + '" data-action="ideOpenFile" data-arg="' + escapeAttr(p) + '" data-context="fileMenu">' +
@@ -1050,6 +1078,9 @@ async function doCompileProject() {
   _compiledAbi = null;
   _compiledVerification = null;
   _compiledCertificate = null;
+  _compiledDeployPayload = null;
+  _compiledProgramEnvelope = null;
+  _compiledProgramMinimum = null;
   renderVerificationReport(null);
   var abiDiv = $('ct-abi-display');
   if (abiDiv) abiDiv.style.display = 'none';
@@ -1063,11 +1094,15 @@ async function doCompileProject() {
     return;
   }
   try {
-    var res = await api('POST', '/contract/compile-project', { files: files, main: 'main.aml' });
+    const res = await api('POST', '/contract/compile-project', { files: files, main: 'main.aml', program: true });
     var b64 = res.bytecode || '';
     $('ct-bytecode').value = b64;
-    var ver = res.version ? ('AppliedML ' + res.version + ' - ') : '';
-    var msg = ver + 'compiled: ' + res.instructions + ' instructions, ' + res.size + ' bytes (' + files.length + ' files)';
+    _compiledDeployPayload = res.deploy_payload || null;
+    _compiledProgramEnvelope = res.program_envelope || null;
+    _compiledProgramMinimum = res.program_min_ou || null;
+    applyProgramDeployFee(_compiledDeployPayload, _compiledProgramMinimum);
+    const ver = res.version ? ('AppliedML ' + escapeHtml(res.version) + ' - ') : '';
+    const msg = ver + 'compiled: ' + escapeHtml(String(res.instructions)) + ' instructions, ' + escapeHtml(String(res.size)) + ' bytes (' + files.length + ' files)';
     showResult('ct-compile-result', true, msg);
     if (res.abi) {
       _compiledAbi = res.abi;
@@ -1149,15 +1184,32 @@ function updateStealthBadge(count) {
   }
 }
 
+async function fetchStealthScan() {
+  const addr = _walletAddr;
+  if (_stealthScanInFlight && _stealthScanInFlight.addr === addr) {
+    return _stealthScanInFlight.request;
+  }
+  const entry = {
+    addr: addr,
+    request: api('GET', '/stealth/scan')
+  };
+  _stealthScanInFlight = entry;
+  try {
+    return await entry.request;
+  } finally {
+    if (_stealthScanInFlight === entry) _stealthScanInFlight = null;
+  }
+}
+
 async function bgStealthScan() {
   if (_walletSwitching) return;
-  var addr = _walletAddr;
+  const addr = _walletAddr;
   try {
-    var res = await api('GET', '/stealth/scan');
+    const res = await fetchStealthScan();
     if (_walletSwitching || addr !== _walletAddr) return;
-    var outputs = res.outputs || [];
-    var unclaimed = 0;
-    for (var i = 0; i < outputs.length; i++) {
+    const outputs = res.outputs || [];
+    let unclaimed = 0;
+    for (let i = 0; i < outputs.length; i++) {
       if (outputs[i].claimed) { delete _pendingClaimIds[String(outputs[i].id)]; continue; }
       if (outputs[i].claimable === false) continue;
       if (!_pendingClaimIds[String(outputs[i].id)]) unclaimed++;
@@ -1226,8 +1278,6 @@ function applyBalanceData(bal) {
   if ($('enc-enc-bal')) $('enc-enc-bal').textContent = encText;
   if ($('st-enc-bal-info')) $('st-enc-bal-info').textContent = encText;
   if ($('ct-bal')) $('ct-bal').textContent = pubText;
-  $('hdr-status').textContent = _rpcHost ? 'online | ' + networkLabel(_rpcHost) : 'online';
-  $('hdr-status').className = 'right online';
   return next;
 }
 
@@ -1280,12 +1330,12 @@ async function fetchBalance(force) {
         state.balanceTs = Date.now();
       }
       persistBalance(addr, next);
+      markBalanceOnline();
       return next;
     })
     .catch(function() {
       if (!_walletSwitching && addr === _walletAddr) {
-        $('hdr-status').textContent = 'offline';
-        $('hdr-status').className = 'right error';
+        markBalanceFailure();
         if (!currentBalanceData()) resetDashboardView();
       }
       return null;
@@ -1336,10 +1386,14 @@ function apiTimeoutMs(method, path) {
     if (path === '/stealth/send' || path === '/stealth/claim') return 900000;
     return 30000;
   }
-  if (path === '/stealth/scan') return 9000;
-  if (path === '/pvac/upgrade_status') return 12000;
+  if (path === '/stealth/scan') return 30000;
+  if (path === '/balance') return 30000;
+  if (path === '/pvac/upgrade_status') return 30000;
   return 10000;
 }
+
+const heavyTxConfirmationPolls = 300;
+const heavyTxConfirmationIntervalMs = 4000;
 
 async function fetchFees() {
   try {
@@ -1367,6 +1421,7 @@ function applyFeeDefaults() {
   };
   for (var id in map) {
     var input = $(id);
+    if (id === 'ct-deploy-fee' && _compiledDeployPayload) continue;
     var fee = _fees[map[id]];
     if (input && fee) {
       var rec = fee.recommended || fee.minimum || '';
@@ -1378,7 +1433,9 @@ function applyFeeDefaults() {
     }
   }
   var btnDeploy = $('btn-deploy');
-  if (btnDeploy && _fees.deploy) {
+  if (_compiledDeployPayload) {
+    applyProgramDeployFee(_compiledDeployPayload, _compiledProgramMinimum);
+  } else if (btnDeploy && _fees.deploy) {
     var cost = _fees.deploy.base_fee || _fees.deploy.recommended;
     btnDeploy.textContent = 'deploy (' + ouToOct(cost) + ' oct)';
   }
@@ -1402,6 +1459,21 @@ function feeError(resultId, inputId, opType) {
   showResult(resultId, false, 'invalid fee - must be integer >= ' + minStr);
   if ($(inputId)) $(inputId).focus();
 }
+
+const programDeployMinimum = payload =>
+  200000 + Math.ceil(payload.length / 1024) * 1000;
+
+const applyProgramDeployFee = (payload, required) => {
+  if (!payload) return;
+  const input = $('ct-deploy-fee');
+  if (!input) return;
+  const minimum = String(required || programDeployMinimum(payload));
+  input.value = minimum;
+  input.setAttribute('data-prev-default', minimum);
+  input.placeholder = 'min: ' + minimum;
+  const button = $('btn-deploy');
+  if (button) button.textContent = 'deploy (' + ouToOct(minimum) + ' oct)';
+};
 
 function switchView(name) {
   if (name !== 'tx') _prevView = name;
@@ -1733,11 +1805,11 @@ async function showTx(hash) {
       h += '<tr><td>to</td><td>' + addrLink(res.to || res.to_ || '') + '</td></tr>';
        var amtRaw = res.amount_raw || res.amount || '0';
       h += '<tr><td>amount</td><td class="mono">' + fmtOct(amtRaw) + '</td></tr>';
-      h += '<tr><td>amount (raw)</td><td class="mono gray">' + addCommas(String(amtRaw)) + '</td></tr>';
-      var op = res.op_type || 'standard';
-      h += '<tr><td>type</td><td>' + (opTag(op) || op) + '</td></tr>';
-      if (res.epoch) h += '<tr><td>epoch</td><td>' + res.epoch + '</td></tr>';
-      if (res.block_height) h += '<tr><td>block</td><td>' + res.block_height + '</td></tr>';
+      h += '<tr><td>amount (raw)</td><td class="mono gray">' + escapeHtml(addCommas(String(amtRaw))) + '</td></tr>';
+      const op = res.op_type || 'standard';
+      h += '<tr><td>type</td><td>' + (opTag(op) || escapeHtml(op)) + '</td></tr>';
+      if (res.epoch) h += '<tr><td>epoch</td><td>' + escapeHtml(String(res.epoch)) + '</td></tr>';
+      if (res.block_height) h += '<tr><td>block</td><td>' + escapeHtml(String(res.block_height)) + '</td></tr>';
     h += '<tr><td>nonce</td><td>' + (res.nonce || '') + '</td></tr>';
     if (res.ou) h += '<tr><td>ou (fee)</td><td class="mono">' + fmtOct(res.ou) + '</td></tr>';
     h += '<tr><td>time</td><td>' + fmtDate(res.timestamp) + '</td></tr>';
@@ -1950,6 +2022,7 @@ async function doKeySwitch() {
     $('modal-overlay').style.display = 'flex';
     $('ks-cancel').onclick = function() {
       $('modal-result').innerHTML = '';
+      clearPinFields();
       $('modal-overlay').style.display = 'none';
       fetchBalance();
     };
@@ -1993,6 +2066,7 @@ async function doKeySwitch() {
   $('modal-overlay').style.display = 'flex';
   $('ks-cancel').onclick = function() {
     $('modal-result').innerHTML = '';
+    clearPinFields();
     $('modal-overlay').style.display = 'none';
   };
   if (!st.can_submit) return;
@@ -2090,6 +2164,7 @@ async function doKeySwitch() {
       $('modal-result').innerHTML = out;
       const close = $('ks-close');
       if (close) close.onclick = function() {
+        clearPinFields();
         $('modal-overlay').style.display = 'none';
         fetchBalance();
       };
@@ -2108,20 +2183,20 @@ async function doKeySwitch() {
       } catch (e) {}
     };
     const waitUpgradeTx = async function(txHash) {
-      if (!txHash) return { ok: false, detail: 'missing transaction hash' };
-      for (let i = 0; i < 30; i++) {
+      if (!txHash) return { ok: false, terminal: true, detail: 'missing transaction hash' };
+      for (let i = 0; i < heavyTxConfirmationPolls; i++) {
         try {
           const tx = await api('GET', '/tx?hash=' + encodeURIComponent(txHash));
           const st = tx.status || '';
-          if (st === 'confirmed' || st === 'accepted') return { ok: true, detail: 'confirmed' };
+          if (st === 'confirmed' || st === 'accepted') return { ok: true, terminal: true, detail: 'confirmed' };
           if (st === 'rejected') {
             const reason = tx.reject_reason || tx.reject_type || tx.error || 'rejected';
-            return { ok: false, detail: String(reason) };
+            return { ok: false, terminal: true, detail: String(reason) };
           }
         } catch (e) {}
-        await new Promise(function(resolve) { setTimeout(resolve, 4000); });
+        await new Promise(function(resolve) { setTimeout(resolve, heavyTxConfirmationIntervalMs); });
       }
-      return { ok: false, detail: 'confirmation timeout' };
+      return { ok: false, terminal: false, detail: 'confirmation still pending' };
     };
     renderUpgradeLog('checking_fee', 'checking key_switch fee and public balance', '', false, false);
     pollUpgradeStatus = setInterval(pollUpgrade, 1500);
@@ -2135,14 +2210,22 @@ async function doKeySwitch() {
       renderUpgradeLog('submitted', 'transaction submitted (waiting for final status)', txHash, false, false);
       const finalStatus = await waitUpgradeTx(txHash);
       if (!finalStatus.ok) {
-        try {
-          await api('POST', '/pvac/upgrade_reject', {
-            tx_hash: txHash,
-            detail: finalStatus.detail,
-            pin: pin
-          });
-        } catch(e) {}
-        renderUpgradeLog('submitted', finalStatus.detail, txHash, true, true);
+        if (finalStatus.terminal) {
+          try {
+            await api('POST', '/pvac/upgrade_reject', {
+              tx_hash: txHash,
+              detail: finalStatus.detail,
+              pin: pin
+            });
+          } catch(e) {}
+        }
+        renderUpgradeLog(
+          'submitted',
+          finalStatus.detail,
+          txHash,
+          finalStatus.terminal,
+          true
+        );
       } else {
         renderUpgradeLog('confirmed', 'transaction confirmed (refreshing wallet state)', txHash, false, true);
         try { await api('POST', '/pvac/upgrade_ack', { tx_hash: txHash }); } catch(e) {}
@@ -2210,44 +2293,54 @@ async function doEncrypt() {
 }
 
 async function waitPrivateTx(txHash, logFn) {
-  if (!txHash) return { ok: false, detail: 'missing transaction hash' };
-  for (var i = 0; i < 45; i++) {
+  if (!txHash) return { ok: false, terminal: true, detail: 'missing transaction hash' };
+  for (var i = 0; i < heavyTxConfirmationPolls; i++) {
     try {
       var tx = await api('GET', '/tx?hash=' + encodeURIComponent(txHash));
       var st = tx.status || '';
-      if (st === 'confirmed' || st === 'accepted') return { ok: true, detail: 'confirmed' };
+      if (st === 'confirmed' || st === 'accepted') return { ok: true, terminal: true, detail: 'confirmed' };
       if (st === 'rejected') {
         var reason = tx.reject_reason || tx.reject_type || tx.error || 'rejected';
-        return { ok: false, detail: String(reason) };
+        return { ok: false, terminal: true, detail: String(reason) };
       }
     } catch (e) {}
     if (logFn && (i === 0 || i % 5 === 0)) logFn('waiting for compact refresh confirmation', 'log-info');
-    await new Promise(function(resolve) { setTimeout(resolve, 4000); });
+    await new Promise(function(resolve) { setTimeout(resolve, heavyTxConfirmationIntervalMs); });
   }
-  return { ok: false, detail: 'confirmation timeout' };
+  return { ok: false, terminal: false, detail: 'confirmation still pending' };
 }
 
-function statusNeedsPrivateSpendRefresh(st) {
-  if (!st || st.mode !== 'key_bound_migration' || !st.can_submit) return false;
-  var reason = String(st.reason || '');
-  if (reason.indexOf('compact refresh') >= 0) return true;
-  if (reason.indexOf('repair required') >= 0) return true;
-  var baseLayers = Number(st.base_layers || 0);
-  var maxLayers = Number(st.private_spend_max_base_layers || 0);
-  return maxLayers > 0 && baseLayers > maxLayers;
-}
+const statusNeedsPrivateSpendRefresh = st => {
+  if (!st) return false;
+  if (st.private_spend_refresh_required === true) return true;
+  if (st.compact_refresh === true || st.repair_required === true) return true;
+  const baseLayers = Number(st.base_layers || 0);
+  const maxLayers = Number(st.private_spend_max_base_layers || 0);
+  return st.mode === 'key_bound_migration'
+    && maxLayers > 0
+    && baseLayers >= maxLayers;
+};
 
 async function ensurePrivateSpendCompact(pin, logFn) {
-  var st = await api('GET', '/pvac/upgrade_status');
+  const st = await api('GET', '/pvac/upgrade_status');
   if (!statusNeedsPrivateSpendRefresh(st)) return false;
-  var baseLayers = st.base_layers ? (' (' + st.base_layers + ' base layers)') : '';
+  if (!st.can_submit) {
+    throw new Error(escapeHtml(st.reason || 'encrypted balance refresh is currently unavailable'));
+  }
+  const baseLayers = st.base_layers ? (' (' + st.base_layers + ' base layers)') : '';
   logFn('encrypted balance needs compact refresh before private spend' + baseLayers, 'log-info');
   logFn('submitting compact refresh key_switch', 'log-info');
-  var refresh = await api('POST', '/key_switch', { pin: pin, refresh: true, force_refresh: true });
-  var txHash = refresh.hash || refresh.tx_hash || '';
+  const refresh = await api('POST', '/key_switch', { pin: pin, refresh: true, force_refresh: true });
+  const txHash = refresh.hash || refresh.tx_hash || '';
   if (txHash) logFn('compact refresh tx: ' + txLink(txHash), 'log-info');
-  var finalStatus = await waitPrivateTx(txHash, logFn);
-  if (!finalStatus.ok) throw new Error('compact refresh failed: ' + finalStatus.detail);
+  const finalStatus = await waitPrivateTx(txHash, logFn);
+  if (!finalStatus.ok && finalStatus.terminal) {
+    try {
+      await api('POST', '/pvac/upgrade_reject', { tx_hash: txHash, detail: finalStatus.detail, pin: pin });
+    } catch(e) {}
+    throw new Error('compact refresh failed: ' + escapeHtml(finalStatus.detail));
+  }
+  if (!finalStatus.ok) throw new Error('compact refresh still pending; check transaction history before retrying');
   try { await api('POST', '/pvac/upgrade_ack', { tx_hash: txHash }); } catch(e) {}
   logFn('compact refresh confirmed (continuing private spend)', 'log-ok');
   invalidateCurrentAddressState();
@@ -2309,8 +2402,6 @@ async function doStealthSend() {
   if (needRaw > _encryptedBalanceRaw) { logStealth('error: insufficient encrypted balance: have ' + fmtOct(_encryptedBalanceRaw) + ', need ' + amount + ' oct', 'log-err'); return; }
   if (!validateFee('stealth-fee', 'stealth')) { logStealth('error: invalid fee - must be integer >= ' + ((_fees.stealth && _fees.stealth.minimum) || '?'), 'log-err'); return; }
   logStealth('initiating stealth send', 'log-info');
-
-  
   logStealth('to: ' + to, 'log-info');
   logStealth('amount: ' + amount + ' oct', 'log-info');
   logStealth('waiting for PIN', 'log-info');
@@ -2345,9 +2436,11 @@ async function doStealthSend() {
 
 async function doStealthScan() {
   $('stealth-outputs').innerHTML = '<div class="loading">scanning...</div>';
+  const addr = _walletAddr;
   try {
-    var res = await api('GET', '/stealth/scan');
-    var outputs = res.outputs || [];
+    const res = await fetchStealthScan();
+    if (_walletSwitching || addr !== _walletAddr) return;
+    const outputs = res.outputs || [];
     if (outputs.length === 0) {
       $('stealth-outputs').innerHTML = '<div class="staging-empty">no stealth outputs found</div>';
       return;
@@ -2444,33 +2537,42 @@ async function doStealthClaim(ids) {
 
 function pollPendingClaims() {
   if (Object.keys(_pendingClaimIds).length === 0) return;
-  var attempts = 0;
-  var poll = setInterval(async function() {
-    attempts++;
-    if (attempts > 6 || Object.keys(_pendingClaimIds).length === 0) { clearInterval(poll); return; }
-    var txIds = Object.keys(_pendingClaimTxs);
-    for (var i = 0; i < txIds.length; i++) {
-      var id = txIds[i];
-      var hash = _pendingClaimTxs[id];
-      if (!hash) continue;
-      try {
-        var tx = await api('GET', '/tx?hash=' + encodeURIComponent(hash));
-        var st = tx.status || 'pending';
-        if (st === 'rejected') {
-          var reason = tx.reject_reason || tx.reject_type || 'rejected';
-          logStealth(id + ': rejected - ' + escapeHtml(reason), 'log-err');
-          delete _pendingClaimIds[id];
-          delete _pendingClaimTxs[id];
-        } else if (st === 'confirmed' || st === 'accepted') {
-          logStealth(id + ': confirmed', 'log-ok');
-          delete _pendingClaimIds[id];
-          delete _pendingClaimTxs[id];
-        }
-      } catch (e) {}
+  if (_pendingClaimPoll) return _pendingClaimPoll;
+  const addr = _walletAddr;
+  _pendingClaimPoll = (async function() {
+    for (let attempt = 0; attempt < heavyTxConfirmationPolls; attempt++) {
+      if (_walletSwitching || addr !== _walletAddr) break;
+      if (Object.keys(_pendingClaimIds).length === 0) break;
+      const txIds = Object.keys(_pendingClaimTxs);
+      for (let i = 0; i < txIds.length; i++) {
+        const id = txIds[i];
+        const hash = _pendingClaimTxs[id];
+        if (!hash) continue;
+        try {
+          const tx = await api('GET', '/tx?hash=' + encodeURIComponent(hash));
+          const st = tx.status || 'pending';
+          if (st === 'rejected') {
+            const reason = tx.reject_reason || tx.reject_type || 'rejected';
+            logStealth(id + ': rejected - ' + escapeHtml(reason), 'log-err');
+            delete _pendingClaimIds[id];
+            delete _pendingClaimTxs[id];
+          } else if (st === 'confirmed' || st === 'accepted') {
+            logStealth(id + ': confirmed', 'log-ok');
+            delete _pendingClaimIds[id];
+            delete _pendingClaimTxs[id];
+          }
+        } catch (e) {}
+      }
+      await doStealthScan();
+      await loadDashboard();
+      if (Object.keys(_pendingClaimIds).length > 0) {
+        await new Promise(function(resolve) { setTimeout(resolve, heavyTxConfirmationIntervalMs); });
+      }
     }
-    await doStealthScan();
-    await loadDashboard();
-  }, 12000);
+  })().finally(function() {
+    _pendingClaimPoll = null;
+  });
+  return _pendingClaimPoll;
 }
 
 async function refreshContractBalance() {
@@ -2618,15 +2720,22 @@ async function doCompile() {
   _compiledAbi = null;
   _compiledVerification = null;
   _compiledCertificate = null;
+  _compiledDeployPayload = null;
+  _compiledProgramEnvelope = null;
+  _compiledProgramMinimum = null;
   renderVerificationReport(null);
   var source = $('ct-source').value;
   var lang = $('ct-lang').value;
   if (!source.trim()) { showResult('ct-compile-result', false, 'source required'); return; }
   try {
     var endpoint = lang === 'aml' ? '/contract/compile-aml' : '/contract/compile';
-    var res = await api('POST', endpoint, { source: source });
+    const res = await api('POST', endpoint, { source: source, program: lang === 'aml' });
     var b64 = res.bytecode || '';
     $('ct-bytecode').value = b64;
+    _compiledDeployPayload = res.deploy_payload || null;
+    _compiledProgramEnvelope = res.program_envelope || null;
+    _compiledProgramMinimum = res.program_min_ou || null;
+    applyProgramDeployFee(_compiledDeployPayload, _compiledProgramMinimum);
     var ver = res.version ? ('AppliedML ' + res.version + ' - ') : '';
     var msg = ver + 'compiled: ' + res.instructions + ' instructions, ' + res.size + ' bytes';
     showResult('ct-compile-result', true, msg);
@@ -2912,8 +3021,30 @@ async function doDeploy() {
     }
   }
   if (!validateFee('ct-deploy-fee', 'deploy')) { feeError('ct-deploy-result', 'ct-deploy-fee', 'deploy'); return; }
+  const sourceBound = Boolean(_compiledDeployPayload);
+  if (sourceBound) {
+    if (!_compiledProgramEnvelope || bytecode !== _compiledProgramEnvelope) {
+      showResult('ct-deploy-result', false,
+        'compiled Program changed - compile again before deployment');
+      return;
+    }
+    const minimum = parseInt(
+      _compiledProgramMinimum || programDeployMinimum(_compiledDeployPayload));
+    const provided = parseInt($('ct-deploy-fee').value || '0');
+    if (provided !== minimum) {
+      showResult('ct-deploy-result', false,
+        'invalid fee - source deploy requires exactly ' + minimum);
+      return;
+    }
+  }
+  const pin = await modalPrompt(
+    'confirm program deployment',
+    'enter PIN to deploy this program',
+    { pin: true, btnText: 'deploy' });
+  if (!pin) return;
   try {
-    var body = { bytecode: bytecode };
+    var body = { bytecode: bytecode, pin: pin };
+    if (_compiledDeployPayload) body.deploy_payload = _compiledDeployPayload;
     if (params) body.params = params;
     var deployFee = $('ct-deploy-fee') ? $('ct-deploy-fee').value.trim() : '';
     if (deployFee) body.ou = deployFee;
@@ -2922,7 +3053,8 @@ async function doDeploy() {
     var hash = res.tx_hash || '';
     invalidateCurrentAddressState();
     showResult('ct-deploy-result', true,
-      'deployed to <span class="mono">' + escapeHtml(addr) + '</span> - tx: ' + txLink(hash) + ' (verifying source...)');
+      'deployed to <span class="mono">' + escapeHtml(addr) + '</span> - tx: ' + txLink(hash) +
+      (sourceBound ? ' (source bound)' : ' (verifying source...)'));
     $('ct-call-addr').value = addr;
     $('ct-info-addr').value = addr;
     var source = _ideProject ? (_ideFiles['main.aml'] || '') : ($('ct-source').value || '');
@@ -2932,7 +3064,7 @@ async function doDeploy() {
         if (path !== 'main.aml') depFiles.push({ path: path, source: _ideFiles[path] });
       }
     }
-    if (source.trim()) verifySourceRetry(addr, source, depFiles, 5);
+    if (!sourceBound && source.trim()) verifySourceRetry(addr, source, depFiles, 5);
     loadDashboard();
   } catch (e) {
     showResult('ct-deploy-result', false, e.message);
@@ -2959,8 +3091,13 @@ async function doContractCall() {
     amount_raw = String(Math.round(f * 1000000));
   }
   if (!validateFee('ct-call-fee', 'call')) { feeError('ct-call-result', 'ct-call-fee', 'call'); return; }
+  const pin = await modalPrompt(
+    'confirm program call',
+    'enter PIN to call ' + method,
+    { pin: true, btnText: 'send call' });
+  if (!pin) return;
   try {
-    var callBody = { address: addr, method: method, params: params, amount: amount_raw };
+    var callBody = { address: addr, method: method, params: params, amount: amount_raw, pin: pin };
     var callFee = $('ct-call-fee') ? $('ct-call-fee').value.trim() : '';
     if (callFee) callBody.ou = callFee;
     var res = await api('POST', '/contract/call', callBody);
@@ -3254,7 +3391,7 @@ function renderTokenList() {
     h += '<div class="' + balCls + '">' + fmtTokenCompact(bal, t.decimals) + ' ' + escapeHtml(t.symbol) + '</div>';
     h += '</div>';
     h += '<div class="token-row">';
-    h += '<span class="mono gray">' + short(t.address) + '</span>';
+    h += '<span class="mono gray">' + escapeHtml(short(t.address)) + '</span>';
     h += '</div>';
     h += '<div class="token-actions">';
     h += '<button class="token-btn" data-action="openTokenTransfer" data-arg="' + i + '">transfer</button>';
@@ -3556,6 +3693,7 @@ var _modalPromptResolve = null;
 var _modalPromptBtnText = '';
 
 function modalPrompt(title, label, opts) {
+  if (_modalPromptResolve) return Promise.resolve(null);
   opts = opts || {};
   return new Promise(function(resolve) {
     _modalPromptResolve = resolve;
@@ -3586,15 +3724,17 @@ function modalPrompt(title, label, opts) {
       $('modal-overlay').style.display = 'flex';
       $('modal-prompt-input').focus();
       $('modal-prompt-ok').onclick = function() {
-        var val = $('modal-prompt-input').value;
+        const val = $('modal-prompt-input').value;
         _modalPromptResolve = null;
         $('modal-result').innerHTML = '';
+        clearPinFields();
         $('modal-overlay').style.display = 'none';
         resolve(val);
       };
       $('modal-prompt-cancel').onclick = function() {
         _modalPromptResolve = null;
         $('modal-result').innerHTML = '';
+        clearPinFields();
         $('modal-overlay').style.display = 'none';
         resolve(null);
       };
@@ -3769,6 +3909,13 @@ var _pendingPriv = '';
 var _pendingMnemonic = '';
 var _importMode = 'seed';
 
+const clearPinFields = () => {
+  ['modal-pin-input', 'modal-pin-new', 'modal-pin-confirm'].forEach(id => {
+    const field = $(id);
+    if (field) field.value = '';
+  });
+};
+
 function hideAllModalPanels() {
   $('modal-btns').style.display = 'none';
   $('modal-import').style.display = 'none';
@@ -3776,7 +3923,8 @@ function hideAllModalPanels() {
   $('modal-pin-setup').style.display = 'none';
   $('modal-mnemonic-show').style.display = 'none';
   $('modal-result').innerHTML = '';
-  var lbl = $('modal-pin-label');
+  clearPinFields();
+  const lbl = $('modal-pin-label');
   if (lbl) lbl.textContent = 'enter PIN to unlock';
 }
 
@@ -3901,6 +4049,7 @@ function showMnemonicWords(mnemonic) {
 
 function modalMnemonicDone() {
   $('mnemonic-words').innerHTML = '';
+  clearPinFields();
   $('modal-overlay').style.display = 'none';
   loadWalletInfo();
   startRefreshTimer();
@@ -3930,6 +4079,7 @@ async function modalUnlock() {
     await api('POST', '/wallet/unlock', unlockBody);
     _selectedUnlockAddr = '';
     _selectedUnlockFile = '';
+    clearPinFields();
     $('modal-overlay').style.display = 'none';
     await loadWalletInfo();
     startRefreshTimer();
@@ -3975,14 +4125,16 @@ async function modalFinishSetup() {
       }
       var resp = await api('POST', '/wallet/import', importBody);
       if (resp.switched === false) {
+        clearPinFields();
         $('modal-overlay').style.display = 'none';
-        showResult('wallet-mgmt-result', true, 'imported: ' + (resp.address || '').substring(0, 16) + '...');
+        showResult('wallet-mgmt-result', true, 'imported: ' + escapeHtml((resp.address || '').substring(0, 16)) + '...');
         loadAccountList();
         return;
       }
     } else if (_pendingAction === 'migrate') {
       await api('POST', '/wallet/unlock', { pin: pin });
     }
+    clearPinFields();
     $('modal-overlay').style.display = 'none';
     await loadWalletInfo();
     startRefreshTimer();

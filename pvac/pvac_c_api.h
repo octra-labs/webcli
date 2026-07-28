@@ -87,6 +87,10 @@ int pvac_cipher_inspect_public(pvac_cipher ct,
 int pvac_pubkey_is_key_bound_extension(pvac_pubkey legacy, pvac_pubkey bound);
 int pvac_pubkey_is_legacy_v1_profile(pvac_pubkey legacy, pvac_pubkey current);
 int pvac_pubkey_is_proof_profile(pvac_pubkey a, pvac_pubkey b);
+int pvac_pubkey_matches_secret_profile(
+    pvac_pubkey candidate,
+    pvac_pubkey current,
+    pvac_seckey sk);
 
 pvac_zero_proof pvac_make_zero_proof(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct);
 int pvac_verify_zero(pvac_pubkey pk, pvac_cipher ct, pvac_zero_proof proof);
@@ -95,9 +99,24 @@ pvac_zero_proof pvac_make_zero_proof_bound(pvac_pubkey pk, pvac_seckey sk, pvac_
                                             uint64_t amount, const uint8_t blinding[32]);
 int pvac_verify_zero_bound(pvac_pubkey pk, pvac_cipher ct, pvac_zero_proof proof,
                             const uint8_t amount_commitment[32]);
+pvac_zero_proof pvac_make_zero_proof_bound_key_switch(
+    pvac_pubkey pk,
+    pvac_seckey sk,
+    pvac_cipher ct,
+    uint64_t amount,
+    const uint8_t blinding[32]);
+int pvac_verify_zero_bound_key_switch(
+    pvac_pubkey pk,
+    pvac_cipher ct,
+    pvac_zero_proof proof,
+    const uint8_t amount_commitment[32]);
 pvac_zero_proof pvac_make_bound_range_proof(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
                                             uint64_t amount, const uint8_t blinding[32]);
-int pvac_verify_bound_range(pvac_pubkey pk, pvac_cipher ct, pvac_zero_proof proof);
+int pvac_verify_bound_range_commitment(
+    pvac_pubkey pk,
+    pvac_cipher ct,
+    pvac_zero_proof proof,
+    const uint8_t amount_commitment[32]);
 
 void pvac_pedersen_commit(uint64_t amount, const uint8_t blinding[32], uint8_t out[32]);
 int pvac_pedersen_commit_v2(uint64_t amount, const uint8_t blinding[32],
@@ -116,9 +135,6 @@ int pvac_verify_aggregated_range(pvac_pubkey pk, pvac_cipher ct, pvac_agg_range_
 uint8_t* pvac_serialize_agg_range_proof(pvac_agg_range_proof arp, size_t* len);
 pvac_agg_range_proof pvac_deserialize_agg_range_proof(const uint8_t* data, size_t len);
 void pvac_free_agg_range_proof(pvac_agg_range_proof p);
-int pvac_verify_range_any(pvac_pubkey pk, pvac_cipher ct,
-                           const uint8_t* proof_data, size_t proof_len);
-
 uint8_t* pvac_serialize_cipher(pvac_cipher ct, size_t* len);
 uint8_t* pvac_serialize_cipher_public(pvac_cipher ct, size_t* len);
 pvac_cipher pvac_deserialize_cipher(const uint8_t* data, size_t len);

@@ -51,14 +51,21 @@ inline bool r1cs_var_ok(const Variable& var, size_t gates, size_t committed) {
     return false;
 }
 
-inline bool r1cs_system_ok(const ConstraintSystem& cs, size_t N) {
+inline bool r1cs_system_ok(
+    const ConstraintSystem& cs,
+    size_t N,
+    R1CSLimitProfile profile = R1CSLimitProfile::Default
+) {
+    const size_t max_constraints = r1cs_constraint_limit(profile);
+    if (max_constraints == 0)
+        return false;
     if (N == 0 || N > R1CS_MAX_GATES)
         return false;
     if (cs.num_gates > R1CS_MAX_GATES)
         return false;
     if (cs.num_committed > R1CS_MAX_COMMITTED)
         return false;
-    if (cs.constraints.size() > R1CS_MAX_CONSTRAINTS)
+    if (cs.constraints.size() > max_constraints)
         return false;
     size_t terms = 0;
     for (const auto& constraint : cs.constraints) {
@@ -174,13 +181,14 @@ inline bool ipp_verify_with_y(
 inline bool r1cs_verify(
     Transcript& transcript,
     const ConstraintSystem& cs,
-    const R1CSProof& proof
+    const R1CSProof& proof,
+    R1CSLimitProfile profile = R1CSLimitProfile::Default
 ) {
     const size_t m = cs.num_committed;
     const size_t q = cs.constraints.size();
     size_t N = 0;
     if (!cs.padded_gates_checked(N)) return false;
-    if (!r1cs_system_ok(cs, N)) return false;
+    if (!r1cs_system_ok(cs, N, profile)) return false;
 
     if (proof.V.size() != m) return false;
     if (!r1cs_points_valid(proof)) return false;

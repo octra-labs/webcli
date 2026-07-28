@@ -79,14 +79,20 @@ public:
     }
     std::vector<Constraint> get_constraints() const { return constraints_; }
 
-    R1CSProof prove(Transcript& transcript) {
+    R1CSProof prove(
+        Transcript& transcript,
+        R1CSLimitProfile profile = R1CSLimitProfile::Default
+    ) {
         R1CSProof proof;
         const size_t n = gates_.size();
         const size_t m = committed_.size();
         const size_t q = constraints_.size();
         const size_t terms = constraint_terms();
+        const size_t max_constraints = r1cs_constraint_limit(profile);
+        if (max_constraints == 0)
+            throw std::runtime_error("pvac: invalid r1cs constraint limit");
         if (n > R1CS_MAX_GATES || m > R1CS_MAX_COMMITTED ||
-            q > R1CS_MAX_CONSTRAINTS || terms > R1CS_MAX_TERMS)
+            q > max_constraints || terms > R1CS_MAX_TERMS)
             throw std::runtime_error("pvac: r1cs prover limits exceeded");
         const size_t N = next_power_of_2(n > 0 ? n : 1);
 

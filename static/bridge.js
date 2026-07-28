@@ -5,6 +5,7 @@ const SIGNER_URL = '/api/bridge/signer';
 const RECOVERY_URL = 'https://relayer-002838819188.octra.network/recovery.json';
 const ETH_RPC_URL = 'https://ethereum-rpc.publicnode.com';
 const MAINNET_CHAIN_ID = '0x1';
+const VERIFY_AND_MINT_SELECTOR = '0x5d5158ed';
 const ETHEREUM_MAINNET_PARAMS = {
   chainId: MAINNET_CHAIN_ID,
   chainName: 'Ethereum Mainnet',
@@ -1176,6 +1177,32 @@ async function waitForClaimData(epochId, recipient, rawAmt) {
   return null;
 }
 
+const claimCalldataMatches = (calldata, epochId, recipient, rawAmt, leafIndex) => {
+  if (typeof calldata !== 'string' || !/^0x[0-9a-fA-F]+$/.test(calldata)) return false;
+  if (calldata.slice(0, 10).toLowerCase() !== VERIFY_AND_MINT_SELECTOR) return false;
+  if (!Number.isSafeInteger(epochId) || epochId <= 0) return false;
+  if (!Number.isSafeInteger(leafIndex) || leafIndex < 0 || leafIndex > 0xffffffff) return false;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(recipient) || !/^[1-9]\d{0,38}$/.test(String(rawAmt))) return false;
+  const payload = calldata.slice(10);
+  const word = index => payload.slice(index * 64, (index + 1) * 64);
+  if (payload.length < 14 * 64 || payload.length % 64 !== 0) return false;
+  try {
+    const siblingsOffset = BigInt('0x' + word(11));
+    const siblingsCount = BigInt('0x' + word(13));
+    const expectedWords = 14n + siblingsCount;
+    const encodedRecipient = '0x' + word(8).slice(24);
+    return siblingsOffset === 13n * 32n
+      && siblingsCount <= 64n
+      && BigInt(payload.length) === expectedWords * 64n
+      && BigInt('0x' + word(0)) === BigInt(epochId)
+      && encodedRecipient.toLowerCase() === recipient.toLowerCase()
+      && BigInt('0x' + word(9)) === BigInt(rawAmt)
+      && BigInt('0x' + word(12)) === BigInt(leafIndex);
+  } catch(e) {
+    return false;
+  }
+};
+
 async function buildClaimCalldata(epochId, recipient, rawAmt, headerData) {
   try {
     var msgBody = JSON.stringify({jsonrpc:'2.0',id:1,method:'bridgeMessagesByEpoch',params:[epochId]});
@@ -1195,7 +1222,8 @@ async function buildClaimCalldata(epochId, recipient, rawAmt, headerData) {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: cdBody
     });
     var cdData = await cdResp.json();
-    if (cdData.result && cdData.result.calldata) {
+    var leafIndex = Number(myMsg.leaf_index);
+    if (cdData.result && claimCalldataMatches(cdData.result.calldata, epochId, recipient, rawAmt, leafIndex)) {
       return { calldata: cdData.result.calldata, epochId: epochId, message: myMsg };
     }
     return null;

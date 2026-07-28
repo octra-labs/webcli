@@ -197,10 +197,13 @@ inline std::vector<uint8_t> unpack(const uint8_t* data, size_t len) {
                      | (uint32_t)data[2] << 16
                      | (uint32_t)data[3] << 8
                      | (uint32_t)data[4];
-    if (orig_sz > 64 * 1024 * 1024)
-        throw std::runtime_error("pvac_compress: size exceeds 64MB limit");
+    if (orig_sz > 32 * 1024 * 1024)
+        throw std::runtime_error("pvac_compress: size exceeds 32MB limit");
+    const size_t payload_len = len - 5;
+    if (orig_sz > 0 && (payload_len == 0 || payload_len < (orig_sz + 63) / 64))
+        throw std::runtime_error("pvac_compress: expansion ratio rejected");
 
-    detail::RangeDecoder dec(data + 5, len - 5);
+    detail::RangeDecoder dec(data + 5, payload_len);
     std::vector<uint8_t> out;
     out.reserve(orig_sz);
     int b;

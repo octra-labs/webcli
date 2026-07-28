@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <memory>
 #include <new>
 
 #define PK(h) (reinterpret_cast<pvac::PubKey*>(h))
@@ -459,6 +460,23 @@ int pvac_pubkey_is_proof_profile(pvac_pubkey a, pvac_pubkey b) {
     }
 }
 
+int pvac_pubkey_matches_secret_profile(
+    pvac_pubkey candidate,
+    pvac_pubkey current,
+    pvac_seckey sk
+) {
+    try {
+        if (!candidate || !current || !sk)
+            return 0;
+        return pvac::secret_profile_matches(
+            *PK(candidate),
+            *PK(current),
+            *SK(sk)) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
 pvac_zero_proof pvac_make_zero_proof(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct) {
     auto* zp = new pvac::ZeroProof();
     *zp = pvac::make_zero_proof(*PK(pk), *SK(sk), *CT(ct));
@@ -495,6 +513,54 @@ int pvac_verify_zero_bound(pvac_pubkey pk, pvac_cipher ct, pvac_zero_proof proof
     }
 }
 
+pvac_zero_proof pvac_make_zero_proof_bound_key_switch(
+    pvac_pubkey pk,
+    pvac_seckey sk,
+    pvac_cipher ct,
+    uint64_t amount,
+    const uint8_t blinding[32]
+) {
+    if (!pk || !sk || !ct || !blinding)
+        return nullptr;
+    try {
+        pvac::Scalar blind = pvac::sc_reduce256(blinding);
+        auto proof = std::make_unique<pvac::ZeroProof>(
+            pvac::make_zero_proof_bound_key_switch(
+                *PK(pk),
+                *SK(sk),
+                *CT(ct),
+                amount,
+                blind));
+        return proof.release();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+int pvac_verify_zero_bound_key_switch(
+    pvac_pubkey pk,
+    pvac_cipher ct,
+    pvac_zero_proof proof,
+    const uint8_t amount_commitment[32]
+) {
+    if (!pk || !ct || !proof || !amount_commitment)
+        return 0;
+    pvac::RistrettoPoint commit;
+    std::memcpy(commit.data(), amount_commitment, 32);
+    try {
+        pvac::ExtPoint decoded_commit;
+        if (!pvac::rist_decode(decoded_commit, commit))
+            return 0;
+        return pvac::verify_zero_bound_key_switch(
+            *PK(pk),
+            *CT(ct),
+            *ZP(proof),
+            commit) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
 pvac_zero_proof pvac_make_bound_range_proof(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
                                             uint64_t amount, const uint8_t blinding[32]) {
     pvac::Scalar blind = pvac::sc_reduce256(blinding);
@@ -503,9 +569,24 @@ pvac_zero_proof pvac_make_bound_range_proof(pvac_pubkey pk, pvac_seckey sk, pvac
     return zp;
 }
 
-int pvac_verify_bound_range(pvac_pubkey pk, pvac_cipher ct, pvac_zero_proof proof) {
+int pvac_verify_bound_range_commitment(
+    pvac_pubkey pk,
+    pvac_cipher ct,
+    pvac_zero_proof proof,
+    const uint8_t amount_commitment[32]) {
+    if (!pk || !ct || !proof || !amount_commitment)
+        return 0;
+    pvac::RistrettoPoint commitment;
+    std::memcpy(commitment.data(), amount_commitment, 32);
     try {
-        return pvac::verify_zero_bound_range(*PK(pk), *CT(ct), *ZP(proof)) ? 1 : 0;
+        pvac::ExtPoint decoded;
+        if (!pvac::rist_decode(decoded, commitment))
+            return 0;
+        return pvac::verify_zero_bound_range(
+            *PK(pk),
+            *CT(ct),
+            *ZP(proof),
+            commitment) ? 1 : 0;
     } catch (...) {
         return 0;
     }
@@ -751,22 +832,6 @@ pvac_agg_range_proof pvac_deserialize_agg_range_proof(const uint8_t* data, size_
     } catch (const std::exception& e) {
         fprintf(stderr, "[pvac_c_api] deserialize_agg_range_proof failed: %s\n", e.what());
         return nullptr;
-    }
-}
-
-int pvac_verify_range_any(pvac_pubkey pk, pvac_cipher ct,
-                           const uint8_t* proof_data, size_t proof_len) {
-    try {
-        auto rpa = pvac_ser::deserialize_range_proof_any(proof_data, proof_len);
-        if (rpa.format == pvac_ser::RP_OLD)
-            return pvac::verify_range(*PK(pk), *CT(ct), rpa.old_proof) ? 1 : 0;
-        else if (rpa.format == pvac_ser::RP_AGGREGATED)
-            return pvac::verify_aggregated_range(*PK(pk), *CT(ct), rpa.agg_proof) ? 1 : 0;
-        else
-            return pvac::verify_zero_bound_range(*PK(pk), *CT(ct), rpa.bound_proof) ? 1 : 0;
-    } catch (const std::exception& e) {
-        fprintf(stderr, "[pvac_c_api] verify_range_any failed: %s\n", e.what());
-        return 0;
     }
 }
 

@@ -88,30 +88,20 @@ public:
         if (!p.empty()) open_u(p);
     }
 
-    void ensure_rpc(const std::string& rpc_url) {
-        auto stored = get("meta:rpc_url");
-        if (stored != rpc_url) {
-            if (!stored.empty())
-                fprintf(stderr, "txcache: rpc mismatch (%s != %s), clearing\n",
-                        stored.c_str(), rpc_url.c_str());
-            clear();
-            put("meta:rpc_url", rpc_url);
-        }
-    }
-
-    void ensure_schema(const std::string& schema) {
-        auto stored = get("meta:schema");
-        if (stored != schema) {
-            if (!stored.empty())
-                fprintf(stderr, "txcache: schema mismatch (%s != %s), clearing\n",
-                        stored.c_str(), schema.c_str());
-            clear();
-            put("meta:schema", schema);
-        }
+    void ensure_identity(const std::string& schema, const std::string& rpc_url) {
+        const auto stored_schema = get("meta:schema");
+        const auto stored_rpc = get("meta:rpc_url");
+        if (stored_schema == schema && stored_rpc == rpc_url) return;
+        if (!stored_schema.empty() || !stored_rpc.empty())
+            fprintf(stderr, "txcache: identity mismatch schema = %s rpc = %s, clearing\n",
+                    stored_schema.c_str(), stored_rpc.c_str());
+        clear();
+        put("meta:schema", schema);
+        put("meta:rpc_url", rpc_url);
     }
 
     void put(const std::string& key, const std::string& val) {
-        std::shared_lock<std::shared_mutex> lk(mtx_);
+        std::unique_lock<std::shared_mutex> lk(mtx_);
         put_u(key, val);
     }
 
@@ -132,16 +122,25 @@ public:
     void store_tx(const std::string& addr, const nlohmann::json& tx) {
         std::string hash = tx.value("hash", "");
         if (hash.empty() || addr.empty()) return;
-        std::shared_lock<std::shared_mutex> lk(mtx_);
-        put_u("tx:" + hash, tx.dump());
+        std::unique_lock<std::shared_mutex> lk(mtx_);
+        if (!db_) return;
         double ts = tx.value("timestamp", 0.0);
-        char idx[128];
+        char idx[192];
         snprintf(idx, sizeof(idx), "idx:%s:%020.6f:%s", addr.c_str(), 9999999999.0 - ts, hash.c_str());
-        put_u(idx, hash);
+        const std::string index_key = idx;
+        const std::string owner_key = "txidx:" + addr + ":" + hash;
+        const std::string previous_key = get_u(owner_key);
+        leveldb::WriteBatch batch;
+        if (!previous_key.empty() && previous_key != index_key)
+            batch.Delete(previous_key);
+        batch.Put("tx:" + hash, tx.dump());
+        batch.Put(index_key, hash);
+        batch.Put(owner_key, index_key);
+        db_->Write(leveldb::WriteOptions(), &batch);
     }
 
     void store_txs(const std::string& addr, const nlohmann::json& txs) {
-        std::shared_lock<std::shared_mutex> lk(mtx_);
+        std::unique_lock<std::shared_mutex> lk(mtx_);
         if (!db_) return;
         leveldb::WriteBatch batch;
         for (auto& tx : txs) {
@@ -151,7 +150,13 @@ public:
             double ts = tx.value("timestamp", 0.0);
             char idx[192];
             snprintf(idx, sizeof(idx), "idx:%s:%020.6f:%s", addr.c_str(), 9999999999.0 - ts, hash.c_str());
-            batch.Put(idx, hash);
+            const std::string index_key = idx;
+            const std::string owner_key = "txidx:" + addr + ":" + hash;
+            const std::string previous_key = get_u(owner_key);
+            if (!previous_key.empty() && previous_key != index_key)
+                batch.Delete(previous_key);
+            batch.Put(index_key, hash);
+            batch.Put(owner_key, index_key);
         }
         db_->Write(leveldb::WriteOptions(), &batch);
     }

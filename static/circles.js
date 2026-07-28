@@ -363,13 +363,6 @@ const createdCircleIdsForBridge = () => {
   return bridgeCreatedCircleIds.get(sourceCircleId)
 }
 
-const authBridgeRootForCircle = (circleId) => {
-  if (circleId === 'octQXi2RUp2MXDPvFs2YPqhXuoaezq2isFpT8PvoCmacpvQ') {
-    return 'http://127.0.0.1:18423'
-  }
-  return ''
-}
-
 const postBridgeReply = (target, token, id, ok, result, error) => {
   if (!target || !token || !id) {
     return
@@ -451,7 +444,6 @@ const bridgeMethodsForInfo = (info) => [
   'fhe.serialize_cipher',
   'fhe.deserialize_cipher',
   'fhe.verify_zero',
-  'fhe.verify_range',
   'fhe.verify_bound',
   'relay.request',
   'relay.status',
@@ -525,9 +517,6 @@ const bridgeGrantTextOf = (context, method) => {
   if (method === 'fhe.verify_zero') {
     return `allow this circle to request FHE zero-proof verification for this session?\n\n${context.uri}`
   }
-  if (method === 'fhe.verify_range') {
-    return `allow this circle to request FHE range-proof verification for this session?\n\n${context.uri}`
-  }
   if (method === 'fhe.verify_bound') {
     return `allow this circle to request FHE bound-proof verification for this session?\n\n${context.uri}`
   }
@@ -560,7 +549,6 @@ const bridgeGrantScopeOf = (method) => {
   if (method === 'fhe.serialize_cipher') return 'fhe.serialize_cipher'
   if (method === 'fhe.deserialize_cipher') return 'fhe.deserialize_cipher'
   if (method === 'fhe.verify_zero') return 'fhe.verify_zero'
-  if (method === 'fhe.verify_range') return 'fhe.verify_range'
   if (method === 'fhe.verify_bound') return 'fhe.verify_bound'
   if (method.startsWith('relay.')) return 'relay.access'
   return method
@@ -596,7 +584,6 @@ const bridgeResultOf = async (method, payload = {}) => {
     return activeBridgeContext
   }
   const bridgeCircleId = activeBridgeContext.circle_id || ''
-  const authBridgeRoot = authBridgeRootForCircle(bridgeCircleId)
   const requireBridgeCircleId = () => {
     if (!bridgeCircleId) {
       throw new Error('sealed bridge has no active circle target')
@@ -610,7 +597,10 @@ const bridgeResultOf = async (method, payload = {}) => {
     return bridgeCircleId
   }
   const postWrite = async (path, circleId) => {
-    const pin = await circlePin('confirm circle write', `enter PIN to sign ${method}`)
+    const fee = String(payload.ou || payload.fee || 'wallet default')
+    const pin = await circlePin(
+      'confirm circle write',
+      `method: ${method}\ncircle: ${circleId}\nfee: ${fee} ou`)
     if (!pin) {
       throw new Error(`${method} cancelled`)
     }
@@ -958,22 +948,25 @@ const bridgeResultOf = async (method, payload = {}) => {
     return fetchJson(`/api/circle/ingress_packet?circle_id=${encodeURIComponent(effectiveCircleId)}&intent_id=${encodeURIComponent(payload.intent_id)}`)
   }
   if (method === 'wallet.info') {
-    if (authBridgeRoot) {
-      return fetchJson(`${authBridgeRoot}/api/wallet/info`)
-    }
     return fetchJson('/api/wallet')
   }
   if (method === 'wallet.balance') {
-    if (authBridgeRoot) {
-      return fetchJson(`${authBridgeRoot}/api/wallet/balance`)
-    }
     return fetchJson('/api/balance')
   }
   if (method === 'wallet.keys') {
     return fetchJson('/api/keys')
   }
   if (method === 'wallet.send') {
-    return postJson('/api/send', payload)
+    const to = String(payload.to || '')
+    const amount = String(payload.amount || '')
+    const fee = String(payload.ou || payload.fee || 'wallet default')
+    const pin = await circlePin(
+      'confirm wallet transfer',
+      `to: ${to}\namount: ${amount} oct\nfee: ${fee} ou`)
+    if (!pin) {
+      throw new Error('wallet.send cancelled')
+    }
+    return postJson('/api/send', { ...payload, pin })
   }
   if (method === 'fhe.load_pk') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -1010,10 +1003,6 @@ const bridgeResultOf = async (method, payload = {}) => {
   if (method === 'fhe.verify_zero') {
     const effectiveCircleId = requireBridgeCircleId()
     return postJson('/api/circle/fhe/verify_zero', { ...payload, circle_id: effectiveCircleId })
-  }
-  if (method === 'fhe.verify_range') {
-    const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/fhe/verify_range', { ...payload, circle_id: effectiveCircleId })
   }
   if (method === 'fhe.verify_bound') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -1266,6 +1255,18 @@ const injectSealedPolicy = (doc) => {
     doc,
     'Content-Security-Policy',
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; manifest-src 'none'; prefetch-src 'none'; navigate-to 'none'",
+    'http-equiv'
+  )
+  prependHeadMeta(doc, 'referrer', 'no-referrer', 'name')
+}
+
+const injectPublicPolicy = (doc) => {
+  const origin = window.location.origin
+  doc.querySelectorAll('base').forEach((node) => node.remove())
+  prependHeadMeta(
+    doc,
+    'Content-Security-Policy',
+    `default-src 'none'; script-src 'unsafe-inline' ${origin}; style-src 'unsafe-inline' ${origin}; img-src ${origin} data: blob:; font-src ${origin} data:; media-src ${origin} data: blob:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; manifest-src 'none'; prefetch-src 'none'; navigate-to 'none'`,
     'http-equiv'
   )
   prependHeadMeta(doc, 'referrer', 'no-referrer', 'name')
@@ -1704,6 +1705,7 @@ const rewritePublicAssetRefs = (doc, circleId, htmlPath) => {
 
 const materializePublicHtml = (circleId, htmlPath, htmlText, bridgeToken) => {
   const doc = new DOMParser().parseFromString(htmlText, 'text/html')
+  injectPublicPolicy(doc)
   installPublicPrelude(doc, circleId, htmlPath, bridgeToken)
   rewritePublicAssetRefs(doc, circleId, htmlPath)
   return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`

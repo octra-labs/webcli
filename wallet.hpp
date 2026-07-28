@@ -202,10 +202,7 @@ inline int manifest_next_hd_index(const std::string& master_seed_b64) {
 }
 
 inline std::string derive_address(const uint8_t pubkey[32]) {
-    auto h = sha256(pubkey, 32);
-    std::string b58 = base58_encode(h.data(), 32);
-    while (b58.size() < 44) b58 = "1" + b58;
-    return "oct" + b58;
+    return derive_address_from_pubkey(pubkey);
 }
 
 inline bool has_encrypted_wallet() {
@@ -480,6 +477,7 @@ inline void change_pin(const std::string& path, Wallet& w,
                         const std::string& new_pin) {
     save_wallet_encrypted(path, w, new_pin);
 }
+
 
 inline Wallet derive_hd_account(const std::string& master_seed_b64,
                                  uint32_t index,

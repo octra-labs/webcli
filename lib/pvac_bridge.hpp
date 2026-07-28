@@ -58,9 +58,9 @@ class PvacBridge {
             &pvac_free_pubkey);
     }
 
-    bool proof_profile(const PubkeyPtr& remote) const {
+    bool secret_profile(const PubkeyPtr& remote) const {
         return remote &&
-            pvac_pubkey_is_proof_profile(remote.get(), pk_) == 1;
+            pvac_pubkey_matches_secret_profile(remote.get(), pk_, sk_) == 1;
     }
 
     std::vector<uint8_t> serialize_ptr(uint8_t*(*fn)(void*, size_t*), void* handle) {
@@ -89,13 +89,39 @@ public:
     bool init(const std::string& priv_b64) {
         reset();
         auto raw = base64_decode(priv_b64);
-        if (raw.size() < 32) return false;
+        if (raw.size() < 32) {
+            if (!raw.empty()) secure_zero(raw.data(), raw.size());
+            return false;
+        }
         uint8_t seed[32];
         memcpy(seed, raw.data(), 32);
         pvac_params prm = pvac_default_params();
         pvac_keygen_from_seed(prm, seed, &pk_, &sk_);
         pvac_free_params(prm);
+        secure_zero(seed, sizeof(seed));
+        secure_zero(raw.data(), raw.size());
         return pk_ != nullptr && sk_ != nullptr;
+    }
+
+    bool init_public(const std::string& pubkey_b64) {
+        reset();
+        auto remote = decode_pubkey(pubkey_b64);
+        if (!remote) return false;
+        pk_ = remote.release();
+        return true;
+    }
+
+    bool init_registered(const std::string& priv_b64,
+                         const std::string& pubkey_b64) {
+        if (!init(priv_b64)) return false;
+        auto remote = decode_pubkey(pubkey_b64);
+        if (!secret_profile(remote)) {
+            reset();
+            return false;
+        }
+        pvac_free_pubkey(pk_);
+        pk_ = remote.release();
+        return true;
     }
 
     pvac_pubkey pk() const { return pk_; }
@@ -255,8 +281,15 @@ public:
         return pvac_make_bound_range_proof(pk_, sk_, ct, amount, blinding);
     }
 
-    bool verify_bound_range(pvac_cipher ct, pvac_zero_proof proof) {
-        return pvac_verify_bound_range(pk_, ct, proof) != 0;
+    bool verify_bound_range(
+        pvac_cipher ct,
+        pvac_zero_proof proof,
+        const std::array<uint8_t, 32>& commitment) {
+        return pvac_verify_bound_range_commitment(
+            pk_,
+            ct,
+            proof,
+            commitment.data()) != 0;
     }
 
     bool verify_zero_proof_bound(pvac_cipher ct,
@@ -308,9 +341,9 @@ public:
         return ok;
     }
 
-    bool pubkey_matches_proof_profile(const std::string& value) {
+    bool pubkey_matches_secret_profile(const std::string& value) {
         auto remote = decode_pubkey(value);
-        return proof_profile(remote);
+        return secret_profile(remote);
     }
 
     bool try_get_balance_with_pubkey(const std::string& cipher_str,
@@ -318,7 +351,7 @@ public:
         int64_t& value) {
         value = 0;
         auto remote = decode_pubkey(pubkey_b64);
-        pvac_cipher ct = proof_profile(remote)
+        pvac_cipher ct = secret_profile(remote)
             ? decode_cipher(cipher_str)
             : nullptr;
         const bool ok = ct &&
@@ -336,7 +369,7 @@ public:
         uint64_t amount,
         const uint8_t blinding[32]) {
         auto remote = decode_pubkey(pubkey_b64);
-        if (!proof_profile(remote))
+        if (!secret_profile(remote))
             throw std::runtime_error("registered pvac key profile is invalid");
         return pvac_make_zero_proof_bound(
             remote.get(),
@@ -346,14 +379,47 @@ public:
             blinding);
     }
 
+    pvac_zero_proof make_zero_proof_bound_key_switch_with_pubkey(
+        const std::string& pubkey_b64,
+        pvac_cipher ct,
+        uint64_t amount,
+        const uint8_t blinding[32]) {
+        auto remote = decode_pubkey(pubkey_b64);
+        if (!secret_profile(remote))
+            throw std::runtime_error("registered pvac key profile is invalid");
+        auto proof = pvac_make_zero_proof_bound_key_switch(
+            remote.get(),
+            sk_,
+            ct,
+            amount,
+            blinding);
+        if (!proof)
+            throw std::runtime_error("key switch proof generation failed");
+        return proof;
+    }
+
     bool verify_zero_proof_bound_with_pubkey(
         const std::string& pubkey_b64,
         pvac_cipher ct,
         pvac_zero_proof proof,
         const std::array<uint8_t, 32>& commitment) {
         auto remote = decode_pubkey(pubkey_b64);
-        return proof_profile(remote) &&
+        return secret_profile(remote) &&
             pvac_verify_zero_bound(
+                remote.get(),
+                ct,
+                proof,
+                commitment.data()) != 0;
+    }
+
+    bool verify_zero_proof_bound_key_switch_with_pubkey(
+        const std::string& pubkey_b64,
+        pvac_cipher ct,
+        pvac_zero_proof proof,
+        const std::array<uint8_t, 32>& commitment) {
+        auto remote = decode_pubkey(pubkey_b64);
+        return secret_profile(remote) &&
+            pvac_verify_zero_bound_key_switch(
                 remote.get(),
                 ct,
                 proof,

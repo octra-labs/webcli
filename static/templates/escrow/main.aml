@@ -40,7 +40,7 @@ Program Escrow {
     require(caller == self.buyer || caller == self.arbiter, "not authorized")
     require(self.funded && !self.released, "invalid state")
     self.released = true
-    transfer(self.seller, self.amount)
+    require(transfer(self.seller, self.amount), "transfer failed")
     emit Released(self.seller, self.amount)
     return true
   }
@@ -49,7 +49,7 @@ Program Escrow {
     require(caller == self.seller || caller == self.arbiter, "not authorized")
     require(self.funded && !self.released, "invalid state")
     self.released = true
-    transfer(self.buyer, self.amount)
+    require(transfer(self.buyer, self.amount), "transfer failed")
     emit Refunded(self.buyer, self.amount)
     return true
   }

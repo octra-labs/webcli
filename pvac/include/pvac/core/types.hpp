@@ -37,6 +37,10 @@ namespace Dom {
     inline constexpr const char* CIRCUIT_PRF_CHALLENGE = "pvac.v6.circuit_prf.challenge";
     inline constexpr const char* CIRCUIT_PRF_ROUND = "pvac.v6.circuit_prf.mimc.round";
     inline constexpr const char* PRF_R_ALPHA = "pvac.v6.prf.r.alpha";
+    inline constexpr const char* CIRCUIT_PRF_KEY_V7 = "pvac.v7.circuit_prf.key";
+    inline constexpr const char* CIRCUIT_PRF_BLIND_V7 = "pvac.v7.circuit_prf.blind";
+    inline constexpr const char* CIRCUIT_PRF_CHALLENGE_V7 = "pvac.v7.circuit_prf.challenge";
+    inline constexpr const char* CIRCUIT_PRF_ROUND_V7 = "pvac.v7.circuit_prf.mimc.round";
 }
 
 struct Params {
@@ -97,6 +101,16 @@ enum class RRule : uint8_t {
     PROD = 1
 };
 
+enum class CircuitPrfProfile : uint8_t {
+    MIMC_X3_V6 = 1,
+    MIMC_X5_V7 = 2
+};
+
+inline bool valid_circuit_prf_profile(CircuitPrfProfile profile) {
+    return profile == CircuitPrfProfile::MIMC_X3_V6 ||
+        profile == CircuitPrfProfile::MIMC_X5_V7;
+}
+
 struct Layer {
     RRule rule;
     RSeed seed;
@@ -136,6 +150,7 @@ struct PubKey {
     Fp omega_B;
     std::vector<Fp> powg_B;
     std::array<uint8_t, 32> circuit_prf_key_commit = {};
+    CircuitPrfProfile circuit_prf_profile = CircuitPrfProfile::MIMC_X3_V6;
 };
 
 inline bool is_valid_cipher_shape(const Cipher& cipher) {
@@ -199,6 +214,8 @@ inline bool is_valid_pubkey_shape(const PubKey& pk) {
         if (column.nbits != static_cast<uint64_t>(pk.prm.m_bits))
             return false;
     }
+    if (!valid_circuit_prf_profile(pk.circuit_prf_profile))
+        return false;
     return true;
 }
 
@@ -218,6 +235,8 @@ struct SecKey {
     std::array<uint64_t, 4> prf_k;
     Fp circuit_prf_key = {0, 0};
     std::array<uint8_t, 32> circuit_prf_key_blind = {};
+    Fp circuit_prf_key_v6 = {0, 0};
+    std::array<uint8_t, 32> circuit_prf_key_blind_v6 = {};
     std::vector<uint64_t> lpn_s_bits;
 };
 

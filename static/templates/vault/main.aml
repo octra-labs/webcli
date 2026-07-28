@@ -1,4 +1,6 @@
 Program Vault {
+  const MAX_U128 = 340282366920938463463374607431768211455
+
   state {
     owner: address
     deposits: map[address]u128
@@ -13,10 +15,15 @@ Program Vault {
     self.total = 0
   }
 
+  private fn safe_add(left: u128, right: u128): u128 {
+    require(right <= MAX_U128 - left, "u128 overflow")
+    return left + right
+  }
+
   payable fn deposit(): u128 {
     require(value > 0, "must send OCT")
-    self.deposits[caller] += value
-    self.total += value
+    self.deposits[caller] = safe_add(self.deposits[caller], value)
+    self.total = safe_add(self.total, value)
     emit Deposit(caller, value)
     return self.deposits[caller]
   }
@@ -27,7 +34,7 @@ Program Vault {
     require(bal >= amt, "insufficient deposit")
     self.deposits[caller] = bal - amt
     self.total -= amt
-    transfer(caller, amt)
+    require(transfer(caller, amt), "transfer failed")
     emit Withdraw(caller, amt)
     return true
   }

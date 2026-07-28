@@ -1,8 +1,3 @@
-/*
- * Octra Labs
- * December 2025
- */
-
 #pragma once
 
 #include <cstdint>

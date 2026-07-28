@@ -37,6 +37,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
+#include <future>
 #include <atomic>
 #include <chrono>
 #include <optional>
@@ -44,6 +45,7 @@
 #include <limits>
 #include <array>
 #include <cerrno>
+#include <utility>
 #ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -72,6 +74,7 @@ extern "C" {
 #include "rpc_client.hpp"
 #include "lib/circle_asset_chunks.hpp"
 #include "lib/circle_hfhe_receipt.hpp"
+#include "lib/circle_verifier_policy.hpp"
 #include "lib/endpoint_policy.hpp"
 #include "lib/stealth_scan.hpp"
 #include "lib/tx_builder.hpp"
@@ -88,6 +91,7 @@ static octra::RpcClient g_rpc;
 static octra::PvacBridge g_pvac;
 static std::mutex g_mtx;
 static std::shared_mutex g_pvac_lifetime_mtx;
+static octra::circle_verifier_policy::Lane g_circle_verifier_lane;
 static bool g_pvac_confirmed = false;
 static bool g_pvac_ok = false;
 static std::string g_pvac_pubkey_b64;
@@ -96,6 +100,7 @@ static std::string g_pvac_repair_required_addr;
 static std::string g_pvac_repair_blocked_addr;
 static std::string g_pvac_repair_blocked_reason;
 static std::atomic<bool> g_wallet_loaded{false};
+static uint64_t g_wallet_generation = 0;
 static std::atomic<bool> g_pvac_upgrade_inflight{false};
 static std::mutex g_pvac_upgrade_state_mtx;
 static std::string g_pvac_upgrade_stage = "idle";
@@ -103,10 +108,10 @@ static std::string g_pvac_upgrade_detail;
 static std::string g_pvac_upgrade_tx_hash;
 static double g_pvac_upgrade_started_ts = 0.0;
 static double g_pvac_upgrade_updated_ts = 0.0;
-static constexpr size_t PVAC_PRIVATE_SPEND_MAX_BASE_LAYERS = 6;
 static std::string g_wallet_path = "data/wallet.oct";
 static std::string g_pin;
 static TxCache g_txcache;
+static const char* const TXCACHE_SCHEMA = "v3_addr_hash_index";
 
 static nlohmann::json g_fee_cache;
 static double g_fee_cache_ts = 0.0;
@@ -115,10 +120,40 @@ static std::mutex g_fee_mtx;
 struct PvacWalletSnapshot {
     bool loaded = false;
     bool pvac_ok = false;
+    uint64_t generation = 0;
     std::string addr;
     std::string pub_b64;
     std::string priv_b64;
     std::array<uint8_t, 64> sk{};
+
+    PvacWalletSnapshot() = default;
+    PvacWalletSnapshot(const PvacWalletSnapshot&) = delete;
+    PvacWalletSnapshot& operator=(const PvacWalletSnapshot&) = delete;
+
+    PvacWalletSnapshot(PvacWalletSnapshot&& other) noexcept
+        : loaded(other.loaded),
+          pvac_ok(other.pvac_ok),
+          generation(other.generation),
+          addr(std::move(other.addr)),
+          pub_b64(std::move(other.pub_b64)),
+          priv_b64(std::move(other.priv_b64)),
+          sk(other.sk) {
+        other.clear_secrets();
+    }
+
+    PvacWalletSnapshot& operator=(PvacWalletSnapshot&&) = delete;
+
+    ~PvacWalletSnapshot() {
+        clear_secrets();
+    }
+
+    void clear_secrets() {
+        if (!priv_b64.empty()) {
+            octra::secure_zero(&priv_b64[0], priv_b64.size());
+            priv_b64.clear();
+        }
+        octra::secure_zero(sk.data(), sk.size());
+    }
 };
 
 struct HistoryRuntimeState {
@@ -729,10 +764,47 @@ static std::string recommended_ou_for_op(const std::string& op, const std::strin
             ? r.result[key].get<std::string>()
             : r.result[key].dump();
         try {
-            if (std::stoll(val) > 0) return val;
+            size_t pos = 0;
+            const int64_t parsed = std::stoll(val, &pos);
+            if (pos == val.size()
+                && octra::pvac_upgrade_policy::fee_allowed(parsed))
+                return std::to_string(parsed);
         } catch (...) {}
     }
     return fallback;
+}
+
+static int64_t program_deploy_base_ou(size_t payload_size) {
+    return 200000 + static_cast<int64_t>(
+        ((payload_size + 1023) / 1024) * 1000);
+}
+
+static int64_t program_deploy_required_ou(const std::string& payload) {
+    const int64_t base = program_deploy_base_ou(payload.size());
+    json hint = {
+        {"encrypted_data_len", payload.size()}
+    };
+    auto r = g_rpc.call(
+        "octra_recommendedFee",
+        json::array({"program_deploy", hint}),
+        10);
+    if (!r.ok || !r.result.is_object() || !r.result.contains("minimum"))
+        return base;
+    try {
+        std::string value = r.result["minimum"].is_string()
+            ? r.result["minimum"].get<std::string>()
+            : r.result["minimum"].dump();
+        size_t pos = 0;
+        const int64_t parsed = std::stoll(value, &pos);
+        if (pos != value.size()) return base;
+        if (parsed != base && parsed != base * 2 && parsed != base * 5)
+            return base;
+        if (!octra::pvac_upgrade_policy::fee_allowed(parsed))
+            return base;
+        return parsed;
+    } catch (...) {
+        return base;
+    }
 }
 
 static void clear_fee_cache() {
@@ -743,6 +815,54 @@ static void clear_fee_cache() {
 
 static bool is_octra_address(const std::string& addr) {
     return addr.size() == 47 && addr.substr(0, 3) == "oct";
+}
+
+static bool is_active_media_type(const std::string& media_type) {
+    static const std::set<std::string> active = {
+        "image/svg+xml",
+        "text/html",
+        "application/xhtml+xml",
+        "application/javascript",
+        "text/javascript",
+        "application/ecmascript",
+        "text/ecmascript",
+        "application/x-javascript",
+        "module",
+        "application/wasm",
+        "application/xslt+xml"
+    };
+    return active.count(media_type) > 0;
+}
+
+static bool is_inert_media_type(const std::string& media_type) {
+    static const std::set<std::string> inert = {
+        "text/plain",
+        "text/css",
+        "text/csv",
+        "text/markdown",
+        "application/json",
+        "application/pdf",
+        "application/font-woff",
+        "application/font-woff2",
+        "application/x-font-ttf",
+        "application/x-font-otf",
+        "application/vnd.ms-fontobject"
+    };
+    if (inert.count(media_type) > 0) return true;
+    return starts_with(media_type, "image/")
+        || starts_with(media_type, "audio/")
+        || starts_with(media_type, "video/")
+        || starts_with(media_type, "font/");
+}
+
+static bool opaque_origin_request(const httplib::Request& req) {
+    const std::string site = req.get_header_value("Sec-Fetch-Site");
+    return !site.empty() && site != "same-origin";
+}
+
+static bool serve_inline_allowed(const std::string& media_type, const httplib::Request& req) {
+    if (!is_active_media_type(media_type)) return is_inert_media_type(media_type);
+    return opaque_origin_request(req);
 }
 
 static constexpr size_t CIRCLE_ASSET_MAX_RAW_BYTES = 33554432;
@@ -806,7 +926,11 @@ struct BalanceInfo {
 };
 
 static BalanceInfo get_nonce_balance_for(const std::string& addr) {
-    auto r = g_rpc.get_balance(addr);
+    auto balance_future = std::async(
+        std::launch::async,
+        [&addr]() { return g_rpc.get_balance(addr); });
+    auto pr = g_rpc.staging_view();
+    auto r = balance_future.get();
     if (!r.ok) return {};
     BalanceInfo info;
     info.ok = true;
@@ -825,7 +949,6 @@ static BalanceInfo get_nonce_balance_for(const std::string& addr) {
         raw = std::to_string(parsed >= 0 ? parsed : 0);
     }
     info.balance_raw = raw;
-    auto pr = g_rpc.staging_view();
     if (pr.ok && pr.result.contains("transactions")) {
         for (auto& tx : pr.result["transactions"]) {
             if (tx.value("from", "") == addr) {
@@ -864,7 +987,8 @@ static PvacWalletSnapshot pvac_wallet_snapshot() {
     std::lock_guard<std::mutex> lock(g_mtx);
     out.loaded = g_wallet_loaded;
     out.pvac_ok = g_pvac_ok;
-    if (!out.loaded) return out;
+    out.generation = g_wallet_generation;
+    if (!out.loaded || !out.pvac_ok) return out;
     out.addr = g_wallet.addr;
     out.pub_b64 = g_wallet.pub_b64;
     out.priv_b64 = g_wallet.priv_b64;
@@ -1095,38 +1219,153 @@ static bool circle_decode_zero_proof(const std::string& encoded,
     return true;
 }
 
-static bool circle_verify_zero_with_wallet(const std::string& ciphertext_b64,
-                                           const std::string& zero_proof_b64,
-                                           std::string& error) {
+static std::string remote_pvac_pubkey_b64(const std::string& addr);
+
+static bool circle_verifier_pvac(octra::PvacBridge& pvac,
+                                 std::string& wallet_addr,
+                                 uint64_t& wallet_generation,
+                                 std::string& error) {
+    auto wallet = pvac_wallet_snapshot();
+    if (!wallet.loaded || !wallet.pvac_ok) {
+        error = "pvac not available";
+        return false;
+    }
+    wallet_addr = wallet.addr;
+    wallet_generation = wallet.generation;
+    const std::string remote_pubkey =
+        remote_pvac_pubkey_b64(wallet_addr);
+    const bool initialized =
+        !remote_pubkey.empty()
+        && pvac.init_registered(wallet.priv_b64, remote_pubkey);
+    wallet.clear_secrets();
+    if (!initialized) {
+        error = "registered pvac key profile is unavailable";
+        return false;
+    }
+    return true;
+}
+
+static bool circle_public_verifier_pvac(octra::PvacBridge& pvac,
+                                        std::string& wallet_addr,
+                                        uint64_t& wallet_generation,
+                                        std::string& error) {
+    {
+        std::lock_guard<std::mutex> lock(g_mtx);
+        if (!g_wallet_loaded || !g_pvac_ok) {
+            error = "pvac not available";
+            return false;
+        }
+        wallet_addr = g_wallet.addr;
+        wallet_generation = g_wallet_generation;
+    }
+    const std::string pubkey_b64 =
+        remote_pvac_pubkey_b64(wallet_addr);
+    if (pubkey_b64.empty()) {
+        error = "registered pvac key profile is unavailable";
+        return false;
+    }
+    if (!pvac.init_public(pubkey_b64)) {
+        error = "registered pvac key profile is invalid";
+        return false;
+    }
+    return true;
+}
+
+static std::string circle_wallet_address() {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    return g_wallet_loaded ? g_wallet.addr : "";
+}
+
+static bool circle_wallet_current(const std::string& addr, uint64_t generation) {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    return g_wallet_loaded
+        && g_wallet.addr == addr
+        && g_wallet_generation == generation;
+}
+
+static bool circle_verifier_cipher(octra::PvacBridge& pvac,
+                                   const std::string& ciphertext_b64,
+                                   pvac_cipher& cipher,
+                                   std::string& error) {
+    cipher = nullptr;
+    if (!octra::circle_verifier_policy::ciphertext_size_allowed(
+            ciphertext_b64)) {
+        error = "circle ciphertext exceeds resource policy";
+        return false;
+    }
     auto raw = octra::base64_decode(ciphertext_b64);
     if (raw.empty()) {
         error = "invalid ciphertext";
         return false;
     }
-    pvac_cipher ct = g_pvac.deserialize_cipher(raw.data(), raw.size());
-    if (!ct) {
+    cipher = pvac.deserialize_cipher(raw.data(), raw.size());
+    if (!cipher) {
         error = "invalid ciphertext";
+        return false;
+    }
+    if (!octra::circle_verifier_policy::cipher_shape_allowed(cipher)) {
+        pvac.free_cipher(cipher);
+        cipher = nullptr;
+        error = "circle verifier ciphertext exceeds resource policy";
+        return false;
+    }
+    return true;
+}
+
+static bool circle_verify_zero(octra::PvacBridge& pvac,
+                               const std::string& ciphertext_b64,
+                               const std::string& zero_proof_b64,
+                               std::string& error) {
+    if (!octra::circle_verifier_policy::encoded_size_allowed(
+            ciphertext_b64,
+            zero_proof_b64)) {
+        error = "circle verifier input exceeds resource policy";
+        return false;
+    }
+    auto lease = g_circle_verifier_lane.try_acquire();
+    if (!lease) {
+        error = "circle verifier busy";
+        return false;
+    }
+    pvac_cipher ct = nullptr;
+    if (!circle_verifier_cipher(
+            pvac,
+            ciphertext_b64,
+            ct,
+            error)) {
         return false;
     }
     pvac_zero_proof proof = nullptr;
     if (!circle_decode_zero_proof(zero_proof_b64, proof, error)) {
-        g_pvac.free_cipher(ct);
+        pvac.free_cipher(ct);
         return false;
     }
-    bool ok = pvac_verify_zero(g_pvac.pk(), ct, proof) != 0;
+    bool ok = pvac_verify_zero(pvac.pk(), ct, proof) != 0;
     pvac_free_zero_proof(proof);
-    g_pvac.free_cipher(ct);
+    pvac.free_cipher(ct);
     if (!ok) error = "zero proof verification failed";
     return ok;
 }
 
-static bool circle_verify_bound_with_wallet(const std::string& ciphertext_b64,
-                                            const std::string& zero_proof_b64,
-                                            const std::string& amount_commitment_b64,
-                                            std::string& error) {
-    auto raw = octra::base64_decode(ciphertext_b64);
-    if (raw.empty()) {
-        error = "invalid ciphertext";
+static bool circle_verify_bound(octra::PvacBridge& pvac,
+                                const std::string& ciphertext_b64,
+                                const std::string& zero_proof_b64,
+                                const std::string& amount_commitment_b64,
+                                std::string& error) {
+    if (!octra::circle_verifier_policy::encoded_size_allowed(
+            ciphertext_b64,
+            zero_proof_b64)) {
+        error = "circle verifier input exceeds resource policy";
+        return false;
+    }
+    auto lease = g_circle_verifier_lane.try_acquire();
+    if (!lease) {
+        error = "circle verifier busy";
+        return false;
+    }
+    if (!octra::circle_verifier_policy::commitment_size_allowed(
+            amount_commitment_b64)) {
+        error = "invalid amount commitment";
         return false;
     }
     auto commitment = octra::base64_decode(amount_commitment_b64);
@@ -1134,52 +1373,24 @@ static bool circle_verify_bound_with_wallet(const std::string& ciphertext_b64,
         error = "invalid amount commitment";
         return false;
     }
-    pvac_cipher ct = g_pvac.deserialize_cipher(raw.data(), raw.size());
-    if (!ct) {
-        error = "invalid ciphertext";
+    pvac_cipher ct = nullptr;
+    if (!circle_verifier_cipher(
+            pvac,
+            ciphertext_b64,
+            ct,
+            error)) {
         return false;
     }
     pvac_zero_proof proof = nullptr;
     if (!circle_decode_zero_proof(zero_proof_b64, proof, error)) {
-        g_pvac.free_cipher(ct);
+        pvac.free_cipher(ct);
         return false;
     }
-    bool ok = pvac_verify_zero_bound(g_pvac.pk(), ct, proof, commitment.data()) != 0;
+    bool ok =
+        pvac_verify_zero_bound(pvac.pk(), ct, proof, commitment.data()) != 0;
     pvac_free_zero_proof(proof);
-    g_pvac.free_cipher(ct);
+    pvac.free_cipher(ct);
     if (!ok) error = "bound proof verification failed";
-    return ok;
-}
-
-static bool circle_verify_range_with_wallet(const std::string& ciphertext_b64,
-                                            const std::string& range_proof_b64,
-                                            std::string& error) {
-    if (ciphertext_b64.rfind(octra::HFHE_PREFIX, 0) != 0) {
-        error = "invalid ciphertext";
-        return false;
-    }
-    if (range_proof_b64.rfind(octra::RP_PREFIX, 0) != 0) {
-        error = "invalid range proof";
-        return false;
-    }
-    auto raw = octra::base64_decode(ciphertext_b64.substr(strlen(octra::HFHE_PREFIX)));
-    if (raw.empty()) {
-        error = "invalid ciphertext";
-        return false;
-    }
-    auto proof_raw = octra::base64_decode(range_proof_b64.substr(strlen(octra::RP_PREFIX)));
-    if (proof_raw.empty()) {
-        error = "invalid range proof";
-        return false;
-    }
-    pvac_cipher ct = g_pvac.deserialize_cipher(raw.data(), raw.size());
-    if (!ct) {
-        error = "invalid ciphertext";
-        return false;
-    }
-    bool ok = pvac_verify_range_any(g_pvac.pk(), ct, proof_raw.data(), proof_raw.size()) != 0;
-    g_pvac.free_cipher(ct);
-    if (!ok) error = "range proof verification failed";
     return ok;
 }
 
@@ -1205,11 +1416,10 @@ static bool circle_hfhe_receipt_required(const std::string& proof_kind) {
 }
 
 static bool circle_hfhe_proof_requires_commitment(const std::string& proof_kind) {
-    return proof_kind == "bound_zero_v1" || proof_kind == "bound_zero_receipt_v1";
-}
-
-static bool circle_hfhe_proof_is_range(const std::string& proof_kind) {
-    return proof_kind == "range_v1" || proof_kind == "range_receipt_v1";
+    return proof_kind == "bound_zero_v1" ||
+           proof_kind == "bound_zero_receipt_v1" ||
+           proof_kind == "range_v1" ||
+           proof_kind == "range_receipt_v1";
 }
 
 static bool circle_hfhe_receipt_transport_bound(const json& policy,
@@ -1460,6 +1670,25 @@ struct EncBalResult {
     std::string error;
 };
 
+struct EncBalCache {
+    uint64_t generation = 0;
+    std::string addr;
+    std::string cipher;
+    EncBalResult result;
+};
+
+static std::mutex g_enc_bal_cache_mtx;
+static std::optional<EncBalCache> g_enc_bal_cache;
+
+static void clear_enc_bal_cache() {
+    std::lock_guard<std::mutex> lock(g_enc_bal_cache_mtx);
+    if (g_enc_bal_cache)
+        octra::secure_zero(
+            &g_enc_bal_cache->result.decrypted,
+            sizeof(g_enc_bal_cache->result.decrypted));
+    g_enc_bal_cache.reset();
+}
+
 static EncBalResult get_encrypted_balance();
 
 struct LegacyCommitmentBlinding {
@@ -1666,7 +1895,7 @@ static bool build_pvac_migration_payload(octra::PvacBridge& pvac,
         error = "registered pvac key is unavailable";
         return false;
     }
-    if (key_bound && !pvac.pubkey_matches_proof_profile(old_pubkey)) {
+    if (key_bound && !pvac.pubkey_matches_secret_profile(old_pubkey)) {
         error = "registered pvac key uses a different proof profile";
         return false;
     }
@@ -1726,7 +1955,7 @@ static bool build_pvac_migration_payload(octra::PvacBridge& pvac,
             return false;
         }
         if (key_bound) {
-            old_zp = pvac.make_zero_proof_bound_with_pubkey(
+            old_zp = pvac.make_zero_proof_bound_key_switch_with_pubkey(
                 old_pubkey,
                 old_ct,
                 static_cast<uint64_t>(amount),
@@ -1747,7 +1976,7 @@ static bool build_pvac_migration_payload(octra::PvacBridge& pvac,
             return false;
         }
         const bool old_proof_ok = !key_bound ||
-            pvac.verify_zero_proof_bound_with_pubkey(
+            pvac.verify_zero_proof_bound_key_switch_with_pubkey(
                 old_pubkey,
                 old_ct,
                 old_zp,
@@ -1873,7 +2102,7 @@ static bool pvac_registered_key_compatible(const std::string& remote_pk,
     try {
         return g_pvac.pubkey_extends_local(remote_pk) ||
             g_pvac.pubkey_matches_legacy_v1(remote_pk) ||
-            g_pvac.pubkey_matches_proof_profile(remote_pk);
+            g_pvac.pubkey_matches_secret_profile(remote_pk);
     } catch (...) {
         return false;
     }
@@ -1966,6 +2195,7 @@ static json pvac_upgrade_status_json() {
     j["encrypted_balance_known"] = false;
     j["repair_required"] = false;
     j["compact_refresh"] = false;
+    j["private_spend_refresh_required"] = false;
     j["mode"] = "unavailable";
     j["reason"] = "pvac not available";
     std::string addr;
@@ -2012,13 +2242,21 @@ static json pvac_upgrade_status_json() {
     if (key_bound) {
         j["base_layers"] = key_bound_base_layers;
         j["canonical_r_com"] = canonical_r_com;
-        j["private_spend_max_base_layers"] = PVAC_PRIVATE_SPEND_MAX_BASE_LAYERS;
+        j["private_spend_max_base_layers"] =
+            octra::pvac_upgrade_policy::private_spend_refresh_base_layers;
     }
     auto read_remote_key = [&]() {
         json remote;
         remote["ok"] = false;
         remote["pk"] = "";
-        std::string remote_pk = remote_pvac_pubkey_b64(addr);
+        std::string remote_pk;
+        {
+            std::lock_guard<std::mutex> lock(g_mtx);
+            if (g_wallet_loaded && g_wallet.addr == addr)
+                remote_pk = g_pvac_remote_pubkey_b64;
+        }
+        if (remote_pk.empty())
+            remote_pk = remote_pvac_pubkey_b64(addr);
         if (!remote_pk.empty()) {
             remote["ok"] = true;
             remote["pk"] = remote_pk;
@@ -2161,7 +2399,7 @@ static json pvac_upgrade_status_json() {
     }
     if (remote_pk != local_pk) {
         int64_t remote_amount = 0;
-        if (!g_pvac.pubkey_matches_proof_profile(remote_pk) ||
+        if (!g_pvac.pubkey_matches_secret_profile(remote_pk) ||
             !g_pvac.try_get_balance_with_pubkey(
                 eb.cipher,
                 remote_pk,
@@ -2172,6 +2410,7 @@ static json pvac_upgrade_status_json() {
         }
         j["can_submit"] = true;
         j["mode"] = "key_bound_migration";
+        j["private_spend_refresh_required"] = true;
         j["reason"] = "encrypted balance key profile refresh required";
         j["encrypted_balance_known"] = true;
         j["encrypted_balance_raw"] = std::to_string(remote_amount);
@@ -2207,19 +2446,23 @@ static json pvac_upgrade_status_json() {
         j["can_submit"] = true;
         j["mode"] = "key_bound_migration";
         j["repair_required"] = true;
+        j["private_spend_refresh_required"] = true;
         j["reason"] = "encrypted balance repair required after local proof self-check failed";
         return j;
     }
     if (!canonical_r_com) {
         j["can_submit"] = true;
         j["mode"] = "key_bound_migration";
+        j["private_spend_refresh_required"] = true;
         j["reason"] = "encrypted balance privacy refresh required";
         return j;
     }
-    if (key_bound_base_layers > PVAC_PRIVATE_SPEND_MAX_BASE_LAYERS) {
+    if (octra::pvac_upgrade_policy::refresh_before_private_spend(
+            key_bound_base_layers)) {
         j["can_submit"] = true;
         j["mode"] = "key_bound_migration";
         j["compact_refresh"] = true;
+        j["private_spend_refresh_required"] = true;
         j["reason"] = "encrypted balance compact refresh required before private spend";
         return j;
     }
@@ -2534,6 +2777,7 @@ static EncBalResult get_encrypted_balance() {
     std::string pub_b64;
     std::string sig;
     bool pvac_ok;
+    uint64_t generation;
     {
         std::lock_guard<std::mutex> lock(g_mtx);
         if (!g_wallet_loaded) {
@@ -2544,6 +2788,7 @@ static EncBalResult get_encrypted_balance() {
         pub_b64 = g_wallet.pub_b64;
         sig = octra::sign_balance_request(addr, g_wallet.sk);
         pvac_ok = g_pvac_ok;
+        generation = g_wallet_generation;
     }
     auto r = g_rpc.get_encrypted_balance(addr, sig, pub_b64);
     if (!r.ok || !r.result.is_object()) {
@@ -2560,6 +2805,23 @@ static EncBalResult get_encrypted_balance() {
         out.error = "pvac not available";
         return out;
     }
+    std::optional<EncBalResult> cached;
+    {
+        std::lock_guard<std::mutex> lock(g_enc_bal_cache_mtx);
+        if (g_enc_bal_cache &&
+            g_enc_bal_cache->generation == generation &&
+            g_enc_bal_cache->addr == addr &&
+            g_enc_bal_cache->cipher == out.cipher)
+            cached = g_enc_bal_cache->result;
+    }
+    if (cached) {
+        std::lock_guard<std::mutex> lock(g_mtx);
+        if (g_wallet_loaded &&
+            g_wallet_generation == generation &&
+            g_wallet.addr == addr &&
+            g_pvac_ok)
+            return *cached;
+    }
     {
         std::lock_guard<std::mutex> lock(g_mtx);
         if (!g_wallet_loaded || g_wallet.addr != addr || !g_pvac_ok) {
@@ -2568,31 +2830,53 @@ static EncBalResult get_encrypted_balance() {
             return out;
         }
         out.key_bound = g_pvac.has_key_bound_material(out.cipher);
-        if (out.key_bound)
-            out.amount_known = g_pvac.try_get_balance(out.cipher, out.decrypted);
     }
-    if (!out.key_bound) {
-        const std::string remote_pk = remote_pvac_pubkey_b64(addr);
+    const std::string remote_pk = remote_pvac_pubkey_b64(addr);
+    {
         std::lock_guard<std::mutex> lock(g_mtx);
         if (!g_wallet_loaded || g_wallet.addr != addr || !g_pvac_ok) {
             out.ok = false;
-            out.error = "wallet state changed while reading legacy encrypted balance";
+            out.error = "wallet state changed while reading encrypted balance";
             return out;
         }
-        if (!remote_pk.empty()) {
+        if (out.key_bound && !remote_pk.empty()) {
+            out.amount_known =
+                g_pvac.try_get_balance_with_pubkey(
+                    out.cipher,
+                    remote_pk,
+                    out.decrypted);
+        } else if (!out.key_bound && !remote_pk.empty()) {
             out.legacy_owner_decoded =
                 g_pvac.try_get_legacy_v1_balance(out.cipher, remote_pk, out.decrypted);
             out.amount_known = out.legacy_owner_decoded;
         }
-        if (!out.amount_known)
+        if (!out.key_bound && !out.amount_known)
             out.amount_known = g_pvac.try_get_balance(out.cipher, out.decrypted);
     }
-    if (!out.amount_known)
+    if (out.key_bound && remote_pk.empty())
+        out.error = "registered pvac key is unavailable";
+    else if (!out.amount_known)
         out.error = "encrypted balance amount is outside the valid balance domain";
+    {
+        std::lock_guard<std::mutex> lock(g_mtx);
+        if (!g_wallet_loaded ||
+            g_wallet_generation != generation ||
+            g_wallet.addr != addr ||
+            !g_pvac_ok) {
+            out.ok = false;
+            out.error = "wallet state changed while caching encrypted balance";
+            return out;
+        }
+    }
+    if (out.amount_known) {
+        std::lock_guard<std::mutex> lock(g_enc_bal_cache_mtx);
+        g_enc_bal_cache = EncBalCache{generation, addr, out.cipher, out};
+    }
     return out;
 }
 
 static void init_wallet_subsystems() {
+    clear_enc_bal_cache();
     const char* env_rpc = std::getenv("OCTRA_RPC_URL");
     if (env_rpc && *env_rpc) g_wallet.rpc_url = env_rpc;
     g_rpc.set_url(g_wallet.rpc_url);
@@ -2617,12 +2901,12 @@ static void init_wallet_subsystems() {
     std::string cache_path = "data/txcache_" + g_wallet.addr.substr(3, 8);
     if (g_txcache.open(cache_path)) {
         fprintf(stderr, "txcache opened: %s\n", cache_path.c_str());
-        g_txcache.ensure_schema("v2_addr_idx_slim_history");
-        g_txcache.ensure_rpc(g_wallet.rpc_url);
+        g_txcache.ensure_identity(TXCACHE_SCHEMA, g_wallet.rpc_url);
     } else {
         fprintf(stderr, "txcache open failed: %s\n", cache_path.c_str());
     }
     g_wallet_loaded = true;
+    ++g_wallet_generation;
 }
 
 #define WALLET_GUARD \
@@ -2769,6 +3053,8 @@ int main(int argc, char** argv) {
             res.set_header("Content-Security-Policy",
                 "default-src 'self'; "
                 "script-src 'self'; "
+                "base-uri 'none'; "
+                "form-action 'none'; "
                 "style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data: https:; "
                 "connect-src 'self' http://127.0.0.1:* http://178.62.60.204:8090 https://*.octra.network https://*.publicnode.com https://*.infura.io wss: ws:; "
@@ -2910,6 +3196,8 @@ int main(int argc, char** argv) {
             return;
         }
         g_wallet_loaded = false;
+        ++g_wallet_generation;
+        clear_enc_bal_cache();
         g_pvac_ok = false;
         g_pvac_confirmed = false;
         g_pvac_foreign = false;
@@ -3164,6 +3452,8 @@ int main(int argc, char** argv) {
 
         if (g_wallet_loaded) {
             g_wallet_loaded = false;
+            ++g_wallet_generation;
+            clear_enc_bal_cache();
             g_pvac_ok = false;
             g_pvac_confirmed = false;
             g_pvac_foreign = false;
@@ -3328,7 +3618,13 @@ int main(int argc, char** argv) {
             pvac_foreign = g_pvac_foreign;
         }
 
-        auto bi = get_nonce_balance();
+        auto balance_future = std::async(
+            std::launch::async,
+            []() { return get_nonce_balance(); });
+        std::optional<EncBalResult> eb;
+        if (pvac_ok)
+            eb = get_encrypted_balance();
+        auto bi = balance_future.get();
         json j;
         j["public_balance"] = bi.balance_raw;
         j["nonce"] = bi.nonce;
@@ -3337,14 +3633,13 @@ int main(int argc, char** argv) {
         j["encrypted_balance_known"] = false;
         if (!bi.ok)
             j["account_unknown"] = true;
-        if (pvac_ok) {
-            auto eb = get_encrypted_balance();
-            if (eb.ok) {
-                const bool present = !eb.cipher.empty() && eb.cipher != "0";
+        if (eb) {
+            if (eb->ok) {
+                const bool present = !eb->cipher.empty() && eb->cipher != "0";
                 j["encrypted_cipher_present"] = present;
-                j["encrypted_balance_known"] = eb.amount_known;
-                if (eb.amount_known) {
-                    j["encrypted_balance"] = std::to_string(eb.decrypted);
+                j["encrypted_balance_known"] = eb->amount_known;
+                if (eb->amount_known) {
+                    j["encrypted_balance"] = std::to_string(eb->decrypted);
                 } else {
                     j["encrypted_balance_unknown"] = true;
                     j["encrypted_balance_state"] = "legacy_upgrade_required";
@@ -3437,7 +3732,8 @@ int main(int argc, char** argv) {
         j["sigma_density"] = density(map.sigma_ones, map.sigma_bits);
         j["sigma_sampled_edges"] = map.sigma_samples;
         j["sigma_exact"] = map.sigma_exact;
-        j["private_spend_max_base_layers"] = PVAC_PRIVATE_SPEND_MAX_BASE_LAYERS;
+        j["private_spend_max_base_layers"] =
+            octra::pvac_upgrade_policy::private_spend_refresh_base_layers;
         j["layers"] = json::array();
         for (const auto& layer : map.layers) {
             json item;
@@ -3803,7 +4099,18 @@ int main(int argc, char** argv) {
                 return;
             }
         }
-        std::vector<std::string> ops = {"standard", "encrypt", "decrypt", "stealth", "claim", "deploy", "call", "program_exec", "multi_exec"};
+        std::vector<std::string> ops = {
+            "standard",
+            "encrypt",
+            "decrypt",
+            "stealth",
+            "claim",
+            "deploy",
+            "program_deploy",
+            "call",
+            "program_exec",
+            "multi_exec"
+        };
         std::vector<std::string> methods(ops.size(), "octra_recommendedFee");
         std::vector<nlohmann::json> params;
         params.reserve(ops.size());
@@ -4072,7 +4379,8 @@ int main(int argc, char** argv) {
             return;
         }
         if (current_eb.key_bound &&
-            pvac.base_layer_count(current_eb.cipher) > PVAC_PRIVATE_SPEND_MAX_BASE_LAYERS) {
+            octra::pvac_upgrade_policy::refresh_before_private_spend(
+                pvac.base_layer_count(current_eb.cipher))) {
             {
                 std::lock_guard<std::mutex> lock(g_mtx);
                 mark_pvac_repair_required(wallet.addr);
@@ -4256,6 +4564,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "event = decrypt stage = proof_start\n");
         uint8_t balance_blinding[32];
         octra::random_bytes(balance_blinding, 32);
+        auto balance_commit =
+            pvac.pedersen_commit(new_bal_value, balance_blinding);
         pvac_zero_proof zkp = nullptr;
         pvac_zero_proof rp_bal = nullptr;
         std::thread t_bound([&]() {
@@ -4269,7 +4579,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "event = decrypt stage = proofs_ready elapsed = %.3f proof_elapsed = %.3f\n",
             now_ts() - decrypt_t0,
             now_ts() - proof_t0);
-        if (!rp_bal || !pvac.verify_bound_range(new_bal_ct, rp_bal)) {
+        if (!rp_bal ||
+            !pvac.verify_bound_range(new_bal_ct, rp_bal, balance_commit)) {
             if (zkp) pvac.free_zero_proof(zkp);
             if (rp_bal) pvac.free_zero_proof(rp_bal);
             pvac.free_cipher(new_bal_ct);
@@ -4496,6 +4807,10 @@ int main(int argc, char** argv) {
         uint8_t balance_range_blind[32];
         octra::random_bytes(delta_range_blind, 32);
         octra::random_bytes(balance_range_blind, 32);
+        auto delta_range_commit =
+            pvac.pedersen_commit(static_cast<uint64_t>(raw), delta_range_blind);
+        auto balance_range_commit =
+            pvac.pedersen_commit(new_val, balance_range_blind);
 
         double stealth_range_t0 = now_ts();
         fprintf(stderr, "event = stealth stage = range_proofs_start\n");
@@ -4513,7 +4828,11 @@ int main(int argc, char** argv) {
         t_send_bound.join();
         fprintf(stderr, "event = stealth stage = range_proofs_ready elapsed = %.3f\n",
             now_ts() - stealth_range_t0);
-        if (!rp_delta || !pvac.verify_bound_range(ct_delta, rp_delta)) {
+        if (!rp_delta ||
+            !pvac.verify_bound_range(
+                ct_delta,
+                rp_delta,
+                delta_range_commit)) {
             if (rp_delta) pvac.free_zero_proof(rp_delta);
             if (rp_bal) pvac.free_zero_proof(rp_bal);
             if (send_zkp) pvac.free_zero_proof(send_zkp);
@@ -4524,7 +4843,11 @@ int main(int argc, char** argv) {
             res.set_content(err_json("local delta range proof self-check failed").dump(), "application/json");
             return;
         }
-        if (!rp_bal || !pvac.verify_bound_range(new_ct, rp_bal)) {
+        if (!rp_bal ||
+            !pvac.verify_bound_range(
+                new_ct,
+                rp_bal,
+                balance_range_commit)) {
             if (rp_delta) pvac.free_zero_proof(rp_delta);
             if (rp_bal) pvac.free_zero_proof(rp_bal);
             if (send_zkp) pvac.free_zero_proof(send_zkp);
@@ -4608,7 +4931,8 @@ int main(int argc, char** argv) {
             octra::derive_view_keypair(g_wallet.sk, view_sk, view_pk);
         }
         refresh_pvac_key_state_readonly();
-        auto scan = octra::fetch_stealth_outputs(g_rpc, stealth_scan_from_epoch(), 5);
+        const int from_epoch = stealth_scan_from_epoch();
+        auto scan = octra::fetch_stealth_outputs(g_rpc, from_epoch, 5);
         json outputs = json::array();
         if (!scan.ok) {
             res.status = 503;
@@ -4643,15 +4967,12 @@ int main(int argc, char** argv) {
                     skipped_decrypt++;
                     continue;
                 }
-                auto cs = octra::compute_claim_secret(shared);
                 json o;
                 o["id"] = out.value("id", 0);
                 o["amount_raw"] = std::to_string(dec->amount);
                 o["epoch"] = out.value("epoch_id", 0);
                 o["sender"] = out.value("sender_addr", "");
                 o["tx_hash"] = out.value("tx_hash", "");
-                o["claim_secret"] = octra::hex_encode(cs.data(), 32);
-                o["blinding"] = octra::base64_encode(dec->blinding.data(), 32);
                 o["claimed"] = false;
                 auto stored_commitment = octra::base64_decode(out.value("amount_commitment", ""));
                 std::string amount_hash = out.value("amount_hash", "");
@@ -4682,7 +5003,7 @@ int main(int argc, char** argv) {
             }
         }
         json j;
-        j["from_epoch"] = stealth_scan_from_epoch();
+        j["from_epoch"] = from_epoch;
         j["raw_count"] = raw_count;
         j["skipped_claimed"] = skipped_claimed;
         j["skipped_tag"] = skipped_tag;
@@ -4979,7 +5300,8 @@ int main(int argc, char** argv) {
             res.set_content(err_json("source required").dump(), "application/json");
             return;
         }
-        auto r = g_rpc.compile_aml(source);
+        bool program = body.value("program", false);
+        auto r = g_rpc.compile_aml(source, program);
         if (!r.ok) {
             res.status = 400;
             std::string safe_err = r.error;
@@ -4996,6 +5318,14 @@ int main(int argc, char** argv) {
         if (r.result.contains("disasm")) j["disasm"] = r.result["disasm"];
         if (r.result.contains("verification")) j["verification"] = r.result["verification"];
         if (r.result.contains("certificate")) j["certificate"] = r.result["certificate"];
+        if (r.result.contains("program_envelope")) j["program_envelope"] = r.result["program_envelope"];
+        if (r.result.contains("deploy_payload")) {
+            j["deploy_payload"] = r.result["deploy_payload"];
+            const std::string payload =
+                r.result["deploy_payload"].get<std::string>();
+            j["program_min_ou"] =
+                std::to_string(program_deploy_required_ou(payload));
+        }
         res.set_content(j.dump(), "application/json");
         } catch (const std::exception& ex) {
             res.status = 500;
@@ -5017,12 +5347,13 @@ int main(int argc, char** argv) {
         }
         auto files = body.value("files", json::array());
         std::string main_path = body.value("main", "main.aml");
+        bool program = body.value("program", false);
         if (files.empty()) {
             res.status = 400;
             res.set_content(err_json("files required").dump(), "application/json");
             return;
         }
-        auto r = g_rpc.compile_aml_multi(files, main_path);
+        auto r = g_rpc.compile_aml_multi(files, main_path, program);
         if (!r.ok) {
             res.status = 400;
             std::string safe_err = r.error;
@@ -5039,6 +5370,14 @@ int main(int argc, char** argv) {
         if (r.result.contains("disasm")) j["disasm"] = r.result["disasm"];
         if (r.result.contains("verification")) j["verification"] = r.result["verification"];
         if (r.result.contains("certificate")) j["certificate"] = r.result["certificate"];
+        if (r.result.contains("program_envelope")) j["program_envelope"] = r.result["program_envelope"];
+        if (r.result.contains("deploy_payload")) {
+            j["deploy_payload"] = r.result["deploy_payload"];
+            const std::string payload =
+                r.result["deploy_payload"].get<std::string>();
+            j["program_min_ou"] =
+                std::to_string(program_deploy_required_ou(payload));
+        }
         res.set_content(j.dump(), "application/json");
         } catch (const std::exception& ex) {
             res.status = 500;
@@ -5090,12 +5429,13 @@ int main(int argc, char** argv) {
         }
         if (!wallet_pin_ok(body, res)) return;
         std::string bytecode = body.value("bytecode", "");
+        std::string deploy_payload = body.value("deploy_payload", "");
         if (bytecode.empty()) {
             res.status = 400;
             res.set_content(err_json("bytecode required").dump(), "application/json");
             return;
         }
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         int nonce = bi.nonce;
         auto ar = g_rpc.compute_contract_address(bytecode, g_wallet.addr, nonce + 1);
         if (!ar.ok) {
@@ -5109,10 +5449,26 @@ int main(int argc, char** argv) {
         tx.to_ = contract_addr;
         tx.amount = "0";
         tx.nonce = nonce + 1;
-        tx.ou = parse_ou(body, "50000000");
+        long long program_min_ou = deploy_payload.empty()
+            ? 200000
+            : program_deploy_required_ou(deploy_payload);
+        std::string required_program_ou = std::to_string(program_min_ou);
+        tx.ou = parse_ou(body, required_program_ou);
+        if (!deploy_payload.empty()) {
+            std::string provided_ou = body.value("ou", "");
+            if (provided_ou.empty()) provided_ou = body.value("fee", "");
+            if (!provided_ou.empty() && provided_ou != required_program_ou) {
+                res.status = 400;
+                res.set_content(
+                    err_json("Program package fee must equal required fee").dump(),
+                    "application/json");
+                return;
+            }
+            tx.ou = required_program_ou;
+        }
         tx.timestamp = now_ts();
-        tx.op_type = "deploy";
-        tx.encrypted_data = bytecode;
+        tx.op_type = deploy_payload.empty() ? "deploy" : "program_deploy";
+        tx.encrypted_data = deploy_payload.empty() ? bytecode : deploy_payload;
         std::string params_str = body.value("params", "");
         if (!params_str.empty()) tx.message = params_str;
         std::string source_text = body.value("source", "");
@@ -5185,7 +5541,7 @@ int main(int argc, char** argv) {
         std::string params_str = "[]";
         if (body.contains("params")) params_str = body["params"].dump();
         std::string amount_str = body.value("amount", "0");
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         int nonce = bi.nonce;
         octra::Transaction tx;
         tx.from = g_wallet.addr;
@@ -5284,7 +5640,7 @@ int main(int argc, char** argv) {
         std::string params_str = "[]";
         if (body.contains("params")) params_str = body["params"].dump();
         std::string amount_str = body.value("amount", "0");
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id.empty() ? addr : circle_id;
@@ -5370,7 +5726,7 @@ int main(int argc, char** argv) {
         }
         json payload;
         payload["calls"] = calls;
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = "multi_exec";
@@ -5779,6 +6135,7 @@ int main(int argc, char** argv) {
                 g_pvac.make_bound_range_proof(ct, static_cast<uint64_t>(value), blinding);
             std::string range_proof = g_pvac.encode_bound_range_proof(proof);
             g_pvac.free_zero_proof(proof);
+            result["amount_commitment"] = amount_commitment_b64;
             result["range_proof"] = range_proof;
             result["proof_kind"] = encrypt_proof;
         } else if (encrypt_proof == "zero_receipt_v1") {
@@ -5841,7 +6198,7 @@ int main(int argc, char** argv) {
 
     svr.Post("/api/circle/fhe/decrypt", [](const httplib::Request& req, httplib::Response& res) {
         WALLET_GUARD
-        PVAC_LIFETIME_GUARD
+        std::shared_lock<std::shared_mutex> wallet_lifetime_lock(g_pvac_lifetime_mtx);
         res.set_header("Access-Control-Allow-Origin", "*");
         if (!g_pvac_ok) {
             res.status = 500;
@@ -5855,6 +6212,7 @@ int main(int argc, char** argv) {
             return;
         }
         if (!wallet_pin_ok(body, res)) return;
+        const std::string caller_addr = circle_wallet_address();
         std::string circle_id = body.value("circle_id", "");
         std::string key_id = body.value("key_id", "");
         std::string intent_id = body.value("intent_id", "");
@@ -5864,7 +6222,7 @@ int main(int argc, char** argv) {
             return;
         }
         std::string error;
-        if (!circle_hfhe_authorize(circle_id, "decrypt_mode", g_wallet.addr, key_id, intent_id, error)) {
+        if (!circle_hfhe_authorize(circle_id, "decrypt_mode", caller_addr, key_id, intent_id, error)) {
             res.status = 403;
             res.set_content(err_json(error).dump(), "application/json");
             return;
@@ -5877,19 +6235,19 @@ int main(int argc, char** argv) {
         }
         auto policy = policy_r.result.value("policy", json::object());
         std::string decrypt_proof = policy.value("decrypt_proof", "none");
+        bool verify_bound = false;
+        bool verify_zero = false;
+        std::string zero_proof;
+        std::string amount_commitment;
         if (decrypt_proof == "bound_zero_v1" || decrypt_proof == "bound_zero_receipt_v1") {
-            std::string zero_proof = body.value("zero_proof", "");
-            std::string amount_commitment = body.value("amount_commitment", "");
+            zero_proof = body.value("zero_proof", "");
+            amount_commitment = body.value("amount_commitment", "");
             if (zero_proof.empty() || amount_commitment.empty()) {
                 res.status = 400;
                 res.set_content(err_json("zero_proof and amount_commitment required by circle hfhe policy").dump(), "application/json");
                 return;
             }
-            if (!circle_verify_bound_with_wallet(body["ciphertext"].get<std::string>(), zero_proof, amount_commitment, error)) {
-                res.status = 400;
-                res.set_content(err_json(error).dump(), "application/json");
-                return;
-            }
+            verify_bound = true;
             if (circle_hfhe_receipt_required(decrypt_proof)) {
                 if (!body.contains("proof_receipt")) {
                     res.status = 400;
@@ -5899,7 +6257,7 @@ int main(int argc, char** argv) {
                 if (!circle_verify_proof_receipt(
                         circle_id,
                         "encrypt",
-                        g_wallet.addr,
+                        caller_addr,
                         key_id,
                         intent_id,
                         decrypt_proof,
@@ -5913,56 +6271,45 @@ int main(int argc, char** argv) {
                     return;
                 }
             }
-        } else if (circle_hfhe_proof_is_range(decrypt_proof)) {
-            std::string range_proof = body.value("range_proof", "");
-            if (range_proof.empty()) {
+        } else if (decrypt_proof == "range_v1") {
+            res.status = 400;
+            res.set_content(
+                err_json("range proof requires verifier receipt").dump(),
+                "application/json");
+            return;
+        } else if (decrypt_proof == "range_receipt_v1") {
+            amount_commitment = body.value("amount_commitment", "");
+            if (amount_commitment.empty() || !body.contains("proof_receipt")) {
                 res.status = 400;
-                res.set_content(err_json("range_proof required by circle hfhe policy").dump(), "application/json");
+                res.set_content(
+                    err_json("amount_commitment and proof_receipt required by circle hfhe policy").dump(),
+                    "application/json");
                 return;
             }
-            if (!circle_verify_range_with_wallet(
+            if (!circle_verify_proof_receipt(
+                    circle_id,
+                    "encrypt",
+                    caller_addr,
+                    key_id,
+                    intent_id,
+                    decrypt_proof,
+                    policy,
                     body["ciphertext"].get<std::string>(),
-                    range_proof,
+                    amount_commitment,
+                    body["proof_receipt"],
                     error)) {
                 res.status = 400;
                 res.set_content(err_json(error).dump(), "application/json");
                 return;
             }
-            if (circle_hfhe_receipt_required(decrypt_proof)) {
-                if (!body.contains("proof_receipt")) {
-                    res.status = 400;
-                    res.set_content(err_json("proof_receipt required by circle hfhe policy").dump(), "application/json");
-                    return;
-                }
-                if (!circle_verify_proof_receipt(
-                        circle_id,
-                        "encrypt",
-                        g_wallet.addr,
-                        key_id,
-                        intent_id,
-                        decrypt_proof,
-                        policy,
-                        body["ciphertext"].get<std::string>(),
-                        "",
-                        body["proof_receipt"],
-                        error)) {
-                    res.status = 400;
-                    res.set_content(err_json(error).dump(), "application/json");
-                    return;
-                }
-            }
         } else if (decrypt_proof == "zero_receipt_v1") {
-            std::string zero_proof = body.value("zero_proof", "");
+            zero_proof = body.value("zero_proof", "");
             if (zero_proof.empty()) {
                 res.status = 400;
                 res.set_content(err_json("zero_proof required by circle hfhe policy").dump(), "application/json");
                 return;
             }
-            if (!circle_verify_zero_with_wallet(body["ciphertext"].get<std::string>(), zero_proof, error)) {
-                res.status = 400;
-                res.set_content(err_json(error).dump(), "application/json");
-                return;
-            }
+            verify_zero = true;
             if (!body.contains("proof_receipt")) {
                 res.status = 400;
                 res.set_content(err_json("proof_receipt required by circle hfhe policy").dump(), "application/json");
@@ -5971,7 +6318,7 @@ int main(int argc, char** argv) {
             if (!circle_verify_proof_receipt(
                     circle_id,
                     "encrypt",
-                    g_wallet.addr,
+                    caller_addr,
                     key_id,
                     intent_id,
                     decrypt_proof,
@@ -5989,22 +6336,67 @@ int main(int argc, char** argv) {
             res.set_content(err_json("unsupported circle hfhe decrypt proof policy").dump(), "application/json");
             return;
         }
-        std::string b64 = body["ciphertext"].get<std::string>();
-        auto raw = octra::base64_decode(b64);
-        if (raw.empty()) {
-            res.status = 400;
-            res.set_content(err_json("invalid base64").dump(), "application/json");
+        wallet_lifetime_lock.unlock();
+        octra::PvacBridge pvac;
+        std::string wallet_addr;
+        uint64_t wallet_generation = 0;
+        if (!circle_verifier_pvac(
+                pvac,
+                wallet_addr,
+                wallet_generation,
+                error)) {
+            res.status = 500;
+            res.set_content(err_json(error).dump(), "application/json");
             return;
         }
-        pvac_cipher ct = g_pvac.deserialize_cipher(raw.data(), raw.size());
-        if (!ct) {
+        if (wallet_addr != caller_addr) {
+            res.status = 409;
+            res.set_content(
+                err_json("wallet changed during circle authorization").dump(),
+                "application/json");
+            return;
+        }
+        if (verify_bound &&
+            !circle_verify_bound(
+                pvac,
+                body["ciphertext"].get<std::string>(),
+                zero_proof,
+                amount_commitment,
+                error)) {
             res.status = 400;
-            res.set_content(err_json("invalid ciphertext").dump(), "application/json");
+            res.set_content(err_json(error).dump(), "application/json");
+            return;
+        }
+        if (verify_zero &&
+            !circle_verify_zero(
+                pvac,
+                body["ciphertext"].get<std::string>(),
+                zero_proof,
+                error)) {
+            res.status = 400;
+            res.set_content(err_json(error).dump(), "application/json");
+            return;
+        }
+        if (!circle_wallet_current(wallet_addr, wallet_generation)) {
+            res.status = 409;
+            res.set_content(
+                err_json("wallet changed during circle verification").dump(),
+                "application/json");
+            return;
+        }
+        pvac_cipher ct = nullptr;
+        if (!circle_verifier_cipher(
+                pvac,
+                body["ciphertext"].get<std::string>(),
+                ct,
+                error)) {
+            res.status = 400;
+            res.set_content(err_json(error).dump(), "application/json");
             return;
         }
         uint64_t lo = 0, hi = 0;
-        g_pvac.decrypt_fp(ct, lo, hi);
-        g_pvac.free_cipher(ct);
+        pvac.decrypt_fp(ct, lo, hi);
+        pvac.free_cipher(ct);
         int64_t val;
         if (hi == 0) {
             val = static_cast<int64_t>(lo);
@@ -6016,6 +6408,13 @@ int main(int argc, char** argv) {
         }
         json result;
         result["value"] = val;
+        if (!circle_wallet_current(wallet_addr, wallet_generation)) {
+            res.status = 409;
+            res.set_content(
+                err_json("wallet changed during circle decryption").dump(),
+                "application/json");
+            return;
+        }
         res.set_content(result.dump(), "application/json");
     });
 
@@ -6211,7 +6610,7 @@ int main(int argc, char** argv) {
 
     svr.Post("/api/circle/fhe/verify_zero", [](const httplib::Request& req, httplib::Response& res) {
         WALLET_GUARD
-        PVAC_LIFETIME_GUARD
+        std::shared_lock<std::shared_mutex> wallet_lifetime_lock(g_pvac_lifetime_mtx);
         res.set_header("Access-Control-Allow-Origin", "*");
         if (!g_pvac_ok) {
             res.status = 500;
@@ -6224,11 +6623,12 @@ int main(int argc, char** argv) {
             res.set_content(err_json("circle_id, ciphertext and zero_proof required").dump(), "application/json");
             return;
         }
+        const std::string caller_addr = circle_wallet_address();
         std::string error;
         if (!circle_hfhe_authorize(
                 body["circle_id"].get<std::string>(),
                 "verify_zero_mode",
-                g_wallet.addr,
+                caller_addr,
                 body.value("key_id", ""),
                 body.value("intent_id", ""),
                 error)) {
@@ -6253,7 +6653,7 @@ int main(int argc, char** argv) {
             if (!circle_verify_proof_receipt(
                     body["circle_id"].get<std::string>(),
                     "encrypt",
-                    g_wallet.addr,
+                    caller_addr,
                     body.value("key_id", ""),
                     body.value("intent_id", ""),
                     encrypt_proof,
@@ -6267,7 +6667,28 @@ int main(int argc, char** argv) {
                 return;
             }
         }
-        bool ok = circle_verify_zero_with_wallet(
+        wallet_lifetime_lock.unlock();
+        octra::PvacBridge pvac;
+        std::string wallet_addr;
+        uint64_t wallet_generation = 0;
+        if (!circle_public_verifier_pvac(
+                pvac,
+                wallet_addr,
+                wallet_generation,
+                error)) {
+            res.status = 500;
+            res.set_content(err_json(error).dump(), "application/json");
+            return;
+        }
+        if (wallet_addr != caller_addr) {
+            res.status = 409;
+            res.set_content(
+                err_json("wallet changed during circle authorization").dump(),
+                "application/json");
+            return;
+        }
+        bool ok = circle_verify_zero(
+            pvac,
             body["ciphertext"].get<std::string>(),
             body["zero_proof"].get<std::string>(),
             error);
@@ -6276,85 +6697,24 @@ int main(int argc, char** argv) {
             res.set_content(err_json(error).dump(), "application/json");
             return;
         }
+        if (!circle_wallet_current(wallet_addr, wallet_generation)) {
+            res.status = 409;
+            res.set_content(
+                err_json("wallet changed during circle verification").dump(),
+                "application/json");
+            return;
+        }
         res.set_content(json({{"ok", ok}}).dump(), "application/json");
     });
 
-    svr.Post("/api/circle/fhe/verify_range", [](const httplib::Request& req, httplib::Response& res) {
-        WALLET_GUARD
-        PVAC_LIFETIME_GUARD
-        res.set_header("Access-Control-Allow-Origin", "*");
-        if (!g_pvac_ok) {
-            res.status = 500;
-            res.set_content(err_json("pvac not available").dump(), "application/json");
-            return;
-        }
-        auto body = json::parse(req.body, nullptr, false);
-        if (body.is_discarded() || !body.contains("circle_id") || !body.contains("ciphertext") || !body.contains("range_proof")) {
-            res.status = 400;
-            res.set_content(err_json("circle_id, ciphertext and range_proof required").dump(), "application/json");
-            return;
-        }
-        std::string circle_id = body["circle_id"].get<std::string>();
-        std::string key_id = body.value("key_id", "");
-        std::string intent_id = body.value("intent_id", "");
-        std::string error;
-        if (!circle_hfhe_authorize(
-                circle_id,
-                "verify_range_mode",
-                g_wallet.addr,
-                key_id,
-                intent_id,
-                error)) {
-            res.status = 403;
-            res.set_content(err_json(error).dump(), "application/json");
-            return;
-        }
-        auto policy_r = circle_hfhe_policy_auth_rpc(circle_id);
-        if (!policy_r.ok) {
-            res.status = 400;
-            res.set_content(err_json(policy_r.error.empty() ? "circle hfhe policy read failed" : policy_r.error).dump(), "application/json");
-            return;
-        }
-        auto policy = policy_r.result.value("policy", json::object());
-        std::string encrypt_proof = policy.value("encrypt_proof", "bound_zero_v1");
-        if (encrypt_proof == "range_receipt_v1") {
-            if (!body.contains("proof_receipt")) {
-                res.status = 400;
-                res.set_content(err_json("proof_receipt required by circle hfhe policy").dump(), "application/json");
-                return;
-            }
-            if (!circle_verify_proof_receipt(
-                    circle_id,
-                    "encrypt",
-                    g_wallet.addr,
-                    key_id,
-                    intent_id,
-                    encrypt_proof,
-                    policy,
-                    body["ciphertext"].get<std::string>(),
-                    "",
-                    body["proof_receipt"],
-                    error)) {
-                res.status = 400;
-                res.set_content(err_json(error).dump(), "application/json");
-                return;
-            }
-        }
-        bool ok = circle_verify_range_with_wallet(
-            body["ciphertext"].get<std::string>(),
-            body["range_proof"].get<std::string>(),
-            error);
-        if (!ok && !error.empty()) {
-            res.status = 400;
-            res.set_content(err_json(error).dump(), "application/json");
-            return;
-        }
-        res.set_content(json({{"ok", ok}}).dump(), "application/json");
+    svr.Post("/api/circle/fhe/verify_range", [](const httplib::Request&, httplib::Response& res) {
+        res.status = 410;
+        res.set_content(err_json("unbound range verification disabled").dump(), "application/json");
     });
 
     svr.Post("/api/circle/fhe/verify_bound", [](const httplib::Request& req, httplib::Response& res) {
         WALLET_GUARD
-        PVAC_LIFETIME_GUARD
+        std::shared_lock<std::shared_mutex> wallet_lifetime_lock(g_pvac_lifetime_mtx);
         res.set_header("Access-Control-Allow-Origin", "*");
         if (!g_pvac_ok) {
             res.status = 500;
@@ -6367,11 +6727,12 @@ int main(int argc, char** argv) {
             res.set_content(err_json("circle_id, ciphertext, zero_proof and amount_commitment required").dump(), "application/json");
             return;
         }
+        const std::string caller_addr = circle_wallet_address();
         std::string error;
         if (!circle_hfhe_authorize(
                 body["circle_id"].get<std::string>(),
                 "verify_bound_mode",
-                g_wallet.addr,
+                caller_addr,
                 body.value("key_id", ""),
                 body.value("intent_id", ""),
                 error)) {
@@ -6396,7 +6757,7 @@ int main(int argc, char** argv) {
             if (!circle_verify_proof_receipt(
                     body["circle_id"].get<std::string>(),
                     "encrypt",
-                    g_wallet.addr,
+                    caller_addr,
                     body.value("key_id", ""),
                     body.value("intent_id", ""),
                     encrypt_proof,
@@ -6410,7 +6771,28 @@ int main(int argc, char** argv) {
                 return;
             }
         }
-        bool ok = circle_verify_bound_with_wallet(
+        wallet_lifetime_lock.unlock();
+        octra::PvacBridge pvac;
+        std::string wallet_addr;
+        uint64_t wallet_generation = 0;
+        if (!circle_public_verifier_pvac(
+                pvac,
+                wallet_addr,
+                wallet_generation,
+                error)) {
+            res.status = 500;
+            res.set_content(err_json(error).dump(), "application/json");
+            return;
+        }
+        if (wallet_addr != caller_addr) {
+            res.status = 409;
+            res.set_content(
+                err_json("wallet changed during circle authorization").dump(),
+                "application/json");
+            return;
+        }
+        bool ok = circle_verify_bound(
+            pvac,
             body["ciphertext"].get<std::string>(),
             body["zero_proof"].get<std::string>(),
             body["amount_commitment"].get<std::string>(),
@@ -6418,6 +6800,13 @@ int main(int argc, char** argv) {
         if (!ok && !error.empty()) {
             res.status = 400;
             res.set_content(err_json(error).dump(), "application/json");
+            return;
+        }
+        if (!circle_wallet_current(wallet_addr, wallet_generation)) {
+            res.status = 409;
+            res.set_content(
+                err_json("wallet changed during circle verification").dump(),
+                "application/json");
             return;
         }
         res.set_content(json({{"ok", ok}}).dump(), "application/json");
@@ -7577,7 +7966,7 @@ int main(int argc, char** argv) {
         }
         json payload;
         payload["code_b64"] = code_b64;
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -7650,7 +8039,7 @@ int main(int argc, char** argv) {
             return;
         }
         const std::string default_ou = std::to_string(circle_asset_ou_from_b64_len(ciphertext_b64.size()));
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -7785,7 +8174,7 @@ int main(int argc, char** argv) {
             return;
         }
         const std::string default_ou = std::to_string(circle_asset_ou_from_b64_len(ciphertext_b64.size()));
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -7854,7 +8243,7 @@ int main(int argc, char** argv) {
             res.set_content(err_json("provide exactly one of slot_ref or state_ref").dump(), "application/json");
             return;
         }
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -7896,7 +8285,7 @@ int main(int argc, char** argv) {
             res.set_content(err_json("circle_id and state_ref required").dump(), "application/json");
             return;
         }
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -7963,7 +8352,7 @@ int main(int argc, char** argv) {
         std::string activate_after_epoch = read_optional_scalar("activate_after_epoch");
         std::string expire_after_epoch = read_optional_scalar("expire_after_epoch");
         const std::string default_ou = std::to_string(circle_asset_ou_from_b64_len(ciphertext_b64.size()));
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8042,7 +8431,7 @@ int main(int argc, char** argv) {
         std::string activate_after_epoch = read_optional_scalar("activate_after_epoch");
         std::string expire_after_epoch = read_optional_scalar("expire_after_epoch");
         const std::string default_ou = std::to_string(circle_asset_ou_from_b64_len(ciphertext_b64.size()));
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8112,7 +8501,7 @@ int main(int argc, char** argv) {
         if (body.contains("require_response_ciphertext")) payload["require_response_ciphertext"] = body["require_response_ciphertext"];
         if (body.contains("require_external_receipt")) payload["require_external_receipt"] = body["require_external_receipt"];
         if (body.contains("accepted_result_codes")) payload["accepted_result_codes"] = body["accepted_result_codes"];
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8164,7 +8553,7 @@ int main(int argc, char** argv) {
         if (body.contains("require_receipt_transport_binding")) payload["require_receipt_transport_binding"] = body["require_receipt_transport_binding"];
         if (body.contains("encrypt_proof")) payload["encrypt_proof"] = body["encrypt_proof"];
         if (body.contains("decrypt_proof")) payload["decrypt_proof"] = body["decrypt_proof"];
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8202,7 +8591,7 @@ int main(int argc, char** argv) {
         payload["key_id"] = key_id;
         if (body.contains("activate_after_epoch")) payload["activate_after_epoch"] = body["activate_after_epoch"];
         if (body.contains("expire_after_epoch")) payload["expire_after_epoch"] = body["expire_after_epoch"];
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8239,7 +8628,7 @@ int main(int argc, char** argv) {
         json payload = json::object();
         payload["key_id"] = key_id;
         payload["expire_after_epoch"] = body["expire_after_epoch"];
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8275,7 +8664,7 @@ int main(int argc, char** argv) {
         }
         json payload = json::object();
         payload["key_id"] = key_id;
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8311,7 +8700,7 @@ int main(int argc, char** argv) {
         }
         json payload = json::object();
         payload["key_id"] = key_id;
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8351,7 +8740,7 @@ int main(int argc, char** argv) {
         if (body.contains("expire_after_epoch")) payload["expire_after_epoch"] = body["expire_after_epoch"];
         payload["revoked"] = body.value("revoked", false);
         payload["erased"] = body.value("erased", false);
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8410,7 +8799,7 @@ int main(int argc, char** argv) {
         payload["claim_epoch"] = claim_epoch;
         payload["claim_expiry_epoch"] = claim_expiry_epoch;
         payload["signature"] = signature;
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8482,7 +8871,7 @@ int main(int argc, char** argv) {
         payload["reason"] = reason;
         payload["signature"] = signature;
         if (!related_key_id.empty()) payload["related_key_id"] = related_key_id;
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8537,7 +8926,7 @@ int main(int argc, char** argv) {
             res.set_content(err_json("circle_id, intent_id, expiry_epoch, relay_policy_hash, payload_hash, max_response_bytes, and fee_budget required").dump(), "application/json");
             return;
         }
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8602,7 +8991,7 @@ int main(int argc, char** argv) {
             res.set_content(err_json("circle_id, intent_id, relay_id, ingress_nonce, response_payload_hash, response_size_bytes, and signature required").dump(), "application/json");
             return;
         }
-        auto bi = get_nonce_balance();
+        auto bi = get_nonce_balance_for(g_wallet.addr);
         octra::Transaction tx;
         tx.from = g_wallet.addr;
         tx.to_ = circle_id;
@@ -8692,7 +9081,12 @@ int main(int argc, char** argv) {
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_header("Cache-Control", "no-store");
         res.set_header("X-Content-Type-Options", "nosniff");
-        res.set_content(body, content_type.c_str());
+        if (serve_inline_allowed(media_type, req)) {
+            res.set_content(body, content_type.c_str());
+        } else {
+            res.set_header("Content-Disposition", "attachment");
+            res.set_content(body, "application/octet-stream");
+        }
     });
 
     svr.Get("/api/contract/receipt", [](const httplib::Request& req, httplib::Response& res) {
@@ -8896,8 +9290,7 @@ int main(int argc, char** argv) {
             g_rpc.set_url(g_wallet.rpc_url);
             clear_fee_cache();
             if (old_rpc != g_wallet.rpc_url) {
-                g_txcache.clear();
-                g_txcache.put("meta:rpc_url", g_wallet.rpc_url);
+                g_txcache.ensure_identity(TXCACHE_SCHEMA, g_wallet.rpc_url);
                 history_runtime_clear_all();
                 token_history_runtime_clear_all();
                 cache_cleared = true;
