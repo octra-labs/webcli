@@ -1,0 +1,28 @@
+interface IXNS1 {
+  fn mint(to: address, creator: address, metadata_uri: string, royalty_bps: u128): u128
+  fn transfer(to: address, token_id: u128): bool
+  fn transfer_from(from: address, to: address, token_id: u128): bool
+  fn approve(approved: address, token_id: u128): bool
+  fn revoke_approval(token_id: u128): bool
+  fn set_operator(operator: address, approved: bool): bool
+  fn transfer_ownership(new_owner: address): bool
+  fn set_provenance_hash(hash: string): bool
+  fn add_circle_resource(token_id: u128, uri: string, access: string): u128
+  fn set_circle_resource(token_id: u128, resource_id: u128, uri: string, access: string): bool
+  fn clear_circle_resource(token_id: u128, resource_id: u128): bool
+  fn owner_of(token_id: u128): address
+  fn creator_of(token_id: u128): address
+  fn royalty_of(token_id: u128): u128
+  fn token_uri(token_id: u128): string
+  fn balance_of(addr: address): u128
+  fn get_approved(token_id: u128): address
+  fn is_approved_or_owner(token_id: u128, addr: address): bool
+  fn total_supply(): u128
+  fn symbol(): string
+  fn get_provenance_hash(): string
+  fn token_circle_count(token_id: u128): u128
+  fn token_circle_uri(token_id: u128, resource_id: u128): string
+  fn get_token_info(token_id: u128): string
+  fn get_token_circle_info(token_id: u128, resource_id: u128): string
+  fn get_contract_info(): string
+}
