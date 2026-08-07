@@ -153,6 +153,65 @@ const CircleBridgePolicy = (() => {
     }
   }
 
+  const prepareComputeRequest = (rpcUrl, payload, maxBodyBytes) => {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('compute request rejected')
+    }
+    const keys = Object.keys(payload).sort()
+    const allowedKeys = payload.method === 'POST'
+      ? ['body', 'method', 'path']
+      : ['method', 'path']
+    if (keys.join(',') !== allowedKeys.sort().join(',')) {
+      throw new Error('compute request fields differ')
+    }
+    if (payload.method !== 'GET' && payload.method !== 'POST') {
+      throw new Error('compute request method refused')
+    }
+    const path = payload.path
+    const route = typeof path === 'string'
+      ? path.match(/^\/compute\/[A-Za-z0-9_-]{1,64}\/(health|v1\/capability|v1\/infer|api\/program\/info|api\/program\/view)$/)
+      : null
+    if (!route || path.length > 192) {
+      throw new Error('compute request path refused')
+    }
+    const getRoute = route[1] === 'health'
+      || route[1] === 'v1/capability'
+      || route[1] === 'api/program/info'
+    const postRoute = route[1] === 'v1/infer' || route[1] === 'api/program/view'
+    if ((payload.method === 'GET' && !getRoute) || (payload.method === 'POST' && !postRoute)) {
+      throw new Error('compute request route refused')
+    }
+    let rpc
+    try {
+      rpc = new URL(rpcUrl)
+    } catch (_) {
+      throw new Error('compute rpc origin refused')
+    }
+    if (
+      rpc.protocol !== 'https:'
+      || rpc.username
+      || rpc.password
+      || rpc.port && rpc.port !== '443'
+    ) {
+      throw new Error('compute rpc origin refused')
+    }
+    const body = payload.method === 'POST' ? payload.body : null
+    if (
+      payload.method === 'POST'
+      && (!body || typeof body !== 'object' || Array.isArray(body))
+    ) {
+      throw new Error('compute request body refused')
+    }
+    if (body && new TextEncoder().encode(JSON.stringify(body)).length > maxBodyBytes) {
+      throw new Error('compute request body exceeds limit')
+    }
+    return {
+      body,
+      method: payload.method,
+      url: new URL(path, rpc.origin).toString()
+    }
+  }
+
   return Object.freeze({
     deployPayload,
     validCircleId,
@@ -163,7 +222,8 @@ const CircleBridgePolicy = (() => {
     canonicalAssetPath,
     canonicalContentType,
     canonicalBase64,
-    preparePlainAsset
+    preparePlainAsset,
+    prepareComputeRequest
   })
 })()
 

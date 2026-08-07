@@ -13,9 +13,12 @@ const keyCache = new Map()
 const decryptedCache = new Map()
 const bridgeGrantState = new Map()
 const bridgeCreatedCircleIds = new Map()
+const maxFrameScripts = 64
+const maxFrameScriptBytes = 4 * 1024 * 1024
 let activeBridgeWindow = null
 let activeBridgeContext = null
 let expandedPreviewOpen = false
+let publicPreludeSourcePromise = null
 
 const bytesToBase64 = (bytes) => {
   let text = ''
@@ -86,6 +89,19 @@ const isTextContent = (contentType) => (
   || contentType.includes('xml')
   || contentType.includes('svg')
 )
+
+const mediaTypeOf = (contentType) => (contentType || '').split(';')[0].trim().toLowerCase()
+
+const isStylesheetContentType = (contentType) => mediaTypeOf(contentType) === 'text/css'
+
+const isScriptContentType = (contentType) => [
+  'application/javascript',
+  'text/javascript',
+  'application/ecmascript',
+  'text/ecmascript',
+  'application/x-javascript',
+  'module'
+].includes(mediaTypeOf(contentType))
 
 const isBlockedRemoteSpec = (spec) => /^(https?:)?\/\//i.test(spec) || /^javascript:/i.test(spec) || /^mailto:/i.test(spec)
 
@@ -379,8 +395,10 @@ const postBridgeReply = (target, token, id, ok, result, error) => {
 
 const bridgeMethodsForInfo = (info) => [
   'circle.context',
+  'circle.asset',
   'circle.deploy',
   'circle.asset_plain',
+  'compute.request',
   'program.info',
   'program.view',
   'program.call',
@@ -460,6 +478,12 @@ const bridgeGrantTextOf = (context, method) => {
   if (method === 'circle.asset_plain') {
     return `allow this circle to upload public assets to its current or newly created circles for this session?\n\n${context.uri}`
   }
+  if (method === 'circle.asset') {
+    return `allow this public circle to read its own bounded assets for this session?\n\n${context.uri}`
+  }
+  if (method === 'compute.request') {
+    return `allow this public circle to use bounded compute through the configured RPC origin for this session?\n\n${context.uri}`
+  }
   if (method === 'program.info' || method === 'program.view' || method === 'program.storage' || method === 'program.abi') {
     return `allow this circle to read onchain program state for this session?\n\n${context.uri}`
   }
@@ -528,8 +552,10 @@ const bridgeGrantTextOf = (context, method) => {
 
 const bridgeGrantScopeOf = (method) => {
   if (method === 'circle.context') return 'circle.context'
+  if (method === 'circle.asset') return 'circle.asset.read'
   if (method === 'circle.deploy') return 'circle.deploy'
   if (method === 'circle.asset_plain') return 'circle.asset.write'
+  if (method === 'compute.request') return 'compute.read'
   if (method === 'program.call') return 'program.call'
   if (method === 'program.info' || method === 'program.view' || method === 'program.storage' || method === 'program.abi') return 'program.read'
   if (method === 'sealed_slot.put' || method === 'sealed_state.put' || method === 'slot_policy.put' || method === 'state_policy.put' || method === 'state_descriptor.put' || method === 'balance_cell.put' || method === 'register_cell.put' || method === 'outbox.open' || method === 'ingress.commit') return 'circle.write'
@@ -559,6 +585,9 @@ const ensureBridgeGrant = async (method) => {
     throw new Error('sealed bridge inactive')
   }
   if (method === 'circle.context') {
+    return
+  }
+  if (method === 'circle.asset') {
     return
   }
   const grantKey = `${activeBridgeContext.circle_id}:${bridgeGrantScopeOf(method)}`
@@ -605,6 +634,55 @@ const bridgeResultOf = async (method, payload = {}) => {
       throw new Error(`${method} cancelled`)
     }
     return postJson(path, { ...payload, circle_id: circleId, pin })
+  }
+  if (method === 'circle.asset') {
+    if (activeBridgeContext.privacy_class !== 'public') {
+      throw new Error('plain asset access requires a public circle')
+    }
+    if (
+      !payload
+      || typeof payload !== 'object'
+      || Array.isArray(payload)
+      || Object.keys(payload).join(',') !== 'path'
+    ) {
+      throw new Error('circle asset request fields differ')
+    }
+    const path = CircleBridgePolicy.canonicalAssetPath(payload.path)
+    if (!path || path === '/') {
+      throw new Error('circle asset path refused')
+    }
+    const asset = await fetchJson(
+      `/api/circle/asset?circle_id=${encodeURIComponent(bridgeCircleId)}&path=${encodeURIComponent(path)}`)
+    const contentType = CircleBridgePolicy.canonicalContentType(asset?.content_type)
+    if (
+      !asset
+      || asset.circle_id !== bridgeCircleId
+      || asset.canonical_path !== path
+      || !contentType
+      || typeof asset.body_b64 !== 'string'
+      || asset.body_b64.length > 4 * Math.ceil((1024 * 1024) / 3)
+    ) {
+      throw new Error('circle asset response invalid')
+    }
+    let bytes
+    try {
+      bytes = base64ToBytes(asset.body_b64)
+    } catch (_) {
+      throw new Error('circle asset body invalid')
+    }
+    if (bytes.length > 1024 * 1024) {
+      throw new Error('circle asset response exceeds limit')
+    }
+    if (bytesToBase64(bytes) !== asset.body_b64) {
+      throw new Error('circle asset body invalid')
+    }
+    return {
+      body_b64: bytesToBase64(bytes),
+      body_sha256: await sha256Hex(bytes),
+      content_type: contentType,
+      path,
+      size_bytes: bytes.length
+    }
   }
   if (method === 'circle.deploy') {
     const profile = payload.profile || 'public'
@@ -664,6 +742,24 @@ const bridgeResultOf = async (method, payload = {}) => {
       chunks: plan.chunks.length,
       chunk_tx_hashes: uploaded
     }
+  }
+  if (method === 'compute.request') {
+    if (activeBridgeContext.privacy_class !== 'public') {
+      throw new Error('compute access requires a public circle')
+    }
+    const wallet = await fetchJson('/api/wallet')
+    const prepared = CircleBridgePolicy.prepareComputeRequest(
+      wallet.rpc_url,
+      payload,
+      64 * 1024)
+    const localRequest = {
+      method: prepared.method,
+      path: new URL(prepared.url).pathname
+    }
+    if (prepared.body !== null) {
+      localRequest.body = prepared.body
+    }
+    return postJson('/api/circle/compute', localRequest)
   }
   if (method === 'program.info') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -1172,6 +1268,38 @@ const makeDataUrl = (contentType, bytes) => `data:${contentType};base64,${bytesT
 
 const loadPlainAsset = async (circleId, path) => fetchJson(`/api/circle/asset?circle_id=${encodeURIComponent(circleId)}&path=${encodeURIComponent(normalizeAssetPath(path))}`)
 
+const loadPublicMaterializedAsset = async (circleId, path) => {
+  const normalizedPath = normalizeAssetPath(path)
+  const asset = await loadPlainAsset(circleId, normalizedPath)
+  const contentType = CircleBridgePolicy.canonicalContentType(asset?.content_type)
+  const maxBytes = 1024 * 1024
+  if (
+    !asset
+    || asset.circle_id !== circleId
+    || asset.canonical_path !== normalizedPath
+    || !contentType
+    || typeof asset.body_b64 !== 'string'
+    || asset.body_b64.length > 4 * Math.ceil(maxBytes / 3)
+  ) {
+    throw new Error(`circle subresource response invalid: ${normalizedPath}`)
+  }
+  let bytes
+  try {
+    bytes = base64ToBytes(asset.body_b64)
+  } catch (_) {
+    throw new Error(`circle subresource body invalid: ${normalizedPath}`)
+  }
+  if (bytes.length > maxBytes || bytesToBase64(bytes) !== asset.body_b64) {
+    throw new Error(`circle subresource body invalid: ${normalizedPath}`)
+  }
+  return {
+    ...asset,
+    content_type: contentType,
+    bytes,
+    text: isTextContent(contentType) ? bytesToText(bytes) : ''
+  }
+}
+
 const loadSealedAsset = async (circleId, path, passphrase, versionToken = '') => {
   const normalizedPath = normalizeAssetPath(path)
   const cacheKey = `${circleId}:${versionToken}:${normalizedPath}:${passphrase}`
@@ -1206,7 +1334,7 @@ const prependHeadMeta = (doc, name, value, attrName) => {
   head.prepend(meta)
 }
 
-const materializeCss = async (circleId, cssPath, cssText, passphrase, versionToken = '', seen = new Set()) => {
+const materializeCssWithLoader = async (circleId, cssPath, cssText, loadAsset, seen = new Set()) => {
   const cssKey = `${circleId}:${cssPath}`
   if (seen.has(cssKey)) return ''
   const nextSeen = new Set(seen)
@@ -1221,8 +1349,11 @@ const materializeCss = async (circleId, cssPath, cssText, passphrase, versionTok
       : await (async () => {
           const resolved = resolveCirclePath(cssPath, source)
           if (!resolved || isDataSpec(resolved) || isBlockedRemoteSpec(resolved)) return ''
-          const imported = await loadSealedAsset(circleId, resolved, passphrase, versionToken)
-          return await materializeCss(circleId, resolved, imported.text, passphrase, versionToken, nextSeen)
+          const imported = await loadAsset(resolved)
+          if (!isStylesheetContentType(imported.content_type)) {
+            throw new Error(`circle stylesheet content type refused: ${resolved}`)
+          }
+          return await materializeCssWithLoader(circleId, resolved, imported.text, loadAsset, nextSeen)
         })()
     result = `${result.slice(0, importMatch.index)}${replacement}${result.slice(importMatch.index + importMatch[0].length)}`
     importRegex.lastIndex = 0
@@ -1239,7 +1370,7 @@ const materializeCss = async (circleId, cssPath, cssText, passphrase, versionTok
       if (!resolved || isBlockedRemoteSpec(resolved)) {
         replacement = 'url("data:,")'
       } else {
-        const asset = await loadSealedAsset(circleId, resolved, passphrase, versionToken)
+        const asset = await loadAsset(resolved)
         replacement = `url("${makeDataUrl(asset.content_type, asset.bytes)}")`
       }
     }
@@ -1249,24 +1380,43 @@ const materializeCss = async (circleId, cssPath, cssText, passphrase, versionTok
   return result
 }
 
+const materializeCss = async (circleId, cssPath, cssText, passphrase, versionToken = '', seen = new Set()) => (
+  materializeCssWithLoader(
+    circleId,
+    cssPath,
+    cssText,
+    (path) => loadSealedAsset(circleId, path, passphrase, versionToken),
+    seen)
+)
+
+const removeDocumentCsp = (doc) => {
+  doc.querySelectorAll('meta[http-equiv]').forEach((node) => {
+    const directive = (node.getAttribute('http-equiv') || '').trim().toLowerCase()
+    if (directive === 'content-security-policy') {
+      node.remove()
+    }
+  })
+}
+
 const injectSealedPolicy = (doc) => {
+  removeDocumentCsp(doc)
   doc.querySelectorAll('base').forEach((node) => node.remove())
   prependHeadMeta(
     doc,
     'Content-Security-Policy',
-    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; manifest-src 'none'; prefetch-src 'none'; navigate-to 'none'",
+    "default-src 'none'; script-src data:; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; manifest-src 'none'",
     'http-equiv'
   )
   prependHeadMeta(doc, 'referrer', 'no-referrer', 'name')
 }
 
 const injectPublicPolicy = (doc) => {
-  const origin = window.location.origin
+  removeDocumentCsp(doc)
   doc.querySelectorAll('base').forEach((node) => node.remove())
   prependHeadMeta(
     doc,
     'Content-Security-Policy',
-    `default-src 'none'; script-src 'unsafe-inline' ${origin}; style-src 'unsafe-inline' ${origin}; img-src ${origin} data: blob:; font-src ${origin} data:; media-src ${origin} data: blob:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; manifest-src 'none'; prefetch-src 'none'; navigate-to 'none'`,
+    "default-src 'none'; script-src data:; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; manifest-src 'none'",
     'http-equiv'
   )
   prependHeadMeta(doc, 'referrer', 'no-referrer', 'name')
@@ -1495,68 +1645,6 @@ const sealedPreludeSource = (circleId, htmlPath, bridgeToken) => {
 })();`
 }
 
-const publicPreludeSource = (circleId, htmlPath, bridgeToken) => {
-  const contextJson = JSON.stringify({
-    circle_id: circleId,
-    path: normalizeAssetPath(htmlPath),
-    uri: circleUriOf(circleId, htmlPath)
-  })
-  const tokenJson = JSON.stringify(bridgeToken)
-  return `(function () {
-  const context = ${contextJson};
-  const bridgeToken = ${tokenJson};
-  const waiters = new Map();
-  let nextRequestId = 0;
-  window.OctraCircle = Object.freeze({
-    context: Object.freeze(context),
-    request: function (method, payload) {
-      return new Promise(function (resolve, reject) {
-        const id = 'req_' + String(++nextRequestId);
-        waiters.set(id, { resolve: resolve, reject: reject });
-        parent.postMessage({
-          type: 'octra.circle.bridge.request',
-          token: bridgeToken,
-          id: id,
-          method: method,
-          payload: payload || {}
-        }, '*');
-      });
-    },
-    navigate: function (uri) {
-      parent.postMessage({
-        type: 'octra.circle.navigate',
-        token: bridgeToken,
-        uri: uri
-      }, '*');
-    }
-  });
-  window.addEventListener('message', function (event) {
-    const data = event.data;
-    if (!data || data.token !== bridgeToken || data.type !== 'octra.circle.bridge.reply' || !data.id || !waiters.has(data.id)) {
-      return;
-    }
-    const waiter = waiters.get(data.id);
-    waiters.delete(data.id);
-    if (data.ok) {
-      waiter.resolve(data.result);
-      return;
-    }
-    waiter.reject(new Error(data.error || 'bridge request failed'));
-  });
-  document.addEventListener('click', function (event) {
-    const anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-    if (!anchor) {
-      return;
-    }
-    const href = anchor.getAttribute('href') || '';
-    if (href.startsWith('oct://')) {
-      event.preventDefault();
-      window.OctraCircle.navigate(href);
-    }
-  }, true);
-})();`
-}
-
 const installSealedPrelude = (doc, circleId, htmlPath, bridgeToken) => {
   const head = ensureDocumentHead(doc)
   const script = doc.createElement('script')
@@ -1564,11 +1652,88 @@ const installSealedPrelude = (doc, circleId, htmlPath, bridgeToken) => {
   head.prepend(script)
 }
 
-const installPublicPrelude = (doc, circleId, htmlPath, bridgeToken) => {
+const loadPublicPreludeSource = async () => {
+  if (!publicPreludeSourcePromise) {
+    publicPreludeSourcePromise = (async () => {
+      const response = await fetch(`${runtimeBase}/circle_public_prelude.js?v=1`, {
+        cache: 'no-store',
+        credentials: 'same-origin',
+        redirect: 'error'
+      })
+      const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
+      if (!response.ok || ![
+        'application/javascript',
+        'text/javascript',
+        'application/ecmascript',
+        'text/ecmascript'
+      ].includes(contentType)) {
+        throw new Error('circle prelude response invalid')
+      }
+      const source = await response.text()
+      if (!source || source.length > 128 * 1024) {
+        throw new Error('circle prelude response invalid')
+      }
+      return source
+    })()
+  }
+  try {
+    return await publicPreludeSourcePromise
+  } catch (error) {
+    publicPreludeSourcePromise = null
+    throw error
+  }
+}
+
+const installPublicPrelude = async (doc, circleId, htmlPath, bridgeToken) => {
   const head = ensureDocumentHead(doc)
+  doc.querySelectorAll('#octra-circle-public-prelude').forEach((node) => node.remove())
   const script = doc.createElement('script')
-  script.textContent = publicPreludeSource(circleId, htmlPath, bridgeToken)
+  script.id = 'octra-circle-public-prelude'
+  script.textContent = await loadPublicPreludeSource()
+  script.dataset.octraContext = JSON.stringify({
+    circle_id: circleId,
+    path: normalizeAssetPath(htmlPath),
+    uri: circleUriOf(circleId, htmlPath)
+  })
+  script.dataset.octraBridgeToken = bridgeToken
+  script.referrerPolicy = 'no-referrer'
   head.prepend(script)
+}
+
+const executableFrameScript = (node) => {
+  const type = (node.getAttribute('type') || '').trim().toLowerCase()
+  return [
+    '',
+    'module',
+    'application/javascript',
+    'text/javascript',
+    'application/ecmascript',
+    'text/ecmascript',
+    'application/x-javascript'
+  ].includes(type)
+}
+
+const encodeFrameScripts = (doc) => {
+  let totalBytes = 0
+  const scripts = Array.from(doc.querySelectorAll('script'))
+    .filter(executableFrameScript)
+  if (scripts.length > maxFrameScripts) {
+    throw new Error('circle script count exceeds limit')
+  }
+  scripts.forEach((node) => {
+    if (node.hasAttribute('src')) {
+      throw new Error('circle script source was not materialized')
+    }
+    const sourceBytes = utf8Bytes(node.textContent || '')
+    totalBytes += sourceBytes.length
+    if (totalBytes > maxFrameScriptBytes) {
+      throw new Error('circle script bytes exceed limit')
+    }
+    node.textContent = ''
+    node.removeAttribute('integrity')
+    node.removeAttribute('crossorigin')
+    node.setAttribute('src', `data:application/javascript;base64,${bytesToBase64(sourceBytes)}`)
+  })
 }
 
 const rewriteInternalAnchor = (circleId, basePath, href) => {
@@ -1671,30 +1836,103 @@ const materializeSealedHtml = async (circleId, htmlPath, htmlText, passphrase, b
   forms.forEach((node) => {
     node.setAttribute('action', '#')
   })
-  return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`
+  encodeFrameScripts(doc)
+  return {
+    html: `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`
+  }
 }
 
-const rewritePublicAssetRefs = (doc, circleId, htmlPath) => {
-  const rewriteAttr = (node, attr) => {
-    const spec = node.getAttribute(attr) || ''
-    if (!spec || isDataSpec(spec)) return
-    if (isBlockedRemoteSpec(spec)) {
-      node.removeAttribute(attr)
-      return
+const rewritePublicAssetRefs = async (doc, circleId, htmlPath) => {
+  const loadAsset = (path) => loadPublicMaterializedAsset(circleId, path)
+  const inlineStyles = Array.from(doc.querySelectorAll('style'))
+  for (const node of inlineStyles) {
+    node.textContent = await materializeCssWithLoader(
+      circleId,
+      htmlPath,
+      node.textContent || '',
+      loadAsset)
+  }
+  const styleLinks = Array.from(doc.querySelectorAll('link[href]'))
+  for (const node of styleLinks) {
+    const rel = (node.getAttribute('rel') || '').toLowerCase()
+    const href = node.getAttribute('href') || ''
+    if (isBlockedRemoteSpec(href)) {
+      node.remove()
+      continue
     }
-    const parsed = parseCircleUri(spec)
-    if (parsed) {
-      node.setAttribute(attr, circleResourceUrl(parsed.circleId, parsed.path))
-      return
+    if (isDataSpec(href)) continue
+    const resolved = resolveCirclePath(htmlPath, href)
+    if (!resolved || isBlockedRemoteSpec(resolved)) {
+      node.remove()
+      continue
     }
-    const resolved = resolveCirclePath(htmlPath, spec)
-    if (resolved && !isBlockedRemoteSpec(resolved)) {
-      node.setAttribute(attr, circleResourceUrl(circleId, resolved))
+    const asset = await loadAsset(resolved)
+    if (rel.includes('stylesheet')) {
+      if (!isStylesheetContentType(asset.content_type)) {
+        throw new Error(`circle stylesheet content type refused: ${resolved}`)
+      }
+      const style = doc.createElement('style')
+      style.textContent = await materializeCssWithLoader(
+        circleId,
+        resolved,
+        asset.text,
+        loadAsset)
+      node.replaceWith(style)
+    } else {
+      node.setAttribute('href', makeDataUrl(asset.content_type, asset.bytes))
     }
   }
-  Array.from(doc.querySelectorAll('[src]')).forEach((node) => rewriteAttr(node, 'src'))
-  Array.from(doc.querySelectorAll('link[href]')).forEach((node) => rewriteAttr(node, 'href'))
-  Array.from(doc.querySelectorAll('[poster]')).forEach((node) => rewriteAttr(node, 'poster'))
+  const scripts = Array.from(doc.querySelectorAll('script[src]'))
+  for (const node of scripts) {
+    const src = node.getAttribute('src') || ''
+    if (isBlockedRemoteSpec(src)) {
+      node.remove()
+      continue
+    }
+    const resolved = resolveCirclePath(htmlPath, src)
+    if (!resolved || isBlockedRemoteSpec(resolved)) {
+      node.remove()
+      continue
+    }
+    const asset = await loadAsset(resolved)
+    if (!isScriptContentType(asset.content_type)) {
+      throw new Error(`circle script content type refused: ${resolved}`)
+    }
+    const inline = doc.createElement('script')
+    const type = node.getAttribute('type')
+    if (type) inline.setAttribute('type', type)
+    inline.textContent = asset.text
+    node.replaceWith(inline)
+  }
+  const sourcedNodes = Array.from(doc.querySelectorAll('[src]'))
+  for (const node of sourcedNodes) {
+    if (node.tagName.toLowerCase() === 'script') continue
+    const src = node.getAttribute('src') || ''
+    if (isBlockedRemoteSpec(src)) {
+      node.removeAttribute('src')
+      continue
+    }
+    if (isDataSpec(src)) continue
+    const resolved = resolveCirclePath(htmlPath, src)
+    if (resolved && !isBlockedRemoteSpec(resolved)) {
+      const asset = await loadAsset(resolved)
+      node.setAttribute('src', makeDataUrl(asset.content_type, asset.bytes))
+    }
+  }
+  const posterNodes = Array.from(doc.querySelectorAll('[poster]'))
+  for (const node of posterNodes) {
+    const poster = node.getAttribute('poster') || ''
+    if (isBlockedRemoteSpec(poster)) {
+      node.removeAttribute('poster')
+      continue
+    }
+    if (isDataSpec(poster)) continue
+    const resolved = resolveCirclePath(htmlPath, poster)
+    if (resolved && !isBlockedRemoteSpec(resolved)) {
+      const asset = await loadAsset(resolved)
+      node.setAttribute('poster', makeDataUrl(asset.content_type, asset.bytes))
+    }
+  }
   Array.from(doc.querySelectorAll('a[href]')).forEach((node) => {
     node.setAttribute('href', rewriteInternalAnchor(circleId, htmlPath, node.getAttribute('href') || ''))
   })
@@ -1703,15 +1941,18 @@ const rewritePublicAssetRefs = (doc, circleId, htmlPath) => {
   })
 }
 
-const materializePublicHtml = (circleId, htmlPath, htmlText, bridgeToken) => {
+const materializePublicHtml = async (circleId, htmlPath, htmlText, bridgeToken) => {
   const doc = new DOMParser().parseFromString(htmlText, 'text/html')
   injectPublicPolicy(doc)
-  installPublicPrelude(doc, circleId, htmlPath, bridgeToken)
-  rewritePublicAssetRefs(doc, circleId, htmlPath)
-  return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`
+  await rewritePublicAssetRefs(doc, circleId, htmlPath)
+  await installPublicPrelude(doc, circleId, htmlPath, bridgeToken)
+  encodeFrameScripts(doc)
+  return {
+    html: `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`
+  }
 }
 
-const renderPublicAsset = (asset, info) => {
+const renderPublicAsset = async (asset, info) => {
   clearBridgeContext()
   setPreviewExpandAvailable(true)
   $('preview-head').textContent = `oct://${asset.circle_id}${asset.canonical_path} | ${asset.content_type} | ${asset.size_bytes} bytes`
@@ -1727,11 +1968,12 @@ const renderPublicAsset = (asset, info) => {
         activeBridgeWindow = frame.contentWindow
       }
     })
-    frame.srcdoc = materializePublicHtml(
+    const materialized = await materializePublicHtml(
       asset.circle_id,
       asset.canonical_path,
       bytesToText(base64ToBytes(asset.body_b64)),
       bridgeToken)
+    frame.srcdoc = materialized.html
     activeBridgeContext = {
       circle_id: asset.circle_id,
       path: asset.canonical_path,
@@ -1769,6 +2011,7 @@ const renderPublicAsset = (asset, info) => {
 }
 
 const renderSealedAsset = async (circleId, path, info, passphrase) => {
+  clearBridgeContext()
   const versionToken = info.assets_root || info.stable_root || ''
   const asset = await loadSealedAsset(circleId, path, passphrase, versionToken)
   setPreviewExpandAvailable(true)
@@ -1786,7 +2029,8 @@ const renderSealedAsset = async (circleId, path, info, passphrase) => {
         activeBridgeWindow = frame.contentWindow
       }
     })
-    frame.srcdoc = await materializeSealedHtml(circleId, asset.canonical_path, asset.text, passphrase, bridgeToken, versionToken)
+    const materialized = await materializeSealedHtml(circleId, asset.canonical_path, asset.text, passphrase, bridgeToken, versionToken)
+    frame.srcdoc = materialized.html
     activeBridgeContext = {
       circle_id: circleId,
       path: asset.canonical_path,
@@ -1844,7 +2088,7 @@ const loadCircle = async () => {
       }
     } else {
       const asset = await loadPlainAsset(circleId, path)
-      renderPublicAsset(asset, info)
+      await renderPublicAsset(asset, info)
       setStatus('status', `loaded oct://${circleId}${asset.canonical_path}`, false)
     }
     const next = new URL(window.location.href)

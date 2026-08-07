@@ -1637,7 +1637,7 @@ function clearResult(elId) {
 const networkText = value => String(value || '').replace(/\bnode\b/gi, 'network');
 
 function validAddr(addr) {
-  return /^oct[1-9A-HJ-NP-Za-km-z]{43,45}$/.test(addr);
+  return /^oct[1-9A-HJ-NP-Za-km-z]{44}$/.test(addr);
 }
 
 const logState = cls => cls === 'log-ok' ? 'done' : (cls === 'log-err' ? 'error' : 'active');
@@ -2327,8 +2327,11 @@ async function ensurePrivateSpendCompact(pin, logFn) {
   if (!st.can_submit) {
     throw new Error(escapeHtml(st.reason || 'encrypted balance refresh is currently unavailable'));
   }
-  const baseLayers = st.base_layers ? (' (' + st.base_layers + ' base layers)') : '';
-  logFn('encrypted balance needs compact refresh before private spend' + baseLayers, 'log-info');
+  const baseLayers = Number(st.base_layers || 0);
+  const layerText = Number.isSafeInteger(baseLayers) && baseLayers > 0
+    ? ' (' + baseLayers + ' base layers)'
+    : '';
+  logFn('encrypted balance needs compact refresh before private spend' + layerText, 'log-info');
   logFn('submitting compact refresh key_switch', 'log-info');
   const refresh = await api('POST', '/key_switch', { pin: pin, refresh: true, force_refresh: true });
   const txHash = refresh.hash || refresh.tx_hash || '';

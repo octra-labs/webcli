@@ -1,5 +1,5 @@
 # octra wallet (webcli)
-![Version](https://img.shields.io/badge/version-0.05.01--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.05.02--alpha-blue)
 
 
 a full-fledged web client based on a local server for working with the octra network (compatible with both **DEVNET** and **MAINNET ALPHA**).

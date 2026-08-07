@@ -45,6 +45,7 @@
 #include <limits>
 #include <array>
 #include <cerrno>
+#include <cctype>
 #include <utility>
 #ifdef _WIN32
 #define NOMINMAX
@@ -273,6 +274,80 @@ static RelayProxyResult relay_http_post(const std::string& path, const std::stri
     auto r = cli.Post(path.c_str(), body, "application/json");
     if (!r) return {false, 502, "", "relay unavailable"};
     return {true, r->status, r->body, ""};
+}
+
+static bool compute_route_allowed(const std::string& method, const std::string& path) {
+    static const std::string prefix = "/compute/";
+    if (path.rfind(prefix, 0) != 0 || path.size() > 192) return false;
+    auto lane_end = path.find('/', prefix.size());
+    if (lane_end == std::string::npos) return false;
+    std::string lane = path.substr(prefix.size(), lane_end - prefix.size());
+    if (lane.empty() || lane.size() > 64) return false;
+    for (unsigned char c : lane) {
+        if (!std::isalnum(c) && c != '_' && c != '-') return false;
+    }
+    std::string suffix = path.substr(lane_end);
+    if (method == "GET") {
+        return suffix == "/health"
+            || suffix == "/v1/capability"
+            || suffix == "/api/program/info";
+    }
+    if (method == "POST") {
+        return suffix == "/v1/infer"
+            || suffix == "/api/program/view";
+    }
+    return false;
+}
+
+static bool compute_https_origin(const std::string& rpc_url, std::string& host, int& port) {
+    static const std::string scheme = "https://";
+    if (rpc_url.rfind(scheme, 0) != 0) return false;
+    std::string rest = rpc_url.substr(scheme.size());
+    auto boundary = rest.find_first_of("/?#");
+    std::string authority = rest.substr(0, boundary);
+    if (authority.empty() || authority.find('@') != std::string::npos) return false;
+    auto colon = authority.rfind(':');
+    port = 443;
+    if (colon != std::string::npos) {
+        if (authority.find(':') != colon || authority.substr(colon + 1) != "443") return false;
+        host = authority.substr(0, colon);
+    } else {
+        host = authority;
+    }
+    if (host.empty() || host.size() > 253 || host.front() == '.' || host.back() == '.') return false;
+    for (unsigned char c : host) {
+        if (!std::isalnum(c) && c != '.' && c != '-') return false;
+    }
+    return true;
+}
+
+static RelayProxyResult compute_http_request(
+        const std::string& method,
+        const std::string& path,
+        const std::string& body) {
+    std::string host;
+    int port = 443;
+    if (!compute_https_origin(current_public_rpc_url(), host, port)) {
+        return {false, 400, "", "compute rpc origin refused"};
+    }
+    httplib::SSLClient cli(host, port);
+    cli.set_connection_timeout(5, 0);
+    cli.set_read_timeout(90, 0);
+    cli.set_write_timeout(10, 0);
+    if (cli.ssl_context()) SSL_CTX_set_default_verify_paths(cli.ssl_context());
+    cli.enable_server_certificate_verification(true);
+    httplib::Headers headers = {
+        {"Accept", "application/json"},
+        {"User-Agent", "Octra-Wallet/0.04.10"}
+    };
+    auto response = method == "GET"
+        ? cli.Get(path.c_str(), headers)
+        : cli.Post(path.c_str(), headers, body, "application/json");
+    if (!response) return {false, 502, "", "compute endpoint unavailable"};
+    if (response->body.size() > 256u * 1024u) {
+        return {false, 502, "", "compute response exceeds limit"};
+    }
+    return {true, response->status, response->body, ""};
 }
 
 static void pk_cache_put(const std::string& addr, const std::vector<uint8_t>& pk) {
@@ -779,6 +854,10 @@ static int64_t program_deploy_base_ou(size_t payload_size) {
         ((payload_size + 1023) / 1024) * 1000);
 }
 
+static int64_t multi_exec_min_ou(size_t call_count) {
+    return 1000 + static_cast<int64_t>(1000 * std::max<size_t>(1, call_count));
+}
+
 static int64_t program_deploy_required_ou(const std::string& payload) {
     const int64_t base = program_deploy_base_ou(payload.size());
     json hint = {
@@ -855,14 +934,22 @@ static bool is_inert_media_type(const std::string& media_type) {
         || starts_with(media_type, "font/");
 }
 
-static bool opaque_origin_request(const httplib::Request& req) {
-    const std::string site = req.get_header_value("Sec-Fetch-Site");
-    return !site.empty() && site != "same-origin";
+static bool cross_site_script_request(const httplib::Request& req) {
+    const std::string site = lower_ascii(req.get_header_value("Sec-Fetch-Site"));
+    const std::string destination = lower_ascii(req.get_header_value("Sec-Fetch-Dest"));
+    return site == "cross-site" && destination == "script";
 }
 
 static bool serve_inline_allowed(const std::string& media_type, const httplib::Request& req) {
     if (!is_active_media_type(media_type)) return is_inert_media_type(media_type);
-    return opaque_origin_request(req);
+    const bool script_media =
+        media_type == "application/javascript" ||
+        media_type == "text/javascript" ||
+        media_type == "application/ecmascript" ||
+        media_type == "text/ecmascript" ||
+        media_type == "application/x-javascript" ||
+        media_type == "module";
+    return script_media && cross_site_script_request(req);
 }
 
 static constexpr size_t CIRCLE_ASSET_MAX_RAW_BYTES = 33554432;
@@ -1245,32 +1332,6 @@ static bool circle_verifier_pvac(octra::PvacBridge& pvac,
     return true;
 }
 
-static bool circle_public_verifier_pvac(octra::PvacBridge& pvac,
-                                        std::string& wallet_addr,
-                                        uint64_t& wallet_generation,
-                                        std::string& error) {
-    {
-        std::lock_guard<std::mutex> lock(g_mtx);
-        if (!g_wallet_loaded || !g_pvac_ok) {
-            error = "pvac not available";
-            return false;
-        }
-        wallet_addr = g_wallet.addr;
-        wallet_generation = g_wallet_generation;
-    }
-    const std::string pubkey_b64 =
-        remote_pvac_pubkey_b64(wallet_addr);
-    if (pubkey_b64.empty()) {
-        error = "registered pvac key profile is unavailable";
-        return false;
-    }
-    if (!pvac.init_public(pubkey_b64)) {
-        error = "registered pvac key profile is invalid";
-        return false;
-    }
-    return true;
-}
-
 static std::string circle_wallet_address() {
     std::lock_guard<std::mutex> lock(g_mtx);
     return g_wallet_loaded ? g_wallet.addr : "";
@@ -1546,6 +1607,42 @@ static bool circle_verify_proof_receipt(const std::string& circle_id,
         receipt.value("signer_addr", ""),
         ctx.intent_id,
         error);
+}
+
+static bool circle_cell_proof_payload(const json& body,
+                                      json& payload,
+                                      std::string& error) {
+    const std::array<const char*, 5> fields = {
+        "proof_kind",
+        "zero_proof",
+        "range_proof",
+        "amount_commitment",
+        "intent_id"
+    };
+    for (const char* field : fields) {
+        if (body.contains(field)) payload[field] = body[field];
+    }
+    if (!body.contains("proof_receipt")) {
+        if (body.contains("proof_receipt_hash")) {
+            error = "proof_receipt_hash requires proof_receipt";
+            return false;
+        }
+        return true;
+    }
+    if (!body["proof_receipt"].is_object()) {
+        error = "proof_receipt must be an object";
+        return false;
+    }
+    const std::string receipt_hash =
+        octra::sha256_hex(body["proof_receipt"].dump());
+    if (body.contains("proof_receipt_hash") &&
+        body.value("proof_receipt_hash", "") != receipt_hash) {
+        error = "proof_receipt_hash does not match proof_receipt";
+        return false;
+    }
+    payload["proof_receipt"] = body["proof_receipt"];
+    payload["proof_receipt_hash"] = receipt_hash;
+    return true;
 }
 
 static json submit_tx(const octra::Transaction& tx) {
@@ -3050,14 +3147,17 @@ int main(int argc, char** argv) {
                 "form-action 'none'; "
                 "frame-ancestors 'self'");
         } else {
+            std::string script_policy = req.path == "/circles.html"
+                ? "script-src 'self' data:; "
+                : "script-src 'self'; ";
             res.set_header("Content-Security-Policy",
-                "default-src 'self'; "
-                "script-src 'self'; "
+                std::string("default-src 'self'; ") +
+                script_policy +
                 "base-uri 'none'; "
                 "form-action 'none'; "
                 "style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data: https:; "
-                "connect-src 'self' http://127.0.0.1:* http://178.62.60.204:8090 https://*.octra.network https://*.publicnode.com https://*.infura.io wss: ws:; "
+                "connect-src 'self' http://127.0.0.1:* http://178.62.60.204:8090 https://devnet.octrascan.io https://*.octra.network https://*.publicnode.com https://*.infura.io wss: ws:; "
                 "frame-ancestors 'none'");
         }
         res.set_header("Cache-Control", "no-store");
@@ -5732,7 +5832,16 @@ int main(int argc, char** argv) {
         tx.to_ = "multi_exec";
         tx.amount = "0";
         tx.nonce = bi.nonce + 1;
-        tx.ou = parse_ou(body, "8000");
+        const int64_t minimum_ou = multi_exec_min_ou(calls.size());
+        const std::string selected_ou = parse_ou(body, std::to_string(minimum_ou));
+        if (std::stoll(selected_ou) < minimum_ou) {
+            res.status = 400;
+            json error = err_json("fee too low");
+            error["minimum_ou"] = std::to_string(minimum_ou);
+            res.set_content(error.dump(), "application/json");
+            return;
+        }
+        tx.ou = selected_ou;
         tx.timestamp = now_ts();
         tx.op_type = "multi_exec";
         tx.message = payload.dump();
@@ -6120,6 +6229,7 @@ int main(int argc, char** argv) {
         std::string amount_commitment_b64 = octra::base64_encode(amount_commitment.data(), 32);
         json result;
         result["ciphertext"] = b64;
+        result["amount_commitment"] = amount_commitment_b64;
         auto policy = policy_r.result.value("policy", json::object());
         std::string encrypt_proof = policy.value("encrypt_proof", "bound_zero_v1");
         if (encrypt_proof == "bound_zero_v1" || encrypt_proof == "bound_zero_receipt_v1") {
@@ -6127,7 +6237,6 @@ int main(int argc, char** argv) {
                 g_pvac.make_zero_proof_bound(ct, static_cast<uint64_t>(value), blinding);
             std::string zero_proof = g_pvac.encode_zero_proof(proof);
             g_pvac.free_zero_proof(proof);
-            result["amount_commitment"] = amount_commitment_b64;
             result["zero_proof"] = zero_proof;
             result["proof_kind"] = encrypt_proof;
         } else if (encrypt_proof == "range_v1" || encrypt_proof == "range_receipt_v1") {
@@ -6135,7 +6244,6 @@ int main(int argc, char** argv) {
                 g_pvac.make_bound_range_proof(ct, static_cast<uint64_t>(value), blinding);
             std::string range_proof = g_pvac.encode_bound_range_proof(proof);
             g_pvac.free_zero_proof(proof);
-            result["amount_commitment"] = amount_commitment_b64;
             result["range_proof"] = range_proof;
             result["proof_kind"] = encrypt_proof;
         } else if (encrypt_proof == "zero_receipt_v1") {
@@ -6671,7 +6779,7 @@ int main(int argc, char** argv) {
         octra::PvacBridge pvac;
         std::string wallet_addr;
         uint64_t wallet_generation = 0;
-        if (!circle_public_verifier_pvac(
+        if (!circle_verifier_pvac(
                 pvac,
                 wallet_addr,
                 wallet_generation,
@@ -6775,7 +6883,7 @@ int main(int argc, char** argv) {
         octra::PvacBridge pvac;
         std::string wallet_addr;
         uint64_t wallet_generation = 0;
-        if (!circle_public_verifier_pvac(
+        if (!circle_verifier_pvac(
                 pvac,
                 wallet_addr,
                 wallet_generation,
@@ -6855,6 +6963,77 @@ int main(int argc, char** argv) {
         }
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_content(r.result.dump(), "application/json");
+    });
+
+    svr.Post("/api/circle/compute", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        if (req.body.size() > 70u * 1024u) {
+            res.status = 413;
+            res.set_content(err_json("compute request exceeds limit").dump(), "application/json");
+            return;
+        }
+        json request;
+        try {
+            request = json::parse(req.body);
+        } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("compute request is not json").dump(), "application/json");
+            return;
+        }
+        if (!request.is_object()) {
+            res.status = 400;
+            res.set_content(err_json("compute request rejected").dump(), "application/json");
+            return;
+        }
+        std::string method = request.value("method", "");
+        std::string path = request.value("path", "");
+        std::set<std::string> actual_keys;
+        for (auto it = request.begin(); it != request.end(); ++it) {
+            actual_keys.insert(it.key());
+        }
+        const std::set<std::string> expected_keys = method == "POST"
+            ? std::set<std::string>{"body", "method", "path"}
+            : std::set<std::string>{"method", "path"};
+        if (actual_keys != expected_keys || !compute_route_allowed(method, path)) {
+            res.status = 400;
+            res.set_content(err_json("compute request route refused").dump(), "application/json");
+            return;
+        }
+        std::string outbound_body;
+        if (method == "POST") {
+            if (!request["body"].is_object()) {
+                res.status = 400;
+                res.set_content(err_json("compute request body refused").dump(), "application/json");
+                return;
+            }
+            outbound_body = request["body"].dump();
+            if (outbound_body.size() > 64u * 1024u) {
+                res.status = 413;
+                res.set_content(err_json("compute request body exceeds limit").dump(), "application/json");
+                return;
+            }
+        }
+        auto remote = compute_http_request(method, path, outbound_body);
+        if (!remote.ok) {
+            res.status = remote.status > 0 ? remote.status : 502;
+            res.set_content(err_json(remote.error).dump(), "application/json");
+            return;
+        }
+        json response;
+        try {
+            response = json::parse(remote.body);
+        } catch (...) {
+            res.status = 502;
+            res.set_content(err_json("compute response is not json").dump(), "application/json");
+            return;
+        }
+        if (!response.is_object()) {
+            res.status = 502;
+            res.set_content(err_json("compute response shape refused").dump(), "application/json");
+            return;
+        }
+        res.status = remote.status;
+        res.set_content(response.dump(), "application/json");
     });
 
     svr.Get("/api/circle/slot_policy", [](const httplib::Request& req, httplib::Response& res) {
@@ -8380,8 +8559,12 @@ int main(int argc, char** argv) {
         if (body.contains("subject_addr")) payload["subject_addr"] = body["subject_addr"];
         if (body.contains("mutable_state")) payload["mutable_state"] = body["mutable_state"];
         if (body.contains("hfhe_profile")) payload["hfhe_profile"] = body["hfhe_profile"];
-        if (body.contains("proof_kind")) payload["proof_kind"] = body["proof_kind"];
-        if (body.contains("proof_receipt_hash")) payload["proof_receipt_hash"] = body["proof_receipt_hash"];
+        std::string proof_error;
+        if (!circle_cell_proof_payload(body, payload, proof_error)) {
+            res.status = 400;
+            res.set_content(err_json(proof_error).dump(), "application/json");
+            return;
+        }
         tx.message = payload.dump();
         sign_tx_fields(tx);
         auto result = submit_tx(tx);
@@ -8458,8 +8641,12 @@ int main(int argc, char** argv) {
         if (body.contains("subject_addr")) payload["subject_addr"] = body["subject_addr"];
         if (body.contains("mutable_state")) payload["mutable_state"] = body["mutable_state"];
         if (body.contains("hfhe_profile")) payload["hfhe_profile"] = body["hfhe_profile"];
-        if (body.contains("proof_kind")) payload["proof_kind"] = body["proof_kind"];
-        if (body.contains("proof_receipt_hash")) payload["proof_receipt_hash"] = body["proof_receipt_hash"];
+        std::string proof_error;
+        if (!circle_cell_proof_payload(body, payload, proof_error)) {
+            res.status = 400;
+            res.set_content(err_json(proof_error).dump(), "application/json");
+            return;
+        }
         tx.message = payload.dump();
         sign_tx_fields(tx);
         auto result = submit_tx(tx);

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 #include <stdexcept>
 #include "pvac/pvac.hpp"
@@ -230,53 +231,65 @@ struct Reader {
     }
 };
 
-inline void validate_cipher_structure(const pvac::Cipher& cipher) {
+inline const char* cipher_structure_error(const pvac::Cipher& cipher) {
     if (cipher.slots == 0)
-        throw std::runtime_error("pvac_ser: cipher slots must be positive");
+        return "pvac_ser: cipher slots must be positive";
     if (!cipher.c0.empty() && cipher.c0.size() != cipher.slots)
-        throw std::runtime_error("pvac_ser: c0/slots size mismatch");
+        return "pvac_ser: c0/slots size mismatch";
     for (size_t layer_id = 0; layer_id < cipher.L.size(); ++layer_id) {
         const auto& layer = cipher.L[layer_id];
         if (layer.rule != pvac::RRule::BASE && layer.rule != pvac::RRule::PROD)
-            throw std::runtime_error("pvac_ser: invalid layer rule");
+            return "pvac_ser: invalid layer rule";
         if (layer.rule == pvac::RRule::PROD &&
             (layer.pa >= layer_id || layer.pb >= layer_id))
-            throw std::runtime_error("pvac_ser: invalid product parent");
+            return "pvac_ser: invalid product parent";
         if (layer.rule == pvac::RRule::PROD && !layer.PC.empty())
-            throw std::runtime_error("pvac_ser: product layer must not contain PC");
+            return "pvac_ser: product layer must not contain PC";
         if (layer.rule == pvac::RRule::PROD && !layer.R_PC.empty())
-            throw std::runtime_error("pvac_ser: product layer must not contain R_PC");
+            return "pvac_ser: product layer must not contain R_PC";
         if (!layer.PC.empty() && layer.PC.size() != cipher.slots)
-            throw std::runtime_error("pvac_ser: layer PC/slots size mismatch");
+            return "pvac_ser: layer PC/slots size mismatch";
         if (!layer.R_PC.empty() && layer.R_PC.size() != cipher.slots)
-            throw std::runtime_error("pvac_ser: layer R_PC/slots size mismatch");
+            return "pvac_ser: layer R_PC/slots size mismatch";
     }
     for (const auto& edge : cipher.E) {
         if (edge.layer_id >= cipher.L.size())
-            throw std::runtime_error("pvac_ser: edge layer out of range");
+            return "pvac_ser: edge layer out of range";
         if (edge.ch != pvac::SGN_P && edge.ch != pvac::SGN_M)
-            throw std::runtime_error("pvac_ser: invalid edge sign");
+            return "pvac_ser: invalid edge sign";
         if (edge.w.size() != cipher.slots)
-            throw std::runtime_error("pvac_ser: edge weight/slots size mismatch");
+            return "pvac_ser: edge weight/slots size mismatch";
     }
+    return nullptr;
+}
+
+inline void validate_cipher_structure(const pvac::Cipher& cipher) {
+    if (const char* error = cipher_structure_error(cipher))
+        throw std::runtime_error(error);
+}
+
+inline const char* pubkey_structure_error(const pvac::PubKey& pk) {
+    if (pk.prm.B <= 0 || pk.prm.m_bits <= 0 || pk.prm.n_bits <= 0)
+        return "pvac_ser: invalid public key dimensions";
+    if (pk.H.size() != static_cast<size_t>(pk.prm.n_bits))
+        return "pvac_ser: H column count mismatch";
+    if (pk.ubk.perm.size() != static_cast<size_t>(pk.prm.m_bits) ||
+        pk.ubk.inv.size() != static_cast<size_t>(pk.prm.m_bits))
+        return "pvac_ser: UBK size mismatch";
+    if (!pvac::is_valid_pubkey_shape(pk))
+        return "pvac_ser: invalid UBK permutation";
+    if (pk.powg_B.size() != static_cast<size_t>(pk.prm.B))
+        return "pvac_ser: powg_B size mismatch";
+    for (const auto& column : pk.H) {
+        if (column.nbits != static_cast<uint64_t>(pk.prm.m_bits))
+            return "pvac_ser: H bitvec length mismatch";
+    }
+    return nullptr;
 }
 
 inline void validate_pubkey_structure(const pvac::PubKey& pk) {
-    if (pk.prm.B <= 0 || pk.prm.m_bits <= 0 || pk.prm.n_bits <= 0)
-        throw std::runtime_error("pvac_ser: invalid public key dimensions");
-    if (pk.H.size() != static_cast<size_t>(pk.prm.n_bits))
-        throw std::runtime_error("pvac_ser: H column count mismatch");
-    if (pk.ubk.perm.size() != static_cast<size_t>(pk.prm.m_bits) ||
-        pk.ubk.inv.size() != static_cast<size_t>(pk.prm.m_bits))
-        throw std::runtime_error("pvac_ser: UBK size mismatch");
-    if (!pvac::is_valid_pubkey_shape(pk))
-        throw std::runtime_error("pvac_ser: invalid UBK permutation");
-    if (pk.powg_B.size() != static_cast<size_t>(pk.prm.B))
-        throw std::runtime_error("pvac_ser: powg_B size mismatch");
-    for (const auto& column : pk.H) {
-        if (column.nbits != static_cast<uint64_t>(pk.prm.m_bits))
-            throw std::runtime_error("pvac_ser: H bitvec length mismatch");
-    }
+    if (const char* error = pubkey_structure_error(pk))
+        throw std::runtime_error(error);
 }
 
 inline void write_params(Writer& w, const pvac::Params& prm) {
@@ -443,33 +456,58 @@ inline std::vector<uint8_t> serialize_cipher_public(const pvac::Cipher& C) {
     return serialize_cipher(C);
 }
 
-inline pvac::Cipher deserialize_cipher(const uint8_t* data, size_t len) {
+inline bool deserialize_cipher_checked(
+    const uint8_t* data,
+    size_t len,
+    pvac::Cipher& cipher,
+    std::string& error) {
     Reader r(data, len);
     uint8_t ver = r.header(TAG_CIPHER);
-    pvac::Cipher C;
-    C.slots = r.u64();
-    size_t nL = r.u64();
-    r.check_count(nL, 8);
+    cipher = pvac::Cipher();
     if (!r.failed) {
-        C.L.resize(nL);
-        for (size_t i = 0; i < nL; ++i) C.L[i] = read_layer(r, ver, C.slots);
+        cipher.slots = r.u64();
+        size_t nL = r.u64();
+        r.check_count(nL, 8);
+        if (!r.failed) {
+            cipher.L.resize(nL);
+            for (size_t i = 0; i < nL; ++i)
+                cipher.L[i] = read_layer(r, ver, cipher.slots);
+        }
+        size_t nc = r.u64();
+        r.check_count(nc, 16);
+        if (!r.failed) {
+            cipher.c0.resize(nc);
+            for (size_t i = 0; i < nc; ++i) cipher.c0[i] = r.fp();
+        }
+        size_t nE = r.u64();
+        r.check_count(nE, 8);
+        if (!r.failed) {
+            cipher.E.resize(nE);
+            for (size_t i = 0; i < nE; ++i) cipher.E[i] = read_edge(r);
+        }
     }
-    size_t nc = r.u64();
-    r.check_count(nc, 16);
-    if (!r.failed) {
-        C.c0.resize(nc);
-        for (size_t i = 0; i < nc; ++i) C.c0[i] = r.fp();
+    if (r.failed) {
+        error = r.error;
+        return false;
     }
-    size_t nE = r.u64();
-    r.check_count(nE, 8);
-    if (!r.failed) {
-        C.E.resize(nE);
-        for (size_t i = 0; i < nE; ++i) C.E[i] = read_edge(r);
+    if (r.remaining() != 0) {
+        error = "pvac_ser: trailing cipher bytes";
+        return false;
     }
-    if (r.failed) throw std::runtime_error(r.error);
-    if (r.remaining() != 0) throw std::runtime_error("pvac_ser: trailing cipher bytes");
-    validate_cipher_structure(C);
-    return C;
+    if (const char* structure_error = cipher_structure_error(cipher)) {
+        error = structure_error;
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+inline pvac::Cipher deserialize_cipher(const uint8_t* data, size_t len) {
+    pvac::Cipher cipher;
+    std::string error;
+    if (!deserialize_cipher_checked(data, len, cipher, error))
+        throw std::runtime_error(error);
+    return cipher;
 }
 
 inline std::vector<uint8_t> serialize_pubkey_raw(const pvac::PubKey& pk) {
@@ -504,63 +542,100 @@ inline std::vector<uint8_t> serialize_pubkey(const pvac::PubKey& pk, bool compre
     return pvac::compress::pack(raw);
 }
 
-inline pvac::PubKey deserialize_pubkey_raw(const uint8_t* data, size_t len) {
+inline bool deserialize_pubkey_raw_checked(
+    const uint8_t* data,
+    size_t len,
+    pvac::PubKey& pk,
+    std::string& error) {
     Reader r(data, len);
     uint8_t ver = r.header(TAG_PUBKEY);
+    pk = pvac::PubKey();
+    if (!r.failed) {
+        pk.prm = read_params(r);
+        pk.canon_tag = r.u64();
+
+        size_t nH = r.u64();
+        r.check_count(nH, 8);
+        if (!r.failed) {
+            pk.H.resize(nH);
+            for (size_t i = 0; i < nH; ++i) pk.H[i] = r.bitvec();
+        }
+
+        size_t np = r.u64();
+        r.check_count(np, 4);
+        if (!r.failed) {
+            pk.ubk.perm.resize(np);
+            for (size_t i = 0; i < np; ++i) pk.ubk.perm[i] = r.i32();
+        }
+        size_t ni = r.u64();
+        r.check_count(ni, 4);
+        if (!r.failed) {
+            pk.ubk.inv.resize(ni);
+            for (size_t i = 0; i < ni; ++i) pk.ubk.inv[i] = r.i32();
+        }
+
+        r.raw(pk.H_digest.data(), 32);
+        pk.omega_B = r.fp();
+
+        size_t ng = r.u64();
+        r.check_count(ng, 16);
+        if (!r.failed) {
+            pk.powg_B.resize(ng);
+            for (size_t i = 0; i < ng; ++i) pk.powg_B[i] = r.fp();
+        }
+
+        if (ver >= VERSION_V3)
+            pk.circuit_prf_key_commit = r.rist_point();
+        if (ver >= VERSION_V5)
+            pk.circuit_prf_profile =
+                static_cast<pvac::CircuitPrfProfile>(r.u8());
+        else
+            pk.circuit_prf_profile = pvac::CircuitPrfProfile::MIMC_X3_V6;
+    }
+    if (r.failed) {
+        error = r.error;
+        return false;
+    }
+    if (r.remaining() != 0) {
+        error = "pvac_ser: trailing pubkey bytes";
+        return false;
+    }
+    if (const char* structure_error = pubkey_structure_error(pk)) {
+        error = structure_error;
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+inline pvac::PubKey deserialize_pubkey_raw(const uint8_t* data, size_t len) {
     pvac::PubKey pk;
-    if (r.failed) throw std::runtime_error(r.error);
-    pk.prm = read_params(r);
-    pk.canon_tag = r.u64();
-
-    size_t nH = r.u64();
-    r.check_count(nH, 8);
-    if (!r.failed) {
-        pk.H.resize(nH);
-        for (size_t i = 0; i < nH; ++i) pk.H[i] = r.bitvec();
-    }
-
-    size_t np = r.u64();
-    r.check_count(np, 4);
-    if (!r.failed) {
-        pk.ubk.perm.resize(np);
-        for (size_t i = 0; i < np; ++i) pk.ubk.perm[i] = r.i32();
-    }
-    size_t ni = r.u64();
-    r.check_count(ni, 4);
-    if (!r.failed) {
-        pk.ubk.inv.resize(ni);
-        for (size_t i = 0; i < ni; ++i) pk.ubk.inv[i] = r.i32();
-    }
-
-    r.raw(pk.H_digest.data(), 32);
-    pk.omega_B = r.fp();
-
-    size_t ng = r.u64();
-    r.check_count(ng, 16);
-    if (!r.failed) {
-        pk.powg_B.resize(ng);
-        for (size_t i = 0; i < ng; ++i) pk.powg_B[i] = r.fp();
-    }
-
-    if (ver >= VERSION_V3)
-        pk.circuit_prf_key_commit = r.rist_point();
-    if (ver >= VERSION_V5)
-        pk.circuit_prf_profile = static_cast<pvac::CircuitPrfProfile>(r.u8());
-    else
-        pk.circuit_prf_profile = pvac::CircuitPrfProfile::MIMC_X3_V6;
-
-    if (r.failed) throw std::runtime_error(r.error);
-    if (r.remaining() != 0) throw std::runtime_error("pvac_ser: trailing pubkey bytes");
-    validate_pubkey_structure(pk);
+    std::string error;
+    if (!deserialize_pubkey_raw_checked(data, len, pk, error))
+        throw std::runtime_error(error);
     return pk;
 }
 
-inline pvac::PubKey deserialize_pubkey(const uint8_t* data, size_t len) {
+inline bool deserialize_pubkey_checked(
+    const uint8_t* data,
+    size_t len,
+    pvac::PubKey& pk,
+    std::string& error) {
     if (pvac::compress::is_packed(data, len)) {
-        auto raw = pvac::compress::unpack(data, len);
-        return deserialize_pubkey_raw(raw.data(), raw.size());
+        std::vector<uint8_t> raw;
+        if (!pvac::compress::unpack_checked(data, len, raw, error))
+            return false;
+        return deserialize_pubkey_raw_checked(raw.data(), raw.size(), pk, error);
     }
-    return deserialize_pubkey_raw(data, len);
+    return deserialize_pubkey_raw_checked(data, len, pk, error);
+}
+
+inline pvac::PubKey deserialize_pubkey(const uint8_t* data, size_t len) {
+    pvac::PubKey pk;
+    std::string error;
+    if (!deserialize_pubkey_checked(data, len, pk, error))
+        throw std::runtime_error(error);
+    return pk;
 }
 
 inline std::vector<uint8_t> serialize_seckey(const pvac::SecKey& sk) {

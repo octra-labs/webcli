@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 #include <stdexcept>
 
@@ -190,30 +191,55 @@ inline std::vector<uint8_t> pack(const std::vector<uint8_t>& raw) {
     return pack(raw.data(), raw.size());
 }
 
-inline std::vector<uint8_t> unpack(const uint8_t* data, size_t len) {
-    if (len < 5 || data[0] != PVAC_COMPRESSED_TAG)
-        throw std::runtime_error("pvac_compress: bad header");
+inline bool unpack_checked(
+    const uint8_t* data,
+    size_t len,
+    std::vector<uint8_t>& out,
+    std::string& error) {
+    if (len < 5 || data[0] != PVAC_COMPRESSED_TAG) {
+        error = "pvac_compress: bad header";
+        return false;
+    }
     uint32_t orig_sz = (uint32_t)data[1] << 24
                      | (uint32_t)data[2] << 16
                      | (uint32_t)data[3] << 8
                      | (uint32_t)data[4];
-    if (orig_sz > 32 * 1024 * 1024)
-        throw std::runtime_error("pvac_compress: size exceeds 32MB limit");
+    if (orig_sz > 32 * 1024 * 1024) {
+        error = "pvac_compress: size exceeds 32MB limit";
+        return false;
+    }
     const size_t payload_len = len - 5;
-    if (orig_sz > 0 && (payload_len == 0 || payload_len < (orig_sz + 63) / 64))
-        throw std::runtime_error("pvac_compress: expansion ratio rejected");
+    if (
+        orig_sz > 0
+        && (payload_len == 0 || payload_len < (orig_sz + 63) / 64)) {
+        error = "pvac_compress: expansion ratio rejected";
+        return false;
+    }
 
     detail::RangeDecoder dec(data + 5, payload_len);
-    std::vector<uint8_t> out;
+    out.clear();
     out.reserve(orig_sz);
     int b;
     while ((b = dec.decode_byte_or_eof()) >= 0) {
-        if (out.size() >= orig_sz)
-            throw std::runtime_error("pvac_compress: output exceeds declared size");
+        if (out.size() >= orig_sz) {
+            error = "pvac_compress: output exceeds declared size";
+            return false;
+        }
         out.push_back((uint8_t)b);
     }
-    if (out.size() != orig_sz)
-        throw std::runtime_error("pvac_compress: size mismatch");
+    if (out.size() != orig_sz) {
+        error = "pvac_compress: size mismatch";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+inline std::vector<uint8_t> unpack(const uint8_t* data, size_t len) {
+    std::vector<uint8_t> out;
+    std::string error;
+    if (!unpack_checked(data, len, out, error))
+        throw std::runtime_error(error);
     return out;
 }
 

@@ -52,6 +52,7 @@ CXXFLAGS+=-I$(SSL_PREFIX)/include -I$(LDB_PREFIX)/include -DCPPHTTPLIB_OPENSSL_S
 LDFLAGS:=-L$(SSL_PREFIX)/lib -lssl -lcrypto -L$(LDB_PREFIX)/lib -lleveldb -L$(PVAC_BUILD) -lpvac -Wl,-rpath,@executable_path/$(PVAC_BUILD)
 TEST_LDFLAGS := -L$(SSL_PREFIX)/lib -lssl -lcrypto
 TEST_PVAC_LDFLAGS := -L$(PVAC_BUILD) -lpvac $(TEST_LDFLAGS) -Wl,-rpath,@loader_path/../$(PVAC_BUILD)
+TEST_LEVELDB_LDFLAGS := -L$(LDB_PREFIX)/lib -lleveldb
 TARGET:=octra_wallet
 
 else ifneq ($(IS_WIN),)
@@ -64,6 +65,7 @@ CXXFLAGS+=-I$(SSL_PREFIX)/include -DCPPHTTPLIB_OPENSSL_SUPPORT
 LDFLAGS:=-static -L$(SSL_PREFIX)/lib -L$(PVAC_BUILD) -lpvac -lleveldb -lssl -lcrypto -lws2_32 -lbcrypt -lcrypt32 -lgdi32 -lz
 TEST_LDFLAGS := -L$(SSL_PREFIX)/lib -lssl -lcrypto -lws2_32 -lbcrypt -lcrypt32
 TEST_PVAC_LDFLAGS := -L$(PVAC_BUILD) -lpvac $(TEST_LDFLAGS)
+TEST_LEVELDB_LDFLAGS := -L$(LDB_PREFIX)/lib -lleveldb
 TARGET:=octra_wallet.exe
 
 else
@@ -74,6 +76,7 @@ CXXFLAGS+=-DCPPHTTPLIB_OPENSSL_SUPPORT
 LDFLAGS:=-lssl -lcrypto -lleveldb -L$(PVAC_BUILD) -lpvac -Wl,-rpath,'$$ORIGIN/$(PVAC_BUILD)'
 TEST_LDFLAGS := -lssl -lcrypto
 TEST_PVAC_LDFLAGS := -L$(PVAC_BUILD) -lpvac $(TEST_LDFLAGS) -Wl,-rpath,'$$ORIGIN/../$(PVAC_BUILD)'
+TEST_LEVELDB_LDFLAGS := -lleveldb
 TARGET:=octra_wallet
 
 endif
@@ -146,7 +149,7 @@ lib/tweetnacl.o: lib/tweetnacl.c
 lib/randombytes.o: lib/randombytes.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(TARGET): main.cpp rpc_client.hpp lib/endpoint_policy.hpp lib/pvac_map.hpp lib/pvac_upgrade_policy.hpp lib/stealth_scan.hpp lib/tweetnacl.o lib/randombytes.o $(LIBPVAC)
+$(TARGET): main.cpp rpc_client.hpp lib/circle_verifier_policy.hpp lib/endpoint_policy.hpp lib/pvac_map.hpp lib/pvac_upgrade_policy.hpp lib/stealth_scan.hpp lib/tweetnacl.o lib/randombytes.o $(LIBPVAC)
 	$(CXX) $(CXXFLAGS) -o $@ main.cpp lib/tweetnacl.o lib/randombytes.o $(LDFLAGS)
 
 clean:
@@ -158,15 +161,21 @@ run: $(TARGET)
 	./$(TARGET) 8420
 
 test-circle-bridge: | $(TEST_BUILD)
-	node --test tests/circle_bridge_policy.test.js tests/circle_asset_chunks.test.js tests/security_boundaries.test.js
+	node --test tests/circle_bridge_policy.test.js tests/circle_asset_chunks.test.js tests/circle_public_prelude.test.js tests/security_boundaries.test.js
 	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_circle_asset_chunks tests/circle_asset_chunks.cpp $(TEST_LDFLAGS)
 	./$(TEST_BUILD)/test_circle_asset_chunks
 	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_wallet_policy tests/wallet_policy.cpp $(TEST_LDFLAGS)
 	./$(TEST_BUILD)/test_wallet_policy
+	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_txcache tests/txcache.cpp $(TEST_LEVELDB_LDFLAGS)
+	./$(TEST_BUILD)/test_txcache
 
 test-pvac-embedded: | $(TEST_BUILD)
 	$(CXX) $(CXXFLAGS) $(EMBEDDED_INC) -o $(TEST_BUILD)/test_pvac_embedded tests/pvac_embedded_regression.cpp $(TEST_LDFLAGS)
 	./$(TEST_BUILD)/test_pvac_embedded
+
+test-pvac-key-switch-refresh: | $(TEST_BUILD)
+	$(CXX) $(CXXFLAGS) $(EMBEDDED_INC) -o $(TEST_BUILD)/test_pvac_key_switch_refresh tests/pvac_key_switch_refresh.cpp $(TEST_LDFLAGS)
+	./$(TEST_BUILD)/test_pvac_key_switch_refresh
 
 test-pvac-structure: $(LIBPVAC) | $(TEST_BUILD)
 	$(CXX) $(CXXFLAGS) $(EMBEDDED_INC) -o $(TEST_BUILD)/test_pvac_structure tests/pvac_cipher_structure.cpp $(TEST_PVAC_LDFLAGS)
@@ -178,4 +187,4 @@ test-crypto-boundaries: lib/tweetnacl.o lib/randombytes.o | $(TEST_BUILD)
 	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_stealth_scan tests/stealth_scan.cpp $(TEST_LDFLAGS)
 	./$(TEST_BUILD)/test_stealth_scan
 
-.PHONY: all clean run check-deps test-circle-bridge test-pvac-embedded test-pvac-structure test-crypto-boundaries
+.PHONY: all clean run check-deps test-circle-bridge test-pvac-embedded test-pvac-key-switch-refresh test-pvac-structure test-crypto-boundaries
