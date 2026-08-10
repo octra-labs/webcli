@@ -83,6 +83,12 @@ open `http://127.0.0.1:8420` in your browser
 3. the PIN is required on every startup to unlock
 
 
+## testing
+
+see **[TESTING.md](TESTING.md)** for a comprehensive devnet testing guide covering all features — sends, encryption, stealth transactions, contracts, and more.
+
+---
+
 we adhere to a policy of completely eliminating third-party software where possible, we have zero tolerance for vendor dependencies, we only included well-known libs and point implementations in the build, the rest was completely written from scratch by hand to avoid the use of third-party code for security reasons
 
 ## vendor libraries
