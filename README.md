@@ -80,9 +80,9 @@ open `http://127.0.0.1:8420` in your browser
 0. after opening the web interface in your browser, import your private key or create a new one directly in the modal window
 1. choose a wallet password (PIN) containing 8-64 characters
 2. your encrypted wallet file is stored in `data/wallet.oct`
-3. the pin is required on every startup to unlock
+3. the PIN is required on every wallet action
 
-pin shorter than 15 characters must include a letter, a digit, and a special character, you can use a native keychain / password generator on your mac or windows to store for convenience
+PIN shorter than 15 characters must include a letter, a digit, and a special character, you can use a password manager to generate and store it for convenience
 
 we adhere to a policy of completely eliminating third-party software where possible, we have zero tolerance for vendor dependencies, we only included well-known libs and point implementations in the build, the rest was completely written from scratch by hand to avoid the use of third-party code for security reasons
 
