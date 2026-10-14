@@ -19,6 +19,9 @@ let activeBridgeWindow = null
 let activeBridgeContext = null
 let expandedPreviewOpen = false
 let publicPreludeSourcePromise = null
+let uploadPathGuess = ''
+let uploadContentTypeGuess = ''
+let uploadFeeGuess = ''
 
 const bytesToBase64 = (bytes) => {
   let text = ''
@@ -80,7 +83,45 @@ const h256Hex = async (tag, parts) => hexOfBytes(await h256Raw(tag, parts))
 const resourceKeyOfPath = (circleId, canonicalPath) => h256Hex('octra:circle_resource_key:v1', [utf8Bytes(circleId), utf8Bytes(canonicalPath)])
 const resourceKeyOfSlotRef = (circleId, slotRef) => h256Hex('octra:circle_resource_key:slot:v1', [utf8Bytes(circleId), utf8Bytes(slotRef)])
 
-const buildCircleDeployPayload = () => CircleBridgePolicy.deployPayload('sealed')
+const base58Encode = (bytes) => {
+  const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+  let value = 0n
+  bytes.forEach((byte) => {
+    value = (value << 8n) + BigInt(byte)
+  })
+  let encoded = ''
+  while (value > 0n) {
+    const digit = Number(value % 58n)
+    encoded = alphabet[digit] + encoded
+    value /= 58n
+  }
+  let leadingZeros = 0
+  while (leadingZeros < bytes.length && bytes[leadingZeros] === 0) {
+    encoded = `1${encoded}`
+    leadingZeros += 1
+  }
+  return encoded
+}
+
+const deployProfileOf = (mode) => mode === 'public' ? 'public' : 'sealed'
+
+const deployConfigOf = (mode) => CircleBridgePolicy.deployPayload(deployProfileOf(mode))
+
+const selectedDeployMode = () => $('deploy-mode') && $('deploy-mode').value === 'public' ? 'public' : 'sealed'
+
+const buildCircleDeployPayload = (mode = selectedDeployMode()) => deployConfigOf(mode)
+
+const circleIdOfDeploy = async (deployer, nonce, payload) => {
+  const payloadHash = await h256Hex('octra:circle_deploy_payload:v1', [utf8Bytes(JSON.stringify(payload))])
+  const seed = await h256Raw('octra:circle_deploy_id:v1', [utf8Bytes(deployer), u64be(nonce), utf8Bytes(payloadHash)])
+  const base58 = base58Encode(seed)
+  const base58Part = base58.length >= 44
+    ? base58.slice(0, 44)
+    : base58.length === 0
+      ? '1'.repeat(44)
+      : (base58 + base58.repeat(Math.ceil((44 - base58.length) / base58.length))).slice(0, 44)
+  return `oct${base58Part}`
+}
 
 const isTextContent = (contentType) => (
   contentType.startsWith('text/')
@@ -153,6 +194,90 @@ const setStatus = (nodeId, text, bad) => {
   }
   element.textContent = text
   element.style.color = bad ? '#3B567F' : '#516E9A'
+}
+
+const validTxHash = (hash) => /^[a-f0-9]{64}$/i.test(hash || '')
+
+const explorerTxUrl = (hash, explorerUrl) => {
+  if (!validTxHash(hash) || !explorerUrl) {
+    return ''
+  }
+  return `${explorerUrl.replace(/\/+$/, '')}/tx.html?hash=${encodeURIComponent(hash)}`
+}
+
+const appendStatusLine = (element, text) => {
+  const line = document.createElement('div')
+  line.className = 'circle-status-line'
+  line.textContent = text
+  element.appendChild(line)
+  return line
+}
+
+const setSubmittedStatus = (nodeId, txHash, lines, explorerUrl) => {
+  const element = $(nodeId)
+  if (!element) {
+    return
+  }
+  element.textContent = ''
+  element.style.color = '#516E9A'
+  const firstLine = appendStatusLine(element, 'submitted ')
+  const url = explorerTxUrl(txHash, explorerUrl)
+  if (url) {
+    const link = document.createElement('a')
+    link.className = 'mono circle-status-link'
+    link.href = url
+    link.target = '_blank'
+    link.rel = 'noopener noreferrer'
+    link.textContent = txHash
+    firstLine.appendChild(link)
+  } else {
+    firstLine.append(txHash || 'tx')
+  }
+  lines.forEach((line) => appendStatusLine(element, line))
+}
+
+const normalizeFee = (nodeId, fallback) => {
+  const element = $(nodeId)
+  const raw = element ? element.value.trim() : ''
+  if (/^[1-9][0-9]*$/.test(raw)) {
+    return raw
+  }
+  if (element) {
+    element.value = fallback
+  }
+  return fallback
+}
+
+const lockedMessageOf = (err) => {
+  const message = err && err.message ? err.message : ''
+  return message === 'no wallet loaded' || message === 'wallet not loaded'
+    ? 'unlock wallet first'
+    : (message || 'request failed')
+}
+
+const ensureWalletUnlocked = async (statusNodeId) => {
+  try {
+    const status = await fetchJson('/api/wallet/status')
+    if (!status.loaded) {
+      setStatus(statusNodeId, 'unlock wallet first', true)
+      return false
+    }
+    return true
+  } catch (err) {
+    setStatus(statusNodeId, lockedMessageOf(err), true)
+    return false
+  }
+}
+
+const formatFileSize = (size) => `${Number(size || 0).toLocaleString()} bytes`
+
+const switchCircleView = (name) => {
+  document.querySelectorAll('.nav-tabs a[data-circle-view]').forEach((tab) => {
+    tab.classList.toggle('active', tab.getAttribute('data-circle-view') === name)
+  })
+  document.querySelectorAll('.circle-view').forEach((view) => {
+    view.classList.toggle('active', view.id === `view-${name}`)
+  })
 }
 
 const previewInlineHost = () => $('preview-inline-host')
@@ -232,7 +357,7 @@ const circleConfirm = (title, message, confirmLabel = 'confirm') => new Promise(
   const confirmButton = document.createElement('button')
 
   overlay.className = 'modal-overlay'
-  box.className = 'modal-box'
+  box.className = 'modal-box circle-confirm-box'
   titleNode.className = 'modal-title'
   messageNode.className = 'modal-message'
   buttons.className = 'modal-buttons'
@@ -261,7 +386,7 @@ const circleConfirm = (title, message, confirmLabel = 'confirm') => new Promise(
   box.append(titleNode, messageNode, buttons)
   overlay.append(box)
   document.body.append(overlay)
-  confirmButton.focus()
+  cancelButton.focus()
 })
 
 const circlePin = (title, message) => new Promise((resolve) => {
@@ -318,16 +443,16 @@ const circlePin = (title, message) => new Promise((resolve) => {
 const renderMeta = (info) => {
   $('meta-summary-note').textContent = 'identity | mode | roots | ownership'
   const rows = [
-    ['circle_id', info.circle_id],
+    ['circle id', info.circle_id],
     ['runtime', info.runtime],
-    ['privacy_class', info.privacy_class],
-    ['browser_mode', info.browser_mode],
-    ['resource_mode', info.resource_mode],
+    ['privacy class', info.privacy_class],
+    ['browser mode', info.browser_mode],
+    ['resource mode', info.resource_mode],
     ['owner', info.owner],
     ['version', info.version],
-    ['code_hash', info.code_hash],
-    ['stable_root', info.stable_root],
-    ['assets_root', info.assets_root]
+    ['code hash', info.code_hash],
+    ['stable root', info.stable_root],
+    ['assets root', info.assets_root]
   ]
   const meta = $('meta')
   meta.textContent = ''
@@ -1176,6 +1301,7 @@ const padTargetBytes = (paddingClass) => {
 
 const circleAssetMaxRawBytes = 33554432
 const circleAssetMaxB64Bytes = Math.ceil(circleAssetMaxRawBytes / 3) * 4
+const base64EncodedLength = byteLength => Math.ceil(byteLength / 3) * 4
 
 const paddedFrame = (plaintextBytes, paddingClass) => {
   const bare = mergeBytes(u32be(plaintextBytes.length), plaintextBytes)
@@ -1188,8 +1314,8 @@ const paddedFrame = (plaintextBytes, paddingClass) => {
 
 const circleAssetDecodedSizeUpperBound = wireLen => Math.ceil(wireLen / 4) * 3
 
-const circleAssetFeeOfCiphertextB64 = ciphertextB64 => {
-  const rawUpperBound = circleAssetDecodedSizeUpperBound(ciphertextB64.length)
+const circleAssetFeeOfB64Length = wireLen => {
+  const rawUpperBound = circleAssetDecodedSizeUpperBound(wireLen)
   if (rawUpperBound <= 4096) return 5000
   if (rawUpperBound <= 16384) return 10000
   if (rawUpperBound <= 32768) return 20000
@@ -1199,6 +1325,8 @@ const circleAssetFeeOfCiphertextB64 = ciphertextB64 => {
   if (rawUpperBound <= 8388608) return 320000
   return 640000
 }
+
+const circleAssetFeeOfCiphertextB64 = ciphertextB64 => circleAssetFeeOfB64Length(ciphertextB64.length)
 
 const deriveReadKey = async (circleId, keyId, passphrase) => {
   const cacheKey = `${circleId}:${keyId}:${passphrase}`
@@ -2074,6 +2202,10 @@ const loadCircle = async () => {
   try {
     const info = await fetchJson(`/api/circle/info?circle_id=${encodeURIComponent(circleId)}`)
     renderMeta(info)
+    if ($('upload-circle-id')) {
+      $('upload-circle-id').value = circleId
+    }
+    syncUploadModeForResourceMode(info.resource_mode)
     if (info.resource_mode === 'sealed_read') {
       const passphrase = $('sealed-passphrase').value
       if (!passphrase) {
@@ -2106,77 +2238,292 @@ const loadCircle = async () => {
   }
 }
 
-const deploySealedCircle = async () => {
+const syncDeployMode = () => {
+  const config = deployConfigOf(selectedDeployMode())
+  const pairs = [
+    ['deploy-runtime', config.runtime],
+    ['deploy-privacy-class', config.privacy_class],
+    ['deploy-browser-mode', config.browser_mode],
+    ['deploy-resource-mode', config.resource_mode]
+  ]
+  pairs.forEach(([id, value]) => {
+    if ($(id)) {
+      $(id).textContent = value
+    }
+  })
+}
+
+const deployCircle = async () => {
   setStatus('deploy-status', 'preparing deploy...', false)
   try {
-    const payload = buildCircleDeployPayload()
-    const pin = await circlePin('confirm circle deploy', 'enter PIN to create a new sealed circle')
+    if (!(await ensureWalletUnlocked('deploy-status'))) {
+      return
+    }
+    const wallet = await fetchJson('/api/wallet')
+    const balance = await fetchJson('/api/balance')
+    const mode = selectedDeployMode()
+    const config = deployConfigOf(mode)
+    const payload = buildCircleDeployPayload(mode)
+    const fee = normalizeFee('deploy-fee', '200000')
+    const nonce = Number(balance.nonce || 0) + 1
+    const circleId = await circleIdOfDeploy(wallet.address, nonce, payload)
+    const confirmed = await circleConfirm(
+      'circle deployer',
+      [
+        `circle id: ${circleId}`,
+        `runtime: ${config.runtime}`,
+        `privacy class: ${config.privacy_class}`,
+        `browser mode: ${config.browser_mode}`,
+        `resource mode: ${config.resource_mode}`,
+        `fee ou: ${fee}`
+      ].join('\n'),
+      'sign'
+    )
+    if (!confirmed) {
+      setStatus('deploy-status', 'cancelled', false)
+      return
+    }
+    const pin = await circlePin('confirm circle deploy', `enter PIN to create a new ${deployProfileOf(mode)} circle`)
     if (!pin) {
       throw new Error('circle deploy cancelled')
     }
+    setStatus('deploy-status', 'checking nonce...', false)
+    const latestBalance = await fetchJson('/api/balance')
+    const latestNonce = Number(latestBalance.nonce || 0) + 1
+    const latestCircleId = await circleIdOfDeploy(wallet.address, latestNonce, payload)
+    if (latestCircleId !== circleId) {
+      setStatus('deploy-status', 'circle id changed, retry deploy', true)
+      return
+    }
+    setStatus('deploy-status', 'submitting tx...', false)
     const result = await postJson('/api/circle/deploy', {
       ...payload,
-      ou: '200000',
+      ou: fee,
       pin
     })
-    const circleId = result.circle_id
-    if (!CircleBridgePolicy.validCircleId(circleId)) {
-      throw new Error('circle deploy returned invalid id')
+    const submittedCircleId = result.circle_id || circleId
+    const uri = circleUriOf(submittedCircleId, '/index.html')
+    $('circle-id').value = uri
+    if ($('upload-circle-id')) {
+      $('upload-circle-id').value = submittedCircleId
     }
-    $('circle-id').value = circleUriOf(circleId, '/index.html')
-    setStatus('deploy-status', `submitted ${result.tx_hash || 'tx'} for ${circleId}`, false)
-    setStatus('status', `deployed circle shell ${circleId}`, false)
+    setUploadMode(config.resource_mode === 'public_resources' ? 'plain' : 'sealed')
+    setSubmittedStatus('deploy-status', result.tx_hash, [`default browse uri: ${uri}`], wallet.explorer_url)
+    setStatus('status', `deployed circle ${submittedCircleId}`, false)
   } catch (err) {
-    setStatus('deploy-status', err.message || 'deploy failed', true)
+    setStatus('deploy-status', lockedMessageOf(err), true)
   }
+}
+
+const selectedUploadMode = () => $('upload-mode') && $('upload-mode').value === 'plain' ? 'plain' : 'sealed'
+
+const setUploadMode = (mode) => {
+  if ($('upload-mode')) {
+    $('upload-mode').value = mode === 'plain' ? 'plain' : 'sealed'
+  }
+  syncUploadMode()
+}
+
+const uploadModeOfResourceMode = (resourceMode) => {
+  if (resourceMode === 'public_resources') return 'plain'
+  if (resourceMode === 'sealed_read') return 'sealed'
+  return null
+}
+
+const syncUploadModeForResourceMode = (resourceMode) => {
+  const mode = uploadModeOfResourceMode(resourceMode)
+  if (mode) {
+    setUploadMode(mode)
+  }
+}
+
+const syncUploadMode = () => {
+  const sealedFields = $('upload-sealed-fields')
+  if (sealedFields) {
+    sealedFields.style.display = selectedUploadMode() === 'plain' ? 'none' : ''
+  }
+  syncUploadFeeEstimate()
 }
 
 const selectedUploadPassphrase = () => ($('upload-passphrase') ? $('upload-passphrase').value : '') || $('sealed-passphrase').value
 
-const uploadSealedAsset = async () => {
-  const circleId = parseCircleTarget($('circle-id').value.trim(), $('upload-path').value).circleId
-  const path = normalizeAssetPath($('upload-path').value)
-  const contentType = $('upload-content-type').value.trim()
-  const keyId = $('upload-key-id').value.trim()
-  const passphrase = selectedUploadPassphrase()
-  const file = $('upload-file').files[0]
-  const paddingClass = $('upload-padding').value
-  if (!circleId || !path || !contentType || !keyId || !passphrase || !file) {
-    setStatus('upload-status', 'circle id, path, content type, key id, passphrase, and file required', true)
+const selectedUploadCircleRaw = () => ($('upload-circle-id') && $('upload-circle-id').value.trim()) || $('circle-id').value.trim()
+
+const selectedUploadCircleId = () => {
+  const raw = selectedUploadCircleRaw()
+  const parsed = parseCircleUri(raw)
+  return parsed ? parsed.circleId : raw
+}
+
+const selectedUploadFile = () => ($('upload-file') && $('upload-file').files[0]) || null
+
+const estimatedUploadB64Length = (file) => {
+  if (selectedUploadMode() === 'plain') {
+    return base64EncodedLength(file.size)
+  }
+  const bareSize = 4 + file.size
+  const target = padTargetBytes($('upload-padding').value)
+  const frameSize = target ? Math.ceil(bareSize / target) * target : bareSize
+  return base64EncodedLength(sealedMagic.length + 12 + frameSize + 16)
+}
+
+const syncUploadFeeEstimate = () => {
+  const element = $('upload-fee')
+  const file = selectedUploadFile()
+  if (!element) {
     return
   }
-  setStatus('upload-status', 'encrypting...', false)
-  try {
-    const plaintext = new Uint8Array(await file.arrayBuffer())
-    const sealed = await encryptSealedBytes(circleId, keyId, passphrase, plaintext, paddingClass)
-    if (sealed.ciphertext_b64.length > circleAssetMaxB64Bytes) {
-      throw new Error('sealed asset exceeds 32mb circle limit')
+  if (!file) {
+    if (element.value.trim() === uploadFeeGuess) {
+      element.value = ''
     }
-    const uploadOu = String(circleAssetFeeOfCiphertextB64(sealed.ciphertext_b64))
-    setStatus('upload-status', `submitting tx | ou ${uploadOu}`, false)
+    uploadFeeGuess = ''
+    return
+  }
+  const nextFee = String(circleAssetFeeOfB64Length(estimatedUploadB64Length(file)))
+  if (!element.value.trim() || element.value.trim() === uploadFeeGuess) {
+    element.value = nextFee
+  }
+  uploadFeeGuess = nextFee
+}
+
+const selectedUploadFee = (fallback) => {
+  const element = $('upload-fee')
+  if (!element) {
+    return fallback
+  }
+  const raw = element.value.trim()
+  if (/^[1-9][0-9]*$/.test(raw) && raw !== uploadFeeGuess) {
+    return raw
+  }
+  element.value = fallback
+  uploadFeeGuess = fallback
+  return fallback
+}
+
+const updateUploadFileState = (file) => {
+  const state = $('upload-file-state')
+  if (!state) {
+    return
+  }
+  state.textContent = file ? `${file.name} | ${formatFileSize(file.size)}` : 'no asset selected'
+}
+
+const updateUploadSelection = (file) => {
+  if (file) {
+    const nextPath = `/${file.name}`
+    const nextContentType = file.type || guessContentType(file.name)
+    if ($('upload-path') && (!$('upload-path').value.trim() || $('upload-path').value.trim() === uploadPathGuess)) {
+      $('upload-path').value = nextPath
+    }
+    if ($('upload-content-type') && (!$('upload-content-type').value.trim() || $('upload-content-type').value.trim() === uploadContentTypeGuess)) {
+      $('upload-content-type').value = nextContentType
+    }
+    if ($('upload-fee') && $('upload-fee').value.trim() === uploadFeeGuess) {
+      $('upload-fee').value = ''
+    }
+    uploadPathGuess = nextPath
+    uploadContentTypeGuess = nextContentType
+    uploadFeeGuess = ''
+  }
+  updateUploadFileState(file)
+  syncUploadFeeEstimate()
+}
+
+const uploadCircleAsset = async () => {
+  const file = selectedUploadFile()
+  const rawPath = $('upload-path').value.trim() || (file ? `/${file.name}` : '')
+  const circleId = selectedUploadCircleId()
+  const path = normalizeAssetPath(rawPath)
+  const contentType = $('upload-content-type').value.trim()
+  if (!circleId || !path || !contentType || !file) {
+    setStatus('upload-status', 'circle id, path, content type, and file required', true)
+    return
+  }
+  try {
+    if (!(await ensureWalletUnlocked('upload-status'))) {
+      return
+    }
+    const info = await fetchJson(`/api/circle/info?circle_id=${encodeURIComponent(circleId)}`)
+    const requiredMode = uploadModeOfResourceMode(info.resource_mode)
+    const mode = selectedUploadMode()
+    if (!requiredMode) {
+      setStatus('upload-status', `unsupported circle resource mode ${info.resource_mode || 'unknown'}`, true)
+      return
+    }
+    if (mode !== requiredMode) {
+      setUploadMode(requiredMode)
+      setStatus('upload-status', `${info.resource_mode} circles require ${requiredMode === 'plain' ? 'plain' : 'sealed_read'} asset mode`, true)
+      return
+    }
+    const keyId = $('upload-key-id').value.trim()
+    const passphrase = selectedUploadPassphrase()
+    const paddingClass = $('upload-padding').value
+    if (mode === 'sealed' && (!keyId || !passphrase)) {
+      setStatus('upload-status', 'key id and sealed read passphrase required', true)
+      return
+    }
+    const plaintext = new Uint8Array(await file.arrayBuffer())
+    const body = {
+      circle_id: circleId,
+      path,
+      content_type: contentType,
+      encoding: 'identity'
+    }
+    let endpoint = '/api/circle/asset_plain'
+    let statusText = 'submitting asset...'
+    if (mode === 'sealed') {
+      setStatus('upload-status', 'encrypting...', false)
+      const sealed = await encryptSealedBytes(circleId, keyId, passphrase, plaintext, paddingClass)
+      if (sealed.ciphertext_b64.length > circleAssetMaxB64Bytes) {
+        throw new Error('sealed asset exceeds 32mb circle limit')
+      }
+      endpoint = '/api/circle/asset_encrypted'
+      statusText = 'submitting encrypted asset...'
+      body.key_id = keyId
+      body.plaintext_hash = sealed.plaintext_hash
+      body.padding_class = paddingClass
+      body.ciphertext_b64 = sealed.ciphertext_b64
+      body.ou = selectedUploadFee(String(circleAssetFeeOfCiphertextB64(sealed.ciphertext_b64)))
+    } else {
+      const bodyB64 = bytesToBase64(plaintext)
+      if (bodyB64.length > circleAssetMaxB64Bytes) {
+        throw new Error('asset exceeds 32mb circle limit')
+      }
+      body.body_b64 = bodyB64
+      body.ou = selectedUploadFee(String(circleAssetFeeOfB64Length(bodyB64.length)))
+    }
+    const wallet = await fetchJson('/api/wallet')
+    const confirmed = await circleConfirm(
+      'circle asset upload',
+      [
+        `circle id: ${circleId}`,
+        `asset mode: ${mode === 'plain' ? 'plain' : 'sealed_read'}`,
+        `path: ${path}`,
+        `content type: ${contentType}`,
+        `file size: ${formatFileSize(file.size)}`,
+        `fee ou: ${body.ou}`
+      ].join('\n'),
+      'sign'
+    )
+    if (!confirmed) {
+      setStatus('upload-status', 'cancelled', false)
+      return
+    }
     const pin = await circlePin('confirm circle asset', `enter PIN to upload ${path} | ${circleId}`)
     if (!pin) {
       throw new Error('circle asset upload cancelled')
     }
-    const result = await postJson('/api/circle/asset_encrypted', {
-      circle_id: circleId,
-      path,
-      content_type: contentType,
-      encoding: 'identity',
-      key_id: keyId,
-      plaintext_hash: sealed.plaintext_hash,
-      padding_class: paddingClass,
-      ciphertext_b64: sealed.ciphertext_b64,
-      ou: uploadOu,
-      pin
-    })
+    setStatus('upload-status', statusText, false)
+    const result = await postJson(endpoint, { ...body, pin })
     decryptedCache.clear()
-    setStatus('upload-status', `submitted ${result.tx_hash || 'tx'}`, false)
-    if (currentCircleTarget().path === path) {
+    setSubmittedStatus('upload-status', result.tx_hash, [circleUriOf(circleId, path)], wallet.explorer_url)
+    const target = currentCircleTarget()
+    if (target.circleId === circleId && target.path === path) {
       await loadCircle()
     }
   } catch (err) {
-    setStatus('upload-status', err.message || 'upload failed', true)
+    setStatus('upload-status', lockedMessageOf(err), true)
   }
 }
 
@@ -2195,23 +2542,27 @@ const guessContentType = (name) => {
 }
 
 bindIfPresent('load-btn', 'click', loadCircle)
+bindIfPresent('wallet-btn', 'click', () => { window.location.href = 'index.html' })
 bindIfPresent('preview-expand-btn', 'click', toggleExpandedPreview)
 bindIfPresent('preview-overlay-close', 'click', closeExpandedPreview)
 bindIfPresent('overlay-open-btn', 'click', async () => {
   syncMainControlsFromOverlay()
   await loadCircle()
 })
-bindIfPresent('deploy-btn', 'click', deploySealedCircle)
-bindIfPresent('upload-btn', 'click', uploadSealedAsset)
+bindIfPresent('deploy-btn', 'click', deployCircle)
+bindIfPresent('deploy-mode', 'change', syncDeployMode)
+bindIfPresent('upload-btn', 'click', uploadCircleAsset)
 bindIfPresent('upload-file', 'change', (event) => {
   const file = event.target.files[0]
-  if (!file) return
-  if ($('upload-path') && (!$('upload-path').value.trim() || $('upload-path').value.trim() === '/index.html')) {
-    $('upload-path').value = `/${file.name}`
-  }
-  if ($('upload-content-type') && (!$('upload-content-type').value.trim() || $('upload-content-type').value.trim() === 'text/html; charset=utf-8')) {
-    $('upload-content-type').value = file.type || guessContentType(file.name)
-  }
+  updateUploadSelection(file)
+})
+bindIfPresent('upload-mode', 'change', syncUploadMode)
+bindIfPresent('upload-padding', 'change', syncUploadFeeEstimate)
+document.querySelectorAll('.nav-tabs a[data-circle-view]').forEach((tab) => {
+  tab.addEventListener('click', (event) => {
+    event.preventDefault()
+    switchCircleView(tab.getAttribute('data-circle-view'))
+  })
 })
 bindIfPresent('circle-id', 'keydown', (event) => {
   if (event.key === 'Enter') {
@@ -2256,6 +2607,7 @@ if (startUri) {
     $('circle-id').value = startUri
     if ($('upload-path')) {
       $('upload-path').value = target.path
+      uploadPathGuess = target.path
     }
     loadCircle()
   }
@@ -2264,6 +2616,10 @@ if (startUri) {
   $('circle-id').value = target.uri || startCircle
   if ($('upload-path')) {
     $('upload-path').value = target.path
+    uploadPathGuess = target.path
   }
   loadCircle()
 }
+syncDeployMode()
+syncUploadMode()
+updateUploadFileState(selectedUploadFile())
