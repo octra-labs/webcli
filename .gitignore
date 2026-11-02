@@ -1,8 +1,17 @@
 octra_wallet
 octra_wallet.exe
+webcli
+webcli.exe
 *.o
 *.dll
 data/
 *.oct
 pvac/build/
 .DS_Store
+.keys/
+runtime_data/
+build/
+*.zip
+octra_wallet.pre-*
+__pycache__/
+*.log

@@ -1,29 +1,5 @@
-/*
-    This file is part of Octra Wallet (webcli).
-
-    Octra Wallet is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 2 of the License, or
-    (at your option) any later version.
-
-    Octra Wallet is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with Octra Wallet.  If not, see <http://www.gnu.org/licenses/>.
-
-    This program is released under the GPL with the additional exemption
-    that compiling, linking, and/or using OpenSSL is allowed.
-    You are free to remove this exemption from derived works.
-
-    Copyright 2025-2026 Octra Labs
-              2025-2026 David A.
-              2025-2026 Alex T.
-              2025-2026 Vadim S.
-              2025-2026 Julia L.
-*/
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
 
 #pragma once
 #include <cstdint>
@@ -31,6 +7,7 @@
 #include <string>
 #include <array>
 #include <memory>
+#include <optional>
 #include <vector>
 #include <stdexcept>
 #include "../crypto_utils.hpp"
@@ -44,10 +21,13 @@ namespace octra {
 constexpr const char* HFHE_PREFIX = "hfhe_v1|";
 constexpr const char* RP_PREFIX = "rp_v1|";
 constexpr const char* ZKZP_PREFIX = "zkzp_v2|";
+constexpr size_t wallet_cipher_limit = 8 * 1024 * 1024;
+constexpr size_t wallet_balance_layers = 1024;
 
 class PvacBridge {
     pvac_pubkey pk_ = nullptr;
     pvac_seckey sk_ = nullptr;
+    int proof_rule_ = 0;
     static constexpr int64_t max_balance_raw_ = 1000000000000000LL;
     using PubkeyPtr = std::unique_ptr<void, decltype(&pvac_free_pubkey)>;
 
@@ -63,18 +43,41 @@ class PvacBridge {
             pvac_pubkey_matches_secret_profile(remote.get(), pk_, sk_) == 1;
     }
 
+    bool stored_secret_profile(const PubkeyPtr& remote) const {
+        return remote &&
+            pvac_pubkey_matches_stored_secret(remote.get(), pk_, sk_) == 1;
+    }
+
     std::vector<uint8_t> serialize_ptr(uint8_t*(*fn)(void*, size_t*), void* handle) {
+        if (!handle) throw std::runtime_error("PVAC object is missing");
         size_t len = 0;
-        uint8_t* ptr = fn(handle, &len);
-        std::vector<uint8_t> data(ptr, ptr + len);
-        pvac_free_bytes(ptr);
-        return data;
+        const std::unique_ptr<uint8_t, decltype(&pvac_free_bytes)> data(
+            fn(handle, &len), &pvac_free_bytes);
+        if (!data || !len) throw std::runtime_error("PVAC serialization failed");
+        return std::vector<uint8_t>(data.get(), data.get() + len);
     }
 
 public:
     PvacBridge() = default;
     PvacBridge(const PvacBridge&) = delete;
     PvacBridge& operator=(const PvacBridge&) = delete;
+
+    std::unique_ptr<PvacBridge> snapshot() {
+        auto result = std::make_unique<PvacBridge>();
+        if (!pvac_copy_keys(pk_, sk_, &result->pk_, &result->sk_))
+            throw std::runtime_error("PVAC snapshot failed");
+        result->proof_rule_ = proof_rule_;
+        return result;
+    }
+
+    pvac_cipher decode_balance(const std::string& text) {
+        auto ct = decode_cipher(text);
+        if (ct && pvac_cipher_base_layer_count(ct) > wallet_balance_layers) {
+            pvac_free_cipher(ct);
+            return nullptr;
+        }
+        return ct;
+    }
 
     ~PvacBridge() {
         if (pk_) pvac_free_pubkey(pk_);
@@ -84,6 +87,7 @@ public:
     void reset() {
         if (pk_) { pvac_free_pubkey(pk_); pk_ = nullptr; }
         if (sk_) { pvac_free_seckey(sk_); sk_ = nullptr; }
+        proof_rule_ = false;
     }
 
     bool init(const std::string& priv_b64) {
@@ -126,6 +130,14 @@ public:
 
     pvac_pubkey pk() const { return pk_; }
     pvac_seckey sk() const { return sk_; }
+    void proof_math(bool wide) { proof_rule_ = wide ? 1 : 0; }
+
+    int proof_policy() const { return proof_rule_; }
+
+    void proof_policy(int rule) {
+        if (rule < 0 || rule > 3) throw std::invalid_argument("invalid proof policy");
+        proof_rule_ = rule;
+    }
 
     pvac_cipher encrypt(uint64_t value, const uint8_t seed[32]) {
         return pvac_enc_value_seeded(pk_, sk_, value, seed);
@@ -140,12 +152,13 @@ public:
     }
 
     void decrypt_fp(pvac_cipher ct, uint64_t& lo, uint64_t& hi) {
-        pvac_dec_value_fp(pk_, sk_, ct, &lo, &hi);
+        if (!pvac_dec_fp_checked(pk_, sk_, ct, &lo, &hi))
+            throw std::domain_error("ciphertext cannot be decrypted as a scalar");
     }
 
     int64_t get_balance(const std::string& cipher_str) {
         if (cipher_str.empty() || cipher_str == "0") return 0;
-        pvac_cipher ct = decode_cipher(cipher_str);
+        pvac_cipher ct = decode_balance(cipher_str);
         if (!ct) throw std::runtime_error("encrypted balance ciphertext is invalid");
         int64_t current = 0;
         int64_t legacy = 0;
@@ -181,7 +194,7 @@ public:
         pvac_pubkey legacy = pvac_deserialize_pubkey(key_raw.data(), key_raw.size());
         if (!legacy) return false;
         const bool profile_ok = pvac_pubkey_is_legacy_v1_profile(legacy, pk_) == 1;
-        pvac_cipher ct = profile_ok ? decode_cipher(cipher_str) : nullptr;
+        pvac_cipher ct = profile_ok ? decode_balance(cipher_str) : nullptr;
         const bool decoded = ct &&
             pvac_dec_value_legacy_i64(legacy, sk_, ct, &value) != 0 &&
             value >= 0 && value <= max_balance_raw_;
@@ -207,26 +220,26 @@ public:
         return out;
     }
 
-    bool has_key_bound_material(pvac_cipher ct) {
+    bool has_key_proof(pvac_cipher ct) {
         return pvac_cipher_has_key_bound_material(ct) == 1;
     }
 
-    bool has_key_bound_material(const std::string& cipher_str) {
+    bool has_key_proof(const std::string& cipher_str) {
         pvac_cipher ct = decode_cipher(cipher_str);
         if (!ct) return false;
-        bool ok = has_key_bound_material(ct);
+        bool ok = has_key_proof(ct);
         pvac_free_cipher(ct);
         return ok;
     }
 
-    bool has_canonical_r_com(pvac_cipher ct) {
+    bool has_committed_r(pvac_cipher ct) {
         return pvac_cipher_has_canonical_r_com(pk_, ct) == 1;
     }
 
-    bool has_canonical_r_com(const std::string& cipher_str) {
+    bool has_committed_r(const std::string& cipher_str) {
         pvac_cipher ct = decode_cipher(cipher_str);
         if (!ct) return false;
-        bool ok = has_canonical_r_com(ct);
+        bool ok = has_committed_r(ct);
         pvac_free_cipher(ct);
         return ok;
     }
@@ -267,35 +280,39 @@ public:
         return out;
     }
 
-    pvac_zero_proof make_zero_proof(pvac_cipher ct) {
-        return pvac_make_zero_proof(pk_, sk_, ct);
+    pvac_zero_proof make_zero_proof(pvac_cipher ct, std::optional<int> math = std::nullopt) {
+        return pvac_prove_zero(pk_, sk_, ct, math.value_or(proof_rule_));
     }
 
-    pvac_zero_proof make_zero_proof_bound(pvac_cipher ct, uint64_t amount,
-                                          const uint8_t blinding[32]) {
-        return pvac_make_zero_proof_bound(pk_, sk_, ct, amount, blinding);
+    bool verify_zero(pvac_cipher ct, pvac_zero_proof proof) {
+        return pvac_check_zero(pk_, ct, proof, proof_rule_) != 0;
     }
 
-    pvac_zero_proof make_bound_range_proof(pvac_cipher ct, uint64_t amount,
-                                           const uint8_t blinding[32]) {
-        return pvac_make_bound_range_proof(pk_, sk_, ct, amount, blinding);
+    pvac_zero_proof make_cipher_proof(pvac_cipher ct, uint64_t amount,
+        const uint8_t blinding[32], std::optional<int> math = std::nullopt) {
+        return pvac_prove_amount(pk_, sk_, ct, amount, blinding, PVAC_AMOUNT, math.value_or(proof_rule_));
     }
 
-    bool verify_bound_range(
+    pvac_zero_proof make_range_proof(pvac_cipher ct, uint64_t amount,
+        const uint8_t blinding[32], std::optional<int> math = std::nullopt) {
+        return pvac_prove_amount(pk_, sk_, ct, amount, blinding, PVAC_RANGE, math.value_or(proof_rule_));
+    }
+
+    bool verify_range_proof(
         pvac_cipher ct,
         pvac_zero_proof proof,
         const std::array<uint8_t, 32>& commitment) {
-        return pvac_verify_bound_range_commitment(
+        return pvac_verify_amount(
             pk_,
             ct,
             proof,
-            commitment.data()) != 0;
+            commitment.data(), PVAC_RANGE, proof_rule_) != 0;
     }
 
-    bool verify_zero_proof_bound(pvac_cipher ct,
+    bool verify_cipher_proof(pvac_cipher ct,
                                  pvac_zero_proof proof,
-                                 const std::array<uint8_t, 32>& commitment) {
-        return pvac_verify_zero_bound(pk_, ct, proof, commitment.data()) != 0;
+        const std::array<uint8_t, 32>& commitment, std::optional<int> math = std::nullopt) {
+        return pvac_verify_amount(pk_, ct, proof, commitment.data(), PVAC_AMOUNT, math.value_or(proof_rule_)) != 0;
     }
 
     pvac_range_proof make_range_proof(pvac_cipher ct, uint64_t value) {
@@ -346,13 +363,18 @@ public:
         return secret_profile(remote);
     }
 
-    bool try_get_balance_with_pubkey(const std::string& cipher_str,
-                                     const std::string& pubkey_b64,
-        int64_t& value) {
+    bool pubkey_matches_stored_secret(const std::string& value) {
+        auto remote = decode_pubkey(value);
+        return stored_secret_profile(remote);
+    }
+
+    bool try_get_stored_balance(const std::string& cipher_str,
+                                const std::string& pubkey_b64,
+                                int64_t& value) {
         value = 0;
         auto remote = decode_pubkey(pubkey_b64);
-        pvac_cipher ct = secret_profile(remote)
-            ? decode_cipher(cipher_str)
+        pvac_cipher ct = stored_secret_profile(remote)
+            ? decode_balance(cipher_str)
             : nullptr;
         const bool ok = ct &&
             pvac_dec_value_i64(remote.get(), sk_, ct, &value) != 0 &&
@@ -363,23 +385,24 @@ public:
         return ok;
     }
 
-    pvac_zero_proof make_zero_proof_bound_with_pubkey(
-        const std::string& pubkey_b64,
-        pvac_cipher ct,
-        uint64_t amount,
-        const uint8_t blinding[32]) {
+    bool try_get_balance_with_pubkey(const std::string& cipher_str,
+                                     const std::string& pubkey_b64,
+        int64_t& value) {
+        value = 0;
         auto remote = decode_pubkey(pubkey_b64);
-        if (!secret_profile(remote))
-            throw std::runtime_error("registered pvac key profile is invalid");
-        return pvac_make_zero_proof_bound(
-            remote.get(),
-            sk_,
-            ct,
-            amount,
-            blinding);
+        pvac_cipher ct = secret_profile(remote)
+            ? decode_balance(cipher_str)
+            : nullptr;
+        const bool ok = ct &&
+            pvac_dec_value_i64(remote.get(), sk_, ct, &value) != 0 &&
+            value >= 0 &&
+            value <= max_balance_raw_;
+        pvac_free_cipher(ct);
+        if (!ok) value = 0;
+        return ok;
     }
 
-    pvac_zero_proof make_zero_proof_bound_key_switch_with_pubkey(
+    pvac_zero_proof make_proof_with_key(
         const std::string& pubkey_b64,
         pvac_cipher ct,
         uint64_t amount,
@@ -387,43 +410,59 @@ public:
         auto remote = decode_pubkey(pubkey_b64);
         if (!secret_profile(remote))
             throw std::runtime_error("registered pvac key profile is invalid");
-        auto proof = pvac_make_zero_proof_bound_key_switch(
+        return pvac_prove_amount(
             remote.get(),
             sk_,
             ct,
             amount,
-            blinding);
+            blinding, PVAC_AMOUNT, proof_rule_);
+    }
+
+    pvac_zero_proof make_switch_proof_with_key(
+        const std::string& pubkey_b64,
+        pvac_cipher ct,
+        uint64_t amount,
+        const uint8_t blinding[32]) {
+        auto remote = decode_pubkey(pubkey_b64);
+        if (!stored_secret_profile(remote))
+            throw std::runtime_error("registered pvac key profile is invalid");
+        auto proof = pvac_prove_amount(
+            remote.get(),
+            sk_,
+            ct,
+            amount,
+            blinding, PVAC_REFRESH, proof_rule_);
         if (!proof)
             throw std::runtime_error("key switch proof generation failed");
         return proof;
     }
 
-    bool verify_zero_proof_bound_with_pubkey(
+    bool verify_proof_with_key(
         const std::string& pubkey_b64,
         pvac_cipher ct,
         pvac_zero_proof proof,
         const std::array<uint8_t, 32>& commitment) {
         auto remote = decode_pubkey(pubkey_b64);
         return secret_profile(remote) &&
-            pvac_verify_zero_bound(
+            pvac_verify_amount(
                 remote.get(),
                 ct,
                 proof,
-                commitment.data()) != 0;
+                commitment.data(), PVAC_AMOUNT, proof_rule_) != 0;
     }
 
-    bool verify_zero_proof_bound_key_switch_with_pubkey(
+    bool verify_switch_proof_with_key(
         const std::string& pubkey_b64,
         pvac_cipher ct,
         pvac_zero_proof proof,
         const std::array<uint8_t, 32>& commitment) {
         auto remote = decode_pubkey(pubkey_b64);
-        return secret_profile(remote) &&
-            pvac_verify_zero_bound_key_switch(
+        return stored_secret_profile(remote) &&
+            pvac_verify_amount(
                 remote.get(),
                 ct,
                 proof,
-                commitment.data()) != 0;
+                commitment.data(), PVAC_REFRESH, proof_rule_) != 0;
     }
 
     std::vector<uint8_t> serialize_range_proof(pvac_range_proof rp) {
@@ -434,17 +473,17 @@ public:
         return serialize_ptr(pvac_serialize_zero_proof, zp);
     }
 
-    std::vector<uint8_t> serialize_bound_range_proof(pvac_zero_proof zp) {
+    std::vector<uint8_t> serialize_cipher_range(pvac_zero_proof zp) {
         return serialize_ptr(pvac_serialize_bound_range_proof, zp);
     }
 
-    std::string encode_bound_cipher(pvac_cipher ct) {
+    std::string encode_proven_cipher(pvac_cipher ct) {
         auto data = serialize_cipher(ct);
         return std::string(HFHE_PREFIX) + base64_encode(data.data(), data.size());
     }
 
     pvac_cipher decode_cipher(const std::string& s) {
-        if (s.rfind(HFHE_PREFIX, 0) != 0) return nullptr;
+        if (s.size() > wallet_cipher_limit || s.rfind(HFHE_PREFIX, 0) != 0) return nullptr;
         auto raw = base64_decode(s.substr(strlen(HFHE_PREFIX)));
         return pvac_deserialize_cipher(raw.data(), raw.size());
     }
@@ -454,8 +493,8 @@ public:
         return std::string(RP_PREFIX) + base64_encode(data.data(), data.size());
     }
 
-    std::string encode_bound_range_proof(pvac_zero_proof zp) {
-        auto data = serialize_bound_range_proof(zp);
+    std::string encode_cipher_range(pvac_zero_proof zp) {
+        auto data = serialize_cipher_range(zp);
         return std::string(RP_PREFIX) + base64_encode(data.data(), data.size());
     }
 

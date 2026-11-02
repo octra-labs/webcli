@@ -1,33 +1,11 @@
-<!--
-    This file is part of Octra Wallet (webcli).
-
-    Octra Wallet is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 2 of the License, or
-    (at your option) any later version.
-
-    Octra Wallet is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with Octra Wallet.  If not, see <http://www.gnu.org/licenses/>.
-
-    This program is released under the GPL with the additional exemption
-    that compiling, linking, and/or using OpenSSL is allowed.
-    You are free to remove this exemption from derived works.
-
-    Copyright 2025-2026 Octra Labs
-              2025-2026 David A.
-              2025-2026 Alex T.
-              2025-2026 Vadim S.
-              2025-2026 Julia L.
--->
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<!-- Copyright (c) 2023-2026 Octra Labs <dev@octra.org> -->
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<script src="/api_access.js"></script>
+<script src="/amount_units.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octra_wallet</title>
@@ -42,8 +20,13 @@
     <div id="modal-btns">
       <button class="action-btn" data-action="modalShowImport">import</button>
       <button class="action-btn" data-action="modalCreate">create new</button>
+      <button class="action-btn" id="wallet-back-btn" style="background:#8C9DB6;display:none" data-action="modalBack">back</button>
     </div>
     <div id="modal-import" style="display:none">
+      <div id="import-recovery" class="form-row" style="display:none">
+        <label>public address to recover</label>
+        <input id="import-recovery-address" type="text" spellcheck="false" autocomplete="off">
+      </div>
       <div class="import-tabs">
         <a href="#" class="import-tab active" data-action="switchImportTab" data-arg="seed" data-prevent="1">seed phrase</a>
         <a href="#" class="import-tab" data-action="switchImportTab" data-arg="key" data-prevent="1">private key</a>
@@ -78,14 +61,17 @@
       </div>
     </div>
     <div id="modal-pin" style="display:none">
+      <div id="modal-pin-terms" style="white-space:pre-wrap;text-transform:none;overflow-wrap:anywhere"></div>
       <div class="form-row">
         <label id="modal-pin-label">enter PIN to unlock</label>
         <input type="password" id="modal-pin-input" maxlength="64" placeholder="••••••••••••" autocomplete="current-password">
       </div>
+      <div id="pin-wait" role="status" aria-live="polite"></div>
       <div class="action-row">
-        <button class="action-btn" data-action="modalUnlock">unlock</button>
+        <button class="action-btn" id="pin-unlock-btn" data-action="modalUnlock">unlock</button>
         <button class="action-btn" id="pin-back-btn" style="background:#8C9DB6;display:none" data-action="modalBackFromPin">back</button>
       </div>
+      <a href="#" id="pin-recover-btn" style="display:none" data-action="modalRecover" data-prevent="1">forgot PIN?</a>
     </div>
     <div id="modal-pin-setup" style="display:none">
       <form data-nosubmit>
@@ -143,9 +129,9 @@
   <div class="view active" id="view-dashboard">
     <div class="stats-row">
       <div class="stat-box"><div class="label">public balance</div><div class="value" id="st-balance">-</div></div>
-      <div class="stat-box"><div class="label">encrypted balance <a class="ct-struct-link" id="ct-struct-link" href="cipher.html" target="_blank" rel="noopener" hidden>(ct struct)</a></div><div class="value" id="st-enc-balance">-</div><a href="#" id="btn-key-switch" style="display:none;text-align:center;font-size:11px" data-action="doKeySwitch" data-prevent="1">key switch required</a></div>
+      <div class="stat-box"><div class="label">encrypted balance <a class="ct-struct-link" id="ct-struct-link" href="cipher.html" target="_blank" rel="noopener" hidden>(ct struct)</a></div><div class="value" id="st-enc-balance">-</div><div class="label"><span id="st-encrypt-room">encrypt before refresh: checking</span> <a href="#" id="btn-key-switch" style="display:none" data-action="doKeySwitch" data-prevent="1">(refresh)</a></div></div>
       <div class="stat-box"><div class="label">nonce</div><div class="value" id="st-nonce">-</div></div>
-      <div class="stat-box"><div class="label">staging</div><div class="value" id="st-staging">-</div></div>
+      <div class="stat-box"><div class="label" title="Only your outgoing transactions waiting at the selected RPC node">staging (yours)</div><div class="value" id="st-staging">-</div><div class="label" id="st-wallet-work"></div></div>
     </div>
     <div class="section">
       <div class="section-title">recent transactions (<span id="dash-tx-count">0</span>)</div>
@@ -192,6 +178,7 @@
     <div class="form-split">
       <div class="form-panel">
         <div class="form-panel-title">encrypt</div>
+        <div class="balance-strip" id="enc-room">encrypt before refresh: checking</div>
         <div class="form-row">
           <label>amount to encrypt (oct)</label>
           <input type="text" id="enc-amount" placeholder="0.000000">
@@ -207,6 +194,7 @@
       </div>
       <div class="form-panel">
         <div class="form-panel-title">decrypt</div>
+        <div class="balance-strip" id="spend-room" hidden></div>
         <div class="form-row">
           <label>amount to decrypt (oct)</label>
           <input type="text" id="dec-amount" placeholder="0.000000">
@@ -356,7 +344,6 @@
               <option value="">- templates -</option>
               <option value="token">OCS01 Token</option>
               <option value="vault">Simple Vault</option>
-              <option value="amm">Swap AMM</option>
               <option value="escrow">Escrow</option>
               <option value="multisig">Multisig</option>
             </select>
@@ -529,6 +516,24 @@
       </div>
       <div id="settings-result"></div>
     </div>
+    <div class="section-title">api key</div>
+    <div class="form-area">
+      <p>for local tools and automation, you can use an API key (keep it private), protected operations require a PIN in any case. this key expires when the session is closed, including locking, RPC changes, etc.</p>
+      <div class="form-row" id="api-key-row" style="display:none">
+        <label for="api-key-value">api key</label>
+        <input type="text" id="api-key-value" readonly autocomplete="off" spellcheck="false">
+      </div>
+      <details>
+        <summary>use in scripts</summary>
+        <p>send the key in the HTTP header <strong><em><code>Authorization: Bearer &lt;api key&gt;</code></em></strong>. bearer means the request carries the key, keep it private. when opened through the launch link, the operator key lasts until WebCLI exits.</p>
+      </details>
+      <div class="action-row">
+        <button class="action-btn" id="api-key-show" data-action="showApiKey">show</button>
+        <button class="action-btn" id="api-key-copy" data-action="copyApiKey" disabled>copy</button>
+        <button class="action-btn" data-action="resetApiKey">hide</button>
+      </div>
+      <div id="api-key-result" role="status"></div>
+    </div>
     <div class="section-title">wallets</div>
     <div class="form-area">
       <div id="wallet-list"><div class="loading">loading...</div></div>
@@ -573,7 +578,7 @@
 <div class="footer">octra_wallet | 2026 | alpha ver. - 0.04.10</div>
 
 </div>
-<script src="wallet.js?v=44"></script>
+<script src="wallet.js?v=46"></script>
 </body>
 
 </html>

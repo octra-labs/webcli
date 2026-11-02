@@ -17,6 +17,7 @@ Program Escrow {
     assert_address(s)
     assert_address(b)
     assert_address(a)
+    require(s != b && s != a && b != a, "roles must differ")
     self.seller = s
     self.buyer = b
     self.arbiter = a

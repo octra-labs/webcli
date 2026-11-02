@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #include "pvac_c_api.h"
 
 #include "include/pvac/pvac.hpp"
@@ -72,26 +75,42 @@ static bool params_eq(const pvac::Params& a, const pvac::Params& b) {
         a.recrypt_rounds == b.recrypt_rounds;
 }
 
-static bool pubkey_is_key_bound_extension_impl(const pvac::PubKey& legacy, const pvac::PubKey& bound) {
-    if (!params_eq(legacy.prm, bound.prm)) return false;
-    if (legacy.canon_tag != bound.canon_tag) return false;
-    if (legacy.H_digest != bound.H_digest) return false;
-    if (!fp_eq(legacy.omega_B, bound.omega_B)) return false;
-    if (!fp_vec_eq(legacy.powg_B, bound.powg_B)) return false;
-    if (legacy.H.size() != bound.H.size()) return false;
+static bool key_extension_matches(const pvac::PubKey& legacy, const pvac::PubKey& extended) {
+    if (!params_eq(legacy.prm, extended.prm)) return false;
+    if (legacy.canon_tag != extended.canon_tag) return false;
+    if (legacy.H_digest != extended.H_digest) return false;
+    if (!fp_eq(legacy.omega_B, extended.omega_B)) return false;
+    if (!fp_vec_eq(legacy.powg_B, extended.powg_B)) return false;
+    if (legacy.H.size() != extended.H.size()) return false;
     for (size_t i = 0; i < legacy.H.size(); ++i)
-        if (!bitvec_eq(legacy.H[i], bound.H[i]))
+        if (!bitvec_eq(legacy.H[i], extended.H[i]))
             return false;
-    if (legacy.ubk.perm != bound.ubk.perm) return false;
-    if (legacy.ubk.inv != bound.ubk.inv) return false;
-    if (bytes32_zero(bound.circuit_prf_key_commit)) return false;
+    if (legacy.ubk.perm != extended.ubk.perm) return false;
+    if (legacy.ubk.inv != extended.ubk.inv) return false;
+    if (bytes32_zero(extended.circuit_prf_key_commit)) return false;
     if (!bytes32_zero(legacy.circuit_prf_key_commit) &&
-        legacy.circuit_prf_key_commit != bound.circuit_prf_key_commit)
+        legacy.circuit_prf_key_commit != extended.circuit_prf_key_commit)
         return false;
     return true;
 }
 
 extern "C" {
+
+int pvac_copy_keys(pvac_pubkey pk, pvac_seckey sk, pvac_pubkey* public_copy, pvac_seckey* secret_copy) {
+    if (!public_copy || !secret_copy) return 0;
+    *public_copy = nullptr;
+    *secret_copy = nullptr;
+    if (!pk || !sk) return 0;
+    try {
+        auto pub = std::make_unique<pvac::PubKey>(*PK(pk));
+        auto secret = std::make_unique<pvac::SecKey>(*SK(sk));
+        *public_copy = pub.release();
+        *secret_copy = secret.release();
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
 
 pvac_params pvac_default_params(void) {
     auto* p = new (std::nothrow) pvac::Params();
@@ -157,32 +176,24 @@ int pvac_dec_value_legacy_i64(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
 
 void pvac_dec_value_fp(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
                        uint64_t* lo_out, uint64_t* hi_out) {
-    if (!lo_out || !hi_out)
-        return;
-    try {
-        pvac::Fp r = pvac::dec_value(*PK(pk), *SK(sk), *CT(ct));
-        *lo_out = r.lo;
-        *hi_out = r.hi;
-    } catch (...) {
+    if (!lo_out || !hi_out) return;
+    if (!pvac_dec_fp_checked(pk, sk, ct, lo_out, hi_out)) {
         *lo_out = 0;
         *hi_out = 0;
     }
 }
 
-pvac_cipher pvac_enc_value_fp_seeded(pvac_pubkey pk, pvac_seckey sk,
-                                     uint64_t lo, uint64_t hi,
-                                     const uint8_t seed[32]) {
-    pvac::SeedableRng rng = pvac::make_seeded_rng(seed);
-    pvac::Fp v;
-    v.lo = lo;
-    v.hi = hi;
-    std::vector<pvac::Fp> vals = {v};
-    std::vector<pvac::Fp> m = {rng.fp_nonzero()};
-    auto* ct = new pvac::Cipher();
-    *ct = pvac::combine_ciphers(*PK(pk),
-        pvac::enc_fp_depth_seeded(*PK(pk), *SK(sk), pvac::field::Op::add(vals, m), 0, rng),
-        pvac::enc_fp_depth_seeded(*PK(pk), *SK(sk), pvac::field::Op::neg(m), 0, rng));
-    return ct;
+int pvac_dec_fp_checked(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
+                        uint64_t* lo_out, uint64_t* hi_out) {
+    if (!pk || !sk || !ct || !lo_out || !hi_out) return 0;
+    try {
+        const auto value = pvac::dec_value(*PK(pk), *SK(sk), *CT(ct));
+        *lo_out = value.lo;
+        *hi_out = value.hi;
+        return 1;
+    } catch (...) {
+        return 0;
+    }
 }
 
 pvac_cipher pvac_ct_add(pvac_pubkey pk, pvac_cipher a, pvac_cipher b) {
@@ -204,38 +215,51 @@ pvac_cipher pvac_ct_mul_seeded(pvac_pubkey pk, pvac_cipher a, pvac_cipher b, con
 }
 
 pvac_cipher pvac_ct_scale(pvac_pubkey pk, pvac_cipher ct, int64_t scalar) {
-    auto* out = new pvac::Cipher();
-    *out = pvac::ct_scale(*PK(pk), *CT(ct), pvac::fp_from_u64(static_cast<uint64_t>(scalar)));
-    return out;
+    if (!pk || !ct)
+        return nullptr;
+    try {
+        return new pvac::Cipher(pvac::ct_mul_const(*PK(pk), *CT(ct), scalar));
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 pvac_cipher pvac_ct_add_const(pvac_pubkey pk, pvac_cipher ct, uint64_t k_lo, uint64_t k_hi) {
-    auto* out = new pvac::Cipher();
+    if (!pk || !ct)
+        return nullptr;
     pvac::Fp k;
     k.lo = k_lo;
     k.hi = k_hi;
-    *out = *CT(ct);
-    for (size_t j = 0; j < out->c0.size(); ++j)
-        out->c0[j] = pvac::fp_add(out->c0[j], k);
-    return out;
+    try {
+        auto out = std::make_unique<pvac::Cipher>(pvac::ct_add_const(*PK(pk), *CT(ct), k));
+        return out.release();
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 pvac_cipher pvac_ct_sub_const(pvac_pubkey pk, pvac_cipher ct, uint64_t k) {
-    auto* out = new pvac::Cipher();
-    *out = *CT(ct);
-    pvac::Fp neg_k = pvac::fp_neg(pvac::fp_from_u64(k));
-    for (size_t j = 0; j < out->c0.size(); ++j)
-        out->c0[j] = pvac::fp_add(out->c0[j], neg_k);
-    return out;
+    if (!pk || !ct)
+        return nullptr;
+    try {
+        auto out = std::make_unique<pvac::Cipher>(pvac::ct_sub_const(*PK(pk), *CT(ct), k));
+        return out.release();
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 pvac_cipher pvac_ct_div_const(pvac_pubkey pk, pvac_cipher ct, uint64_t k_lo, uint64_t k_hi) {
-    auto* out = new pvac::Cipher();
+    if (!pk || !ct)
+        return nullptr;
     pvac::Fp k;
     k.lo = k_lo;
     k.hi = k_hi;
-    *out = pvac::ct_scale(*PK(pk), *CT(ct), pvac::fp_inv(k));
-    return out;
+    try {
+        return new pvac::Cipher(pvac::ct_div_const(*PK(pk), *CT(ct), k));
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 pvac_cipher pvac_ct_square_seeded(pvac_pubkey pk, pvac_cipher ct, const uint8_t seed[32]) {
@@ -387,9 +411,9 @@ int pvac_cipher_inspect_public(pvac_cipher ct,
 
         for (size_t i = 0; i < c.E.size(); ++i) {
             const auto& edge = c.E[i];
-            const uint64_t tail_bits = edge.s.nbits % 64;
-            if (tail_bits != 0 && !edge.s.w.empty() &&
-                (edge.s.w.back() >> tail_bits) != 0)
+            const uint64_t used_bits = edge.s.nbits % 64;
+            if (used_bits != 0 && !edge.s.w.empty() &&
+                (edge.s.w.back() >> used_bits) != 0)
                 return -2;
             auto& layer = layers[edge.layer_id];
             ++layer.edge_count;
@@ -430,11 +454,11 @@ int pvac_cipher_inspect_public(pvac_cipher ct,
     }
 }
 
-int pvac_pubkey_is_key_bound_extension(pvac_pubkey legacy, pvac_pubkey bound) {
+int pvac_pubkey_is_key_bound_extension(pvac_pubkey legacy, pvac_pubkey extended) {
     try {
-        if (!legacy || !bound)
+        if (!legacy || !extended)
             return 0;
-        return pubkey_is_key_bound_extension_impl(*PK(legacy), *PK(bound)) ? 1 : 0;
+        return key_extension_matches(*PK(legacy), *PK(extended)) ? 1 : 0;
     } catch (...) {
         return 0;
     }
@@ -461,17 +485,39 @@ int pvac_pubkey_is_proof_profile(pvac_pubkey a, pvac_pubkey b) {
 }
 
 int pvac_pubkey_matches_secret_profile(
-    pvac_pubkey candidate,
+    pvac_pubkey proposed,
     pvac_pubkey current,
     pvac_seckey sk
 ) {
     try {
-        if (!candidate || !current || !sk)
+        if (!proposed || !current || !sk)
             return 0;
         return pvac::secret_profile_matches(
-            *PK(candidate),
+            *PK(proposed),
             *PK(current),
             *SK(sk)) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+int pvac_pubkey_matches_stored_secret(
+    pvac_pubkey stored,
+    pvac_pubkey current,
+    pvac_seckey sk
+) {
+    try {
+        if (!stored || !current || !sk)
+            return 0;
+        const auto& old_key = *PK(stored);
+        const auto& local_key = *PK(current);
+        if (pvac::pubkey_powers_ok(old_key))
+            return pvac::secret_profile_matches(old_key, local_key, *SK(sk)) ? 1 : 0;
+        if (old_key.powg_B.size() != local_key.powg_B.size())
+            return 0;
+        auto owned_key = old_key;
+        owned_key.powg_B = local_key.powg_B;
+        return pvac::secret_profile_matches(owned_key, local_key, *SK(sk)) ? 1 : 0;
     } catch (...) {
         return 0;
     }
@@ -491,16 +537,43 @@ int pvac_verify_zero(pvac_pubkey pk, pvac_cipher ct, pvac_zero_proof proof) {
     }
 }
 
+pvac_zero_proof pvac_prove_zero(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct, int wide) {
+    if (!pk || !sk || !ct || (wide < 0 || wide > 3)) return nullptr;
+    try {
+        return new pvac::ZeroProof(pvac::make_zero_proof(*PK(pk), *SK(sk), *CT(ct),
+            (wide & 1) ? pvac::ScalarRule::Wide : pvac::ScalarRule::Prior, (wide & 2) != 0));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+int pvac_check_zero(pvac_pubkey pk, pvac_cipher ct, pvac_zero_proof proof, int wide) {
+    if (!pk || !ct || !proof || (wide < 0 || wide > 3)) return 0;
+    try {
+        return pvac::verify_zero(*PK(pk), *CT(ct), *ZP(proof),
+            (wide & 1) ? pvac::ScalarRule::Wide : pvac::ScalarRule::Prior, (wide & 2) != 0);
+    } catch (...) {
+        return 0;
+    }
+}
+
 pvac_zero_proof pvac_make_zero_proof_bound(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
                                             uint64_t amount, const uint8_t blinding[32]) {
-    pvac::Scalar blind = pvac::sc_reduce256(blinding);
-    auto* zp = new pvac::ZeroProof();
-    *zp = pvac::make_zero_proof_bound(*PK(pk), *SK(sk), *CT(ct), amount, blind);
-    return zp;
+    if (!pk || !sk || !ct || !blinding)
+        return nullptr;
+    try {
+        const auto blind = pvac::sc_reduce256(blinding);
+        return new pvac::ZeroProof(
+            pvac::make_zero_proof_bound(*PK(pk), *SK(sk), *CT(ct), amount, blind));
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 int pvac_verify_zero_bound(pvac_pubkey pk, pvac_cipher ct, pvac_zero_proof proof,
                             const uint8_t amount_commitment[32]) {
+    if (!pk || !ct || !proof || !amount_commitment)
+        return 0;
     pvac::RistrettoPoint commit;
     std::memcpy(commit.data(), amount_commitment, 32);
     try {
@@ -563,10 +636,15 @@ int pvac_verify_zero_bound_key_switch(
 
 pvac_zero_proof pvac_make_bound_range_proof(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
                                             uint64_t amount, const uint8_t blinding[32]) {
-    pvac::Scalar blind = pvac::sc_reduce256(blinding);
-    auto* zp = new pvac::ZeroProof();
-    *zp = pvac::make_zero_proof_bound_range(*PK(pk), *SK(sk), *CT(ct), amount, blind);
-    return zp;
+    if (!pk || !sk || !ct || !blinding)
+        return nullptr;
+    try {
+        const auto blind = pvac::sc_reduce256(blinding);
+        return new pvac::ZeroProof(
+            pvac::make_zero_proof_bound_range(*PK(pk), *SK(sk), *CT(ct), amount, blind));
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 int pvac_verify_bound_range_commitment(
@@ -587,6 +665,115 @@ int pvac_verify_bound_range_commitment(
             *CT(ct),
             *ZP(proof),
             commitment) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+pvac_zero_proof pvac_prove_amount(pvac_pubkey pk, pvac_seckey sk,
+    pvac_cipher ct, uint64_t amount, const uint8_t blinding[32],
+    pvac_proof_kind kind, int wide) {
+    if (!pk || !sk || !ct || !blinding || (wide < 0 || wide > 3)) return nullptr;
+    try {
+        const bool keyed = (wide & 2) != 0;
+        const auto rule = (wide & 1) ? pvac::ScalarRule::Wide : pvac::ScalarRule::Prior;
+        const auto blind = pvac::sc_reduce256(blinding);
+        switch (kind) {
+        case PVAC_HISTORY:
+            return new pvac::ZeroProof(pvac::make_zero_proof_bound_historical_migration(
+                *PK(pk), *SK(sk), *CT(ct), amount, blind, rule, keyed));
+        case PVAC_AMOUNT:
+            return new pvac::ZeroProof(pvac::make_zero_proof_bound(
+                *PK(pk), *SK(sk), *CT(ct), amount, blind, rule, keyed));
+        case PVAC_REFRESH:
+            return new pvac::ZeroProof(pvac::make_zero_proof_bound_key_switch(
+                *PK(pk), *SK(sk), *CT(ct), amount, blind, rule, keyed));
+        case PVAC_RANGE:
+            return new pvac::ZeroProof(pvac::make_zero_proof_bound_range(
+                *PK(pk), *SK(sk), *CT(ct), amount, blind, rule, keyed));
+        }
+    } catch (...) {
+        return nullptr;
+    }
+    return nullptr;
+}
+
+int pvac_verify_amount(pvac_pubkey pk, pvac_cipher ct,
+    pvac_zero_proof proof, const uint8_t commitment[32],
+    pvac_proof_kind kind, int wide) {
+    if (!pk || !ct || !proof || !commitment || (wide < 0 || wide > 3)) return 0;
+    try {
+        const bool keyed = (wide & 2) != 0;
+        const auto rule = (wide & 1) ? pvac::ScalarRule::Wide : pvac::ScalarRule::Prior;
+        pvac::RistrettoPoint point;
+        std::memcpy(point.data(), commitment, point.size());
+        pvac::ExtPoint decoded;
+        if (!pvac::rist_decode(decoded, point)) return 0;
+        switch (kind) {
+        case PVAC_HISTORY:
+            return pvac::verify_zero_bound_historical_migration(*PK(pk), *CT(ct), *ZP(proof), point, rule, keyed);
+        case PVAC_AMOUNT:
+            return pvac::verify_zero_bound(*PK(pk), *CT(ct), *ZP(proof), point, rule, keyed);
+        case PVAC_REFRESH:
+            return pvac::verify_zero_bound_key_switch(*PK(pk), *CT(ct), *ZP(proof), point, rule, keyed);
+        case PVAC_RANGE:
+            return pvac::verify_zero_bound_range(*PK(pk), *CT(ct), *ZP(proof), point, rule, keyed);
+        }
+    } catch (...) {
+        return 0;
+    }
+    return 0;
+}
+
+pvac_zero_proof pvac_make_history_proof(pvac_pubkey pk, pvac_seckey sk,
+    pvac_cipher ct, uint64_t amount, const uint8_t blinding[32]) {
+    if (!pk || !sk || !ct || !blinding) return nullptr;
+    try {
+        return new pvac::ZeroProof(pvac::make_zero_proof_bound_historical_migration(
+            *PK(pk), *SK(sk), *CT(ct), amount, pvac::sc_reduce256(blinding),
+            pvac::ScalarRule::Wide));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+int pvac_verify_history_proof(pvac_pubkey pk, pvac_cipher ct,
+    pvac_zero_proof proof, const uint8_t commitment[32]) {
+    if (!pk || !ct || !proof || !commitment) return 0;
+    try {
+        pvac::RistrettoPoint point;
+        std::memcpy(point.data(), commitment, point.size());
+        pvac::ExtPoint decoded;
+        return pvac::rist_decode(decoded, point) &&
+            pvac::verify_zero_bound_historical_migration(*PK(pk), *CT(ct),
+                *ZP(proof), point, pvac::ScalarRule::Wide);
+    } catch (...) {
+        return 0;
+    }
+}
+
+pvac_zero_proof pvac_make_current_range(pvac_pubkey pk, pvac_seckey sk,
+    pvac_cipher ct, uint64_t amount, const uint8_t blinding[32]) {
+    if (!pk || !sk || !ct || !blinding) return nullptr;
+    try {
+        return new pvac::ZeroProof(pvac::make_zero_proof_bound_range(
+            *PK(pk), *SK(sk), *CT(ct), amount, pvac::sc_reduce256(blinding),
+            pvac::ScalarRule::Wide));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+int pvac_verify_current_range(pvac_pubkey pk, pvac_cipher ct,
+    pvac_zero_proof proof, const uint8_t commitment[32]) {
+    if (!pk || !ct || !proof || !commitment) return 0;
+    try {
+        pvac::RistrettoPoint point;
+        std::memcpy(point.data(), commitment, point.size());
+        pvac::ExtPoint decoded;
+        return pvac::rist_decode(decoded, point) &&
+            pvac::verify_zero_bound_range(*PK(pk), *CT(ct), *ZP(proof), point,
+                pvac::ScalarRule::Wide);
     } catch (...) {
         return 0;
     }
@@ -673,9 +860,7 @@ uint8_t* pvac_serialize_cipher_public(pvac_cipher ct, size_t* len) {
 
 pvac_cipher pvac_deserialize_cipher(const uint8_t* data, size_t len) {
     try {
-        auto* ct = new pvac::Cipher();
-        *ct = pvac_ser::deserialize_cipher(data, len);
-        return ct;
+        return new pvac::Cipher(pvac_ser::deserialize_cipher(data, len));
     } catch (const std::exception& e) {
         fprintf(stderr, "[pvac_c_api] deserialize_cipher failed: %s\n", e.what());
         return nullptr;
@@ -697,9 +882,11 @@ uint8_t* pvac_serialize_pubkey(pvac_pubkey pk, size_t* len) {
 
 pvac_pubkey pvac_deserialize_pubkey(const uint8_t* data, size_t len) {
     try {
-        auto* pk = new pvac::PubKey();
-        *pk = pvac_ser::deserialize_pubkey(data, len);
-        return pk;
+        const pvac::Params expected;
+        pvac::PubKey key;
+        std::string error;
+        if (!pvac_ser::deserialize_pubkey_checked(data, len, key, error, &expected)) return nullptr;
+        return new pvac::PubKey(std::move(key));
     } catch (const std::exception& e) {
         fprintf(stderr, "[pvac_c_api] deserialize_pubkey failed: %s\n", e.what());
         return nullptr;
@@ -721,9 +908,7 @@ uint8_t* pvac_serialize_seckey(pvac_seckey sk, size_t* len) {
 
 pvac_seckey pvac_deserialize_seckey(const uint8_t* data, size_t len) {
     try {
-        auto* sk = new pvac::SecKey();
-        *sk = pvac_ser::deserialize_seckey(data, len);
-        return sk;
+        return new pvac::SecKey(pvac_ser::deserialize_seckey(data, len));
     } catch (const std::exception& e) {
         fprintf(stderr, "[pvac_c_api] deserialize_seckey failed: %s\n", e.what());
         return nullptr;
@@ -758,14 +943,14 @@ uint8_t* pvac_serialize_bound_range_proof(pvac_zero_proof zp, size_t* len) {
 pvac_zero_proof pvac_deserialize_zero_proof(const uint8_t* data, size_t len) {
     try {
         pvac_ser::Reader r(data, len);
-        auto* zp = new pvac::ZeroProof();
+        auto zp = std::make_unique<pvac::ZeroProof>();
         *zp = pvac_ser::read_zero_proof_raw(r);
+        if (r.remaining() != 0) r.fail("pvac_ser: extra zero proof bytes");
         if (r.failed) {
-            delete zp;
             fprintf(stderr, "[pvac_c_api] deserialize_zero_proof failed: %s\n", r.error);
             return nullptr;
         }
-        return zp;
+        return zp.release();
     } catch (const std::exception& e) {
         fprintf(stderr, "[pvac_c_api] deserialize_zero_proof failed: %s\n", e.what());
         return nullptr;
@@ -787,9 +972,7 @@ uint8_t* pvac_serialize_range_proof(pvac_range_proof rp, size_t* len) {
 
 pvac_range_proof pvac_deserialize_range_proof(const uint8_t* data, size_t len) {
     try {
-        auto* rp = new pvac::RangeProof();
-        *rp = pvac_ser::deserialize_range_proof(data, len);
-        return rp;
+        return new pvac::RangeProof(pvac_ser::deserialize_range_proof(data, len));
     } catch (const std::exception& e) {
         fprintf(stderr, "[pvac_c_api] deserialize_range_proof failed: %s\n", e.what());
         return nullptr;
@@ -826,9 +1009,7 @@ uint8_t* pvac_serialize_agg_range_proof(pvac_agg_range_proof arp, size_t* len) {
 
 pvac_agg_range_proof pvac_deserialize_agg_range_proof(const uint8_t* data, size_t len) {
     try {
-        auto* arp = new pvac::AggregatedRangeProof();
-        *arp = pvac_ser::deserialize_agg_range_proof(data, len);
-        return arp;
+        return new pvac::AggregatedRangeProof(pvac_ser::deserialize_agg_range_proof(data, len));
     } catch (const std::exception& e) {
         fprintf(stderr, "[pvac_c_api] deserialize_agg_range_proof failed: %s\n", e.what());
         return nullptr;
@@ -855,7 +1036,21 @@ void pvac_aes_kat(uint8_t out[16]) {
 
 void pvac_free_params(pvac_params p) { delete PRM(p); }
 void pvac_free_pubkey(pvac_pubkey p) { delete PK(p); }
-void pvac_free_seckey(pvac_seckey p) { delete SK(p); }
+void pvac_free_seckey(pvac_seckey p) {
+    if (!p) return;
+    const auto wipe = [](void* data, size_t size) {
+        auto* bytes = static_cast<volatile unsigned char*>(data);
+        while (size--) *bytes++ = 0;
+    };
+    auto& key = *SK(p);
+    wipe(key.prf_k.data(), sizeof(key.prf_k));
+    wipe(&key.circuit_prf_key, sizeof(key.circuit_prf_key));
+    wipe(key.circuit_prf_key_blind.data(), sizeof(key.circuit_prf_key_blind));
+    wipe(&key.circuit_prf_key_v6, sizeof(key.circuit_prf_key_v6));
+    wipe(key.circuit_prf_key_blind_v6.data(), sizeof(key.circuit_prf_key_blind_v6));
+    wipe(key.lpn_s_bits.data(), key.lpn_s_bits.size() * sizeof(uint64_t));
+    delete SK(p);
+}
 void pvac_free_cipher(pvac_cipher p) { delete CT(p); }
 void pvac_free_zero_proof(pvac_zero_proof p) { delete ZP(p); }
 void pvac_free_range_proof(pvac_range_proof p) { delete RP(p); }

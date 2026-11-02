@@ -4,8 +4,12 @@ Program Multisig {
     owners: map[address]bool
     owner_count: int
     threshold: int
+    config_id: int
     next_id: int
     proposals: map[int]string
+    prop_kind: map[int]int
+    prop_config: map[int]int
+    prop_threshold: map[int]int
     prop_amounts: map[int]u128
     prop_targets: map[int]address
     votes: map[int]map[address]bool
@@ -19,56 +23,75 @@ Program Multisig {
   event OwnerAdded(owner: address)
   event ThresholdChanged(threshold: int)
 
-  constructor(threshold_val: int) {
+  constructor(first: address, second: address, third: address, threshold_val: int) {
+    assert_address(first)
+    assert_address(second)
+    assert_address(third)
+    require(first != second && first != third && second != third, "owners must differ")
     require(threshold_val > 0, "threshold must be > 0")
-    require(threshold_val <= 1, "threshold exceeds owners")
+    require(threshold_val <= 3, "threshold exceeds owners")
     self.threshold = threshold_val
+    self.config_id = 0
     self.next_id = 0
-    self.owner_count = 1
-    self.owners[origin] = true
+    self.owner_count = 3
+    self.owners[first] = true
+    self.owners[second] = true
+    self.owners[third] = true
   }
 
   private fn require_owner() {
     require(self.owners[caller], "not owner")
   }
 
-  fn add_owner(owner: address): bool {
+  private fn new_proposal(kind: int, desc: string): int {
+    require_owner()
+    let id = self.next_id
+    self.proposals[id] = desc
+    self.prop_kind[id] = kind
+    self.prop_config[id] = self.config_id
+    self.vote_counts[id] = 0
+    self.executed[id] = false
+    self.next_id = id + 1
+    return id
+  }
+
+  fn add_owner(owner: address): int {
     require_owner()
     assert_address(owner)
     require(!self.owners[owner], "already owner")
     require(self.owner_count < MAX_OWNERS, "too many owners")
-    self.owners[owner] = true
-    self.owner_count += 1
-    emit OwnerAdded(owner)
-    return true
+    let id = new_proposal(2, "add owner")
+    self.prop_targets[id] = owner
+    emit Proposed(id, owner, 0)
+    return id
   }
 
-  fn set_threshold(threshold_val: int): bool {
+  fn set_threshold(threshold_val: int): int {
     require_owner()
     require(threshold_val > 0, "threshold must be > 0")
     require(threshold_val <= self.owner_count, "threshold exceeds owners")
-    self.threshold = threshold_val
-    emit ThresholdChanged(threshold_val)
-    return true
+    let id = new_proposal(3, "set threshold")
+    self.prop_threshold[id] = threshold_val
+    emit Proposed(id, self_addr, 0)
+    return id
   }
 
   fn propose(target: address, amount: u128, desc: string): int {
     require_owner()
     assert_address(target)
     require(amount > 0, "amount must be positive")
-    let id = self.next_id
-    self.proposals[id] = desc
+    let id = new_proposal(1, desc)
     self.prop_amounts[id] = amount
     self.prop_targets[id] = target
-    self.vote_counts[id] = 0
-    self.executed[id] = false
-    self.next_id = id + 1
     emit Proposed(id, target, amount)
     return id
   }
 
-  fn vote(id: int): bool {
+  nonreentrant fn vote(id: int): bool {
     require_owner()
+    require(id >= 0 && id < self.next_id, "proposal not found")
+    require(self.prop_kind[id] > 0, "proposal not found")
+    require(self.prop_config[id] == self.config_id, "configuration changed")
     require(!self.executed[id], "already executed")
     require(!self.votes[id][caller], "already voted")
     self.votes[id][caller] = true
@@ -76,8 +99,26 @@ Program Multisig {
     emit Voted(id, caller)
     if self.vote_counts[id] >= self.threshold {
       self.executed[id] = true
-      let ok = transfer(self.prop_targets[id], self.prop_amounts[id])
-      require(ok, "transfer failed")
+      if self.prop_kind[id] == 1 {
+        let ok = transfer(self.prop_targets[id], self.prop_amounts[id])
+        require(ok, "transfer failed")
+      } else if self.prop_kind[id] == 2 {
+        let owner = self.prop_targets[id]
+        require(!self.owners[owner], "already owner")
+        require(self.owner_count < MAX_OWNERS, "too many owners")
+        self.owners[owner] = true
+        self.owner_count += 1
+        self.config_id += 1
+        emit OwnerAdded(owner)
+      } else {
+        require(self.prop_kind[id] == 3, "invalid proposal")
+        let threshold_val = self.prop_threshold[id]
+        require(threshold_val > 0, "threshold must be > 0")
+        require(threshold_val <= self.owner_count, "threshold exceeds owners")
+        self.threshold = threshold_val
+        self.config_id += 1
+        emit ThresholdChanged(threshold_val)
+      }
       emit Executed(id)
     }
     return true

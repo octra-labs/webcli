@@ -1,29 +1,5 @@
-/*
-    This file is part of Octra Wallet (webcli).
-
-    Octra Wallet is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 2 of the License, or
-    (at your option) any later version.
-
-    Octra Wallet is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with Octra Wallet.  If not, see <http://www.gnu.org/licenses/>.
-
-    This program is released under the GPL with the additional exemption
-    that compiling, linking, and/or using OpenSSL is allowed.
-    You are free to remove this exemption from derived works.
-
-    Copyright 2025-2026 Octra Labs
-              2025-2026 David A.
-              2025-2026 Alex T.
-              2025-2026 Vadim S.
-              2025-2026 Julia L.
-*/
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
 
 #pragma once
 #include <cstdint>
@@ -34,6 +10,11 @@
 #include <shared_mutex>
 #include <memory>
 #include "lib/json.hpp"
+#include "lib/rpc_state.hpp"
+#include "lib/json_shape.hpp"
+#include "lib/program_args.hpp"
+#include "lib/rpc_io.hpp"
+#include "lib/endpoint_policy.hpp"
 
 #include "lib/httplib.h"
 
@@ -43,6 +24,9 @@ struct RpcResult {
     bool ok;
     nlohmann::json result;
     std::string error;
+    bool replied = false;
+    int code = 0;
+    int http_status = 0;
 };
 
 class RpcClient {
@@ -50,34 +34,40 @@ class RpcClient {
     std::string path_;
     bool ssl_;
     int port_;
+    bool valid_ = false;
     std::atomic<int> id_{0};
     mutable std::shared_mutex url_mtx_;
     static constexpr std::size_t max_body = 64u * 1024u * 1024u;
 
     void parse_url(const std::string& url) {
-        std::string u = url;
-        ssl_ = false;
-        port_ = 80;
-        if (u.rfind("https://", 0) == 0) {
-            ssl_ = true;
-            port_ = 443;
-            u = u.substr(8);
-        } else if (u.rfind("http://", 0) == 0) {
-            u = u.substr(7);
+        const auto parsed = endpoint_policy::parse(endpoint_policy::rpc_url(url));
+        valid_ = parsed.ok;
+        host_ = parsed.host;
+        path_ = parsed.target;
+        ssl_ = parsed.tls;
+        port_ = parsed.port;
+    }
+
+    RpcBody request(std::string body, int seconds) const {
+        std::string host, path;
+        bool tls;
+        int port;
+        {
+            std::shared_lock<std::shared_mutex> lock(url_mtx_);
+            if (!valid_) return {{}, "invalid RPC URL"};
+            host = host_;
+            path = path_;
+            tls = ssl_;
+            port = port_;
         }
-        auto slash = u.find('/');
-        if (slash != std::string::npos) {
-            path_ = u.substr(slash);
-            host_ = u.substr(0, slash);
-        } else {
-            path_ = "/rpc";
-            host_ = u;
+        if (tls) {
+            httplib::SSLClient client(host, port);
+            if (client.ssl_context()) SSL_CTX_set_default_verify_paths(client.ssl_context());
+            client.enable_server_certificate_verification(true);
+            return rpc_post(client, path, std::move(body), seconds, max_body);
         }
-        auto colon = host_.find(':');
-        if (colon != std::string::npos) {
-            port_ = std::stoi(host_.substr(colon + 1));
-            host_ = host_.substr(0, colon);
-        }
+        httplib::Client client(host, port);
+        return rpc_post(client, path, std::move(body), seconds, max_body);
     }
 
 public:
@@ -87,47 +77,20 @@ public:
 
     RpcResult call(const std::string& method,
                    const nlohmann::json& params = nlohmann::json::array(),
-                   int timeout_sec = 30) {
+                   int timeout_sec = 30,
+                   const std::string& source = "") {
+        if (!source.empty() && (method != "octra_transactionsByAddress" ||
+            (source != "live" && source != "archive")))
+            return {false, {}, "invalid history source"};
         nlohmann::json req;
         req["jsonrpc"] = "2.0";
         req["method"] = method;
         req["params"] = params;
         req["id"] = ++id_;
-        std::string body = req.dump();
-        httplib::Headers hdrs = {
-            {"Content-Type", "application/json"},
-            {"User-Agent", "Octra-Wallet/0.04.10"}
-        };
-        std::string host, path;
-        bool ssl;
-        int port;
-        {
-            std::shared_lock<std::shared_mutex> lk(url_mtx_);
-            host = host_;
-            path = path_;
-            ssl = ssl_;
-            port = port_;
-        }
-        const int connect_timeout_sec = timeout_sec < 5 ? timeout_sec : 5;
-        if (ssl) {
-            httplib::SSLClient cli(host, port);
-            cli.set_connection_timeout(connect_timeout_sec, 0);
-            cli.set_read_timeout(timeout_sec, 0);
-            if (cli.ssl_context()) SSL_CTX_set_default_verify_paths(cli.ssl_context());
-            cli.enable_server_certificate_verification(true);
-            auto res = cli.Post(path, hdrs, body, "application/json");
-            if (!res) return {false, {}, "connection failed"};
-            if (res->body.size() > max_body) return {false, {}, "rpc response too large"};
-            return parse_response(res->body);
-        } else {
-            httplib::Client cli(host, port);
-            cli.set_connection_timeout(connect_timeout_sec, 0);
-            cli.set_read_timeout(timeout_sec, 0);
-            auto res = cli.Post(path, hdrs, body, "application/json");
-            if (!res) return {false, {}, "connection failed"};
-            if (res->body.size() > max_body) return {false, {}, "rpc response too large"};
-            return parse_response(res->body);
-        }
+        if (!source.empty()) req["source"] = source;
+        const auto response = request(req.dump(), timeout_sec);
+        if (!response.error.empty()) return {false, {}, response.error, false, 0, response.status};
+        return parse_response(response.body, req["id"]);
     }
 
     RpcResult get_balance(const std::string& addr) {
@@ -138,8 +101,8 @@ public:
         return call("octra_account", {addr, limit});
     }
 
-    RpcResult get_transaction(const std::string& hash) {
-        return call("octra_transaction", {hash});
+    RpcResult get_transaction(const std::string& hash, int seconds = 30) {
+        return call("octra_transaction", {hash}, seconds);
     }
 
     RpcResult submit_tx(const nlohmann::json& tx) {
@@ -157,7 +120,7 @@ public:
     RpcResult get_encrypted_balance(const std::string& addr,
                                     const std::string& sig_b64,
                                     const std::string& pub_b64) {
-        return call("octra_encryptedBalance", {addr, sig_b64, pub_b64}, 8);
+        return call("octra_encryptedBalance", {addr, sig_b64, pub_b64}, 25);
     }
 
     RpcResult get_encrypted_cipher(const std::string& addr) {
@@ -182,6 +145,20 @@ public:
 
     RpcResult node_status(int timeout_sec = 5) {
         return call("node_status", nlohmann::json::array(), timeout_sec);
+    }
+
+    RpcResult validator_set_proof(int timeout_sec = 10) {
+        return call("octra_validatorSetProof", nlohmann::json::array(), timeout_sec);
+    }
+
+    RpcResult resource_compute_submit(const nlohmann::json& request, int timeout_sec = 15) {
+        return call("octra_circleComputeSubmit", request, timeout_sec);
+    }
+
+    RpcResult resource_compute_status(
+            const nlohmann::json& request,
+            int timeout_sec = 10) {
+        return call("octra_circleComputeStatus", request, timeout_sec);
     }
 
     RpcResult register_public_key(const std::string& addr,
@@ -277,6 +254,20 @@ public:
                                const std::string& sig_b64,
                                bool include_storage = false) {
         return call("octra_circleViewAuth", {circle_id, method, params, addr, pub_b64, sig_b64, include_storage}, 600);
+    }
+
+    RpcResult circle_view_raw(const std::string& circle_id, const std::string& method,
+        const std::string& params, const std::string& addr, const std::string& pub, const std::string& sig) {
+        if (!program_args(params)) return {false, {}, "invalid program parameters"};
+        const int id = ++id_;
+        const auto quote = [](const std::string& text) { return nlohmann::json(text).dump(); };
+        const std::string body = "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
+            + ",\"method\":\"octra_circleViewAuth\",\"params\":[" + quote(circle_id)
+            + "," + quote(method) + "," + params + "," + quote(addr) + "," + quote(pub)
+            + "," + quote(sig) + ",false]}";
+        const auto response = request(body, 600);
+        if (!response.error.empty()) return {false, {}, response.error};
+        return parse_response(response.body, id);
     }
 
     RpcResult circle_slot_policy(const std::string& circle_id, const std::string& slot_ref) {
@@ -628,6 +619,19 @@ public:
         return call("contract_call", {addr, method, params, caller}, 15);
     }
 
+    RpcResult program_view_raw(const std::string& addr, const std::string& method,
+        const std::string& params, const std::string& caller) {
+        if (!program_args(params)) return {false, {}, "invalid program parameters"};
+        const int id = ++id_;
+        const std::string body = "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
+            + ",\"method\":\"contract_call\",\"params\":[" + nlohmann::json(addr).dump()
+            + "," + nlohmann::json(method).dump() + "," + params + ","
+            + nlohmann::json(caller).dump() + "]}";
+        const auto response = request(body, 15);
+        if (!response.error.empty()) return {false, {}, response.error};
+        return parse_response(response.body, id);
+    }
+
     RpcResult list_contracts() {
         return call("octra_listContracts", nlohmann::json::array(), 10);
     }
@@ -649,8 +653,9 @@ public:
         return call("contract_saveAbi", {addr, abi});
     }
 
-    RpcResult get_txs_by_address(const std::string& addr, int limit = 50, int offset = 0) {
-        return call("octra_transactionsByAddress", {addr, limit, offset}, 15);
+    RpcResult get_txs_by_address(const std::string& addr, int limit = 50, int offset = 0,
+        const std::string& source = "") {
+        return call("octra_transactionsByAddress", {addr, limit, offset}, 15, source);
     }
 
     RpcResult get_token_txs_by_address(const std::string& addr, int limit = 50, int offset = 0) {
@@ -672,61 +677,30 @@ public:
             req["id"] = static_cast<int>(i + 1);
             batch.push_back(std::move(req));
         }
-        std::string body = batch.dump();
-        httplib::Headers hdrs = {
-            {"Content-Type", "application/json"},
-            {"User-Agent", "Octra-Wallet/0.04.10"}
-        };
-        std::string resp_body;
-        std::string host, path;
-        bool ssl;
-        int port;
-        {
-            std::shared_lock<std::shared_mutex> lk(url_mtx_);
-            host = host_;
-            path = path_;
-            ssl = ssl_;
-            port = port_;
-        }
-        const int connect_timeout_sec = timeout_sec < 5 ? timeout_sec : 5;
-        if (ssl) {
-            httplib::SSLClient cli(host, port);
-            cli.set_connection_timeout(connect_timeout_sec, 0);
-            cli.set_read_timeout(timeout_sec, 0);
-            if (cli.ssl_context()) SSL_CTX_set_default_verify_paths(cli.ssl_context());
-            cli.enable_server_certificate_verification(true);
-            auto r = cli.Post(path, hdrs, body, "application/json");
-            if (!r) { for (auto& o : out) o.error = "connection failed"; return out; }
-            if (r->body.size() > max_body) { for (auto& o : out) o.error = "rpc response too large"; return out; }
-            resp_body = r->body;
-        } else {
-            httplib::Client cli(host, port);
-            cli.set_connection_timeout(connect_timeout_sec, 0);
-            cli.set_read_timeout(timeout_sec, 0);
-            auto r = cli.Post(path, hdrs, body, "application/json");
-            if (!r) { for (auto& o : out) o.error = "connection failed"; return out; }
-            if (r->body.size() > max_body) { for (auto& o : out) o.error = "rpc response too large"; return out; }
-            resp_body = r->body;
+        const auto response = request(batch.dump(), timeout_sec);
+        JsonShape shape;
+        if (!response.error.empty() || !nlohmann::json::sax_parse(response.body, &shape)) {
+            for (auto& result : out) result.error = response.error.empty()
+                ? "invalid rpc response structure" : response.error;
+            return out;
         }
         try {
-            auto arr = nlohmann::json::parse(resp_body);
+            auto arr = nlohmann::json::parse(response.body);
             if (!arr.is_array()) {
                 for (auto& o : out) o.error = "batch response not array";
                 return out;
             }
-            for (auto& item : arr) {
-                if (!item.contains("id") || !item["id"].is_number_integer()) continue;
-                int id = item["id"].get<int>();
-                if (id < 1 || id > static_cast<int>(count)) continue;
-                if (item.contains("result")) {
-                    out[id - 1] = {true, item["result"], ""};
-                } else if (item.contains("error")) {
-                    out[id - 1] = {
-                        false,
-                        {},
-                        error_message(item["error"])
-                    };
+            std::vector<bool> seen(count, false);
+            for (const auto& item : arr) {
+                if (!item.is_object() || !item.contains("id") || !item["id"].is_number_integer()
+                    || item["id"] < 1 || item["id"] > count) {
+                    return std::vector<RpcResult>(count, {false, {}, "invalid batch response id"});
                 }
+                const size_t id = item["id"].get<size_t>();
+                if (seen[id - 1])
+                    return std::vector<RpcResult>(count, {false, {}, "duplicate batch response id"});
+                seen[id - 1] = true;
+                out[id - 1] = parse_response(item.dump(), id);
             }
         } catch (const std::exception& ex) {
             for (auto& o : out) o.error = std::string("parse error: ") + ex.what();
@@ -747,14 +721,29 @@ private:
         return message;
     }
 
-    RpcResult parse_response(const std::string& body) {
+    RpcResult parse_response(const std::string& body, const nlohmann::json& id) {
         try {
+            JsonShape shape;
+            if (!nlohmann::json::sax_parse(body, &shape))
+                return {false, {}, "invalid rpc response structure"};
             auto j = nlohmann::json::parse(body);
+            if (!j.is_object() || j.value("jsonrpc", "") != "2.0"
+                || !j.contains("id") || !j["id"].is_number_integer() || j["id"] != id
+                || j.contains("result") == j.contains("error"))
+                return {false, {}, "invalid rpc response"};
             if (j.contains("result"))
-                return {true, j["result"], ""};
-            if (j.contains("error"))
-                return {false, {}, error_message(j["error"])};
-            return {false, {}, "unknown rpc response"};
+                return {true, j["result"], "", true};
+            const auto& error = j["error"];
+            if (!error.is_object() || !error.contains("code") || !error["code"].is_number_integer()
+                || !error.contains("message") || !error["message"].is_string())
+                return {false, {}, "invalid rpc error"};
+            if (error["code"].is_number_unsigned()
+                && error["code"].get<uint64_t>() > static_cast<uint64_t>(std::numeric_limits<int>::max()))
+                return {false, {}, "invalid rpc error code"};
+            const auto code = error["code"].get<int64_t>();
+            if (code < std::numeric_limits<int>::min() || code > std::numeric_limits<int>::max())
+                return {false, {}, "invalid rpc error code"};
+            return {false, {}, error_message(error), true, int(code)};
         } catch (const std::exception& ex) {
             return {false, {}, std::string("parse error: ") + ex.what()};
         }

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+// lambda0xE
+
 'use strict'
 
 const $ = id => document.getElementById(id)
@@ -11,7 +15,7 @@ const graph = {
   visible: [],
   positions: new Map(),
   selectedId: null,
-  bounds: null,
+  frame: null,
   view: {x: 0, y: 0, scale: 1},
   drag: null
 }
@@ -126,7 +130,6 @@ const normalizeData = raw => {
     sigmaDensity: safeRatio(raw.sigma_density),
     sigmaSamples: safeInt(raw.sigma_sampled_edges, 0, 4096),
     sigmaExact: raw.sigma_exact === true,
-    spendLimit: safeInt(raw.private_spend_max_base_layers, 1, 64),
     layers: Object.freeze(layers),
     edges: Object.freeze(edges)
   })
@@ -172,8 +175,8 @@ const renderMetrics = data => {
   $('metric-sigma-mode').textContent = data.sigmaExact
     ? `exact | ${fmtInt(data.sigmaSamples)} edges`
     : `estimate | ${fmtInt(data.sigmaSamples)} edges`
-  $('metric-pressure').textContent = `${data.baseLayers} / ${data.spendLimit}`
-  $('metric-pressure-detail').textContent = 'base layers'
+  $('metric-pressure').textContent = 'not checked'
+  $('metric-pressure-detail').textContent = 'structure only | no spend proof'
   $('metric-wire').textContent = fmtBytes(data.wireBytes)
   $('metric-slots').textContent = `slots ${data.slots} | c0 ${data.c0Count}`
 }
@@ -207,7 +210,7 @@ const buildPositions = layers => {
     center,
     groups,
     maxDepth,
-    bounds: {minX: 18, minY: 18, maxX: 1102, maxY: 642}
+    frame: {minX: 18, minY: 18, maxX: 1102, maxY: 642}
   }
 }
 
@@ -258,13 +261,13 @@ const setTransform = view => {
 }
 
 const resetView = () => {
-  if (!graph.bounds) return
-  const width = Math.max(1, graph.bounds.maxX - graph.bounds.minX)
-  const height = Math.max(1, graph.bounds.maxY - graph.bounds.minY)
+  if (!graph.frame) return
+  const width = Math.max(1, graph.frame.maxX - graph.frame.minX)
+  const height = Math.max(1, graph.frame.maxY - graph.frame.minY)
   const scale = Math.min(1.15, 1080 / width, 550 / height)
   setTransform({
-    x: (1200 - width * scale) / 2 - graph.bounds.minX * scale,
-    y: (660 - height * scale) / 2 - graph.bounds.minY * scale,
+    x: (1200 - width * scale) / 2 - graph.frame.minX * scale,
+    y: (660 - height * scale) / 2 - graph.frame.minY * scale,
     scale
   })
 }
@@ -369,7 +372,7 @@ const renderGraph = data => {
   graph.visible = data.layers.slice(0, graphLayerCap)
   const layout = buildPositions(graph.visible)
   graph.positions = layout.positions
-  graph.bounds = layout.bounds
+  graph.frame = layout.frame
   const indexPositions = buildIndexPositions(data.edges)
   const links = []
   const nodes = []
@@ -526,10 +529,10 @@ const renderGraph = data => {
 }
 
 const svgPoint = event => {
-  const bounds = $('cipher-map').getBoundingClientRect()
+  const frame = $('cipher-map').getBoundingClientRect()
   return {
-    x: (event.clientX - bounds.left) * 1200 / bounds.width,
-    y: (event.clientY - bounds.top) * 660 / bounds.height
+    x: (event.clientX - frame.left) * 1200 / frame.width,
+    y: (event.clientY - frame.top) * 660 / frame.height
   }
 }
 

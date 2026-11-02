@@ -8,7 +8,7 @@
 #ifndef CPPHTTPLIB_HTTPLIB_H
 #define CPPHTTPLIB_HTTPLIB_H
 
-#define CPPHTTPLIB_VERSION "0.18.3"
+#define CPPHTTPLIB_VERSION "0.18.3-octra-cancel"
 
 /*
  * Configuration
@@ -84,6 +84,14 @@
 
 #ifndef CPPHTTPLIB_HEADER_MAX_LENGTH
 #define CPPHTTPLIB_HEADER_MAX_LENGTH 8192
+#endif
+
+#ifndef CPPHTTPLIB_HEADER_MAX_COUNT
+#define CPPHTTPLIB_HEADER_MAX_COUNT 128
+#endif
+
+#ifndef CPPHTTPLIB_HEADER_MAX_TOTAL_LENGTH
+#define CPPHTTPLIB_HEADER_MAX_TOTAL_LENGTH 65536
 #endif
 
 #ifndef CPPHTTPLIB_REDIRECT_MAX_COUNT
@@ -1388,6 +1396,7 @@ public:
   Result send(const Request &req);
 
   void stop();
+  void request_stop();
 
   std::string host() const;
   int port() const;
@@ -1507,6 +1516,7 @@ protected:
   size_t socket_requests_in_flight_ = 0;
   std::thread::id socket_requests_are_from_thread_ = std::thread::id();
   bool socket_should_be_closed_when_request_is_done_ = false;
+  std::atomic<bool> request_stop_requested_{false};
 
   // Hostname-IP map
   std::map<std::string, std::string> addr_map_;
@@ -1822,6 +1832,7 @@ public:
   Result send(const Request &req);
 
   void stop();
+  void request_stop();
 
   std::string host() const;
   int port() const;
@@ -2470,7 +2481,8 @@ public:
   const char *ptr() const;
   size_t size() const;
   bool end_with_crlf() const;
-  bool getline();
+  bool getline(size_t max_length);
+  bool exceeded_limit() const;
 
 private:
   void append(char c);
@@ -2479,6 +2491,7 @@ private:
   char *fixed_buffer_;
   const size_t fixed_buffer_size_;
   size_t fixed_buffer_used_size_ = 0;
+  bool exceeded_limit_ = false;
   std::string glowable_buffer_;
 };
 
@@ -2881,28 +2894,29 @@ inline bool stream_line_reader::end_with_crlf() const {
   return size() >= 2 && end[-2] == '\r' && end[-1] == '\n';
 }
 
-inline bool stream_line_reader::getline() {
+inline bool stream_line_reader::getline(size_t max_length) {
   fixed_buffer_used_size_ = 0;
+  exceeded_limit_ = false;
   glowable_buffer_.clear();
 
 #ifndef CPPHTTPLIB_ALLOW_LF_AS_LINE_TERMINATOR
   char prev_byte = 0;
 #endif
 
-  for (size_t i = 0;; i++) {
+  for (;;) {
     char byte;
     auto n = strm_.read(&byte, 1);
 
     if (n < 0) {
       return false;
     } else if (n == 0) {
-      if (i == 0) {
-        return false;
-      } else {
-        break;
-      }
+      return false;
     }
 
+    if (size() >= max_length) {
+      exceeded_limit_ = true;
+      return false;
+    }
     append(byte);
 
 #ifdef CPPHTTPLIB_ALLOW_LF_AS_LINE_TERMINATOR
@@ -2914,6 +2928,10 @@ inline bool stream_line_reader::getline() {
   }
 
   return true;
+}
+
+inline bool stream_line_reader::exceeded_limit() const {
+  return exceeded_limit_;
 }
 
 inline void stream_line_reader::append(char c) {
@@ -4169,9 +4187,11 @@ inline bool read_headers(Stream &strm, Headers &headers) {
   const auto bufsiz = 2048;
   char buf[bufsiz];
   stream_line_reader line_reader(strm, buf, bufsiz);
+  size_t count = 0;
+  size_t total = 0;
 
   for (;;) {
-    if (!line_reader.getline()) { return false; }
+    if (!line_reader.getline(CPPHTTPLIB_HEADER_MAX_LENGTH)) { return false; }
 
     // Check if the line ends with CRLF.
     auto line_terminator_len = 2;
@@ -4188,7 +4208,11 @@ inline bool read_headers(Stream &strm, Headers &headers) {
 #endif
     }
 
-    if (line_reader.size() > CPPHTTPLIB_HEADER_MAX_LENGTH) { return false; }
+    if (line_reader.size() > CPPHTTPLIB_HEADER_MAX_LENGTH ||
+        count >= CPPHTTPLIB_HEADER_MAX_COUNT ||
+        line_reader.size() > CPPHTTPLIB_HEADER_MAX_TOTAL_LENGTH - total) {
+      return false;
+    }
 
     // Exclude line terminator
     auto end = line_reader.ptr() + line_reader.size() - line_terminator_len;
@@ -4199,6 +4223,8 @@ inline bool read_headers(Stream &strm, Headers &headers) {
                       })) {
       return false;
     }
+    count++;
+    total += line_reader.size();
   }
 
   return true;
@@ -4260,7 +4286,7 @@ inline bool read_content_chunked(Stream &strm, T &x,
 
   stream_line_reader line_reader(strm, buf, bufsiz);
 
-  if (!line_reader.getline()) { return false; }
+  if (!line_reader.getline(CPPHTTPLIB_HEADER_MAX_LENGTH)) { return false; }
 
   unsigned long chunk_len;
   while (true) {
@@ -4277,11 +4303,11 @@ inline bool read_content_chunked(Stream &strm, T &x,
       return false;
     }
 
-    if (!line_reader.getline()) { return false; }
+    if (!line_reader.getline(CPPHTTPLIB_HEADER_MAX_LENGTH)) { return false; }
 
     if (strcmp(line_reader.ptr(), "\r\n") != 0) { return false; }
 
-    if (!line_reader.getline()) { return false; }
+    if (!line_reader.getline(CPPHTTPLIB_HEADER_MAX_LENGTH)) { return false; }
   }
 
   assert(chunk_len == 0);
@@ -4298,21 +4324,46 @@ inline bool read_content_chunked(Stream &strm, T &x,
   //
   // According to the reference code in RFC 9112, cpp-htpplib now allows
   // chuncked transfer coding data without the final CRLF.
-  if (!line_reader.getline()) { return true; }
+  if (!line_reader.getline(CPPHTTPLIB_HEADER_MAX_LENGTH)) {
+    return !line_reader.exceeded_limit() && line_reader.size() == 0;
+  }
+
+  size_t header_count = x.headers.size();
+  size_t header_total = 0;
+  for (const auto &header : x.headers) {
+    if (header.first.size() > CPPHTTPLIB_HEADER_MAX_TOTAL_LENGTH - header_total) {
+      return false;
+    }
+    header_total += header.first.size();
+    if (header.second.size() > CPPHTTPLIB_HEADER_MAX_TOTAL_LENGTH - header_total) {
+      return false;
+    }
+    header_total += header.second.size();
+    if (4 > CPPHTTPLIB_HEADER_MAX_TOTAL_LENGTH - header_total) { return false; }
+    header_total += 4;
+  }
 
   while (strcmp(line_reader.ptr(), "\r\n") != 0) {
-    if (line_reader.size() > CPPHTTPLIB_HEADER_MAX_LENGTH) { return false; }
+    if (line_reader.size() > CPPHTTPLIB_HEADER_MAX_LENGTH ||
+        header_count >= CPPHTTPLIB_HEADER_MAX_COUNT ||
+        line_reader.size() > CPPHTTPLIB_HEADER_MAX_TOTAL_LENGTH - header_total) {
+      return false;
+    }
 
     // Exclude line terminator
     constexpr auto line_terminator_len = 2;
     auto end = line_reader.ptr() + line_reader.size() - line_terminator_len;
 
-    parse_header(line_reader.ptr(), end,
-                 [&](const std::string &key, const std::string &val) {
-                   x.headers.emplace(key, val);
-                 });
+    if (!parse_header(line_reader.ptr(), end,
+                      [&](const std::string &key, const std::string &val) {
+                        x.headers.emplace(key, val);
+                      })) {
+      return false;
+    }
+    header_count++;
+    header_total += line_reader.size();
 
-    if (!line_reader.getline()) { return false; }
+    if (!line_reader.getline(CPPHTTPLIB_HEADER_MAX_LENGTH)) { return false; }
   }
 
   return true;
@@ -7047,7 +7098,7 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
   detail::stream_line_reader line_reader(strm, buf.data(), buf.size());
 
   // Connection has been closed on client
-  if (!line_reader.getline()) { return false; }
+  if (!line_reader.getline(CPPHTTPLIB_REQUEST_URI_MAX_LENGTH)) { return false; }
 
   Request req;
 
@@ -7376,7 +7427,7 @@ inline bool ClientImpl::read_response_line(Stream &strm, const Request &req,
 
   detail::stream_line_reader line_reader(strm, buf.data(), buf.size());
 
-  if (!line_reader.getline()) { return false; }
+  if (!line_reader.getline(CPPHTTPLIB_HEADER_MAX_LENGTH)) { return false; }
 
 #ifdef CPPHTTPLIB_ALLOW_LF_AS_LINE_TERMINATOR
   const static std::regex re("(HTTP/1\\.[01]) (\\d{3})(?: (.*?))?\r?\n");
@@ -7394,8 +7445,8 @@ inline bool ClientImpl::read_response_line(Stream &strm, const Request &req,
 
   // Ignore '100 Continue'
   while (res.status == StatusCode::Continue_100) {
-    if (!line_reader.getline()) { return false; } // CRLF
-    if (!line_reader.getline()) { return false; } // next response line
+    if (!line_reader.getline(CPPHTTPLIB_HEADER_MAX_LENGTH)) { return false; } // CRLF
+    if (!line_reader.getline(CPPHTTPLIB_HEADER_MAX_LENGTH)) { return false; } // next response line
 
     if (!std::regex_match(line_reader.ptr(), m, re)) { return false; }
     res.version = std::string(m[1]);
@@ -7406,10 +7457,14 @@ inline bool ClientImpl::read_response_line(Stream &strm, const Request &req,
   return true;
 }
 
+inline bool repeatable_method(const std::string &method) {
+  return method == "GET" || method == "HEAD" || method == "OPTIONS";
+}
+
 inline bool ClientImpl::send(Request &req, Response &res, Error &error) {
   std::lock_guard<std::recursive_mutex> request_mutex_guard(request_mutex_);
   auto ret = send_(req, res, error);
-  if (error == Error::SSLPeerCouldBeClosed_) {
+  if (error == Error::SSLPeerCouldBeClosed_ && repeatable_method(req.method)) {
     assert(!ret);
     ret = send_(req, res, error);
   }
@@ -7427,6 +7482,11 @@ inline bool ClientImpl::is_ssl_peer_could_be_closed(SSL *ssl) const {
 inline bool ClientImpl::send_(Request &req, Response &res, Error &error) {
   {
     std::lock_guard<std::mutex> guard(socket_mutex_);
+
+    if (request_stop_requested_.load()) {
+      error = Error::Canceled;
+      return false;
+    }
 
     // Set this to false immediately - if it ever gets set to true by the end of
     // the request, we know another thread instructed us to close the socket.
@@ -7459,6 +7519,13 @@ inline bool ClientImpl::send_(Request &req, Response &res, Error &error) {
     if (!is_alive) {
       if (!create_and_connect_socket(socket_, error)) { return false; }
 
+      if (request_stop_requested_.load()) {
+        shutdown_socket(socket_);
+        close_socket(socket_);
+        error = Error::Canceled;
+        return false;
+      }
+
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
       // TODO: refactoring
       if (is_ssl()) {
@@ -7473,6 +7540,14 @@ inline bool ClientImpl::send_(Request &req, Response &res, Error &error) {
         if (!scli.initialize_ssl(socket_, error)) { return false; }
       }
 #endif
+
+      if (request_stop_requested_.load()) {
+        shutdown_ssl(socket_, false);
+        shutdown_socket(socket_);
+        close_socket(socket_);
+        error = Error::Canceled;
+        return false;
+      }
     }
 
     // Mark the current socket as being in use so that it cannot be closed by
@@ -7483,6 +7558,19 @@ inline bool ClientImpl::send_(Request &req, Response &res, Error &error) {
     }
     socket_requests_in_flight_ += 1;
     socket_requests_are_from_thread_ = std::this_thread::get_id();
+  }
+
+  if (request_stop_requested_.load()) {
+    std::lock_guard<std::mutex> guard(socket_mutex_);
+    socket_requests_in_flight_ -= 1;
+    if (socket_requests_in_flight_ == 0) {
+      socket_requests_are_from_thread_ = std::thread::id();
+    }
+    shutdown_ssl(socket_, false);
+    shutdown_socket(socket_);
+    close_socket(socket_);
+    error = Error::Canceled;
+    return false;
   }
 
   for (const auto &header : default_headers_) {
@@ -8701,6 +8789,16 @@ inline void ClientImpl::stop() {
   close_socket(socket_);
 }
 
+inline void ClientImpl::request_stop() {
+  request_stop_requested_.store(true);
+  std::unique_lock<std::mutex> guard(socket_mutex_, std::try_to_lock);
+  if (!guard.owns_lock()) { return; }
+  if (socket_requests_in_flight_ > 0) {
+    shutdown_socket(socket_);
+    socket_should_be_closed_when_request_is_done_ = true;
+  }
+}
+
 inline std::string ClientImpl::host() const { return host_; }
 
 inline int ClientImpl::port() const { return port_; }
@@ -8930,22 +9028,28 @@ template <typename U>
 bool ssl_connect_or_accept_nonblocking(socket_t sock, SSL *ssl,
                                        U ssl_connect_or_accept,
                                        time_t timeout_sec,
-                                       time_t timeout_usec) {
+                                       time_t timeout_usec,
+                                       const std::atomic<bool> *cancel = nullptr) {
+  const auto deadline = std::chrono::steady_clock::now()
+      + std::chrono::seconds(timeout_sec) + std::chrono::microseconds(timeout_usec);
   auto res = 0;
   while ((res = ssl_connect_or_accept(ssl)) != 1) {
-    auto err = SSL_get_error(ssl, res);
-    switch (err) {
-    case SSL_ERROR_WANT_READ:
-      if (select_read(sock, timeout_sec, timeout_usec) > 0) { continue; }
-      break;
-    case SSL_ERROR_WANT_WRITE:
-      if (select_write(sock, timeout_sec, timeout_usec) > 0) { continue; }
-      break;
-    default: break;
+    if (cancel && cancel->load()) return false;
+    const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
+        deadline - std::chrono::steady_clock::now()).count();
+    if (remaining <= 0) return false;
+    const auto interval = cancel ? std::min<int64_t>(remaining, 100000) : remaining;
+    const auto sec = static_cast<time_t>(interval / 1000000);
+    const auto usec = static_cast<time_t>(interval % 1000000);
+    const auto error = SSL_get_error(ssl, res);
+    if (error == SSL_ERROR_WANT_READ) {
+      if (select_read(sock, sec, usec) >= 0) continue;
+    } else if (error == SSL_ERROR_WANT_WRITE) {
+      if (select_write(sock, sec, usec) >= 0) continue;
     }
     return false;
   }
-  return true;
+  return (!cancel || !cancel->load()) && std::chrono::steady_clock::now() < deadline;
 }
 
 template <typename T>
@@ -9434,7 +9538,7 @@ inline bool SSLClient::initialize_ssl(Socket &socket, Error &error) {
 
         if (!detail::ssl_connect_or_accept_nonblocking(
                 socket.sock, ssl2, SSL_connect, connection_timeout_sec_,
-                connection_timeout_usec_)) {
+                connection_timeout_usec_, &request_stop_requested_)) {
           error = Error::SSLConnection;
           return false;
         }
@@ -10103,6 +10207,8 @@ inline bool Client::send(Request &req, Response &res, Error &error) {
 inline Result Client::send(const Request &req) { return cli_->send(req); }
 
 inline void Client::stop() { cli_->stop(); }
+
+inline void Client::request_stop() { cli_->request_stop(); }
 
 inline std::string Client::host() const { return cli_->host(); }
 

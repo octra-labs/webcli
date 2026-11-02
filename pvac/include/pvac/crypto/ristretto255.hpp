@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <cstdint>
@@ -16,7 +19,7 @@ struct Fe25519 {
 static constexpr uint64_t FE_MASK51 = (1ULL << 51) - 1;
 
 inline Fe25519 fe_zero() { return {{0,0,0,0,0}}; }
-inline Fe25519 fe_one()  { return {{1,0,0,0,0}}; }
+inline Fe25519 fe_one() { return {{1,0,0,0,0}}; }
 
 inline Fe25519 fe_reduce(Fe25519 h) {
     uint64_t c;
@@ -40,10 +43,10 @@ inline Fe25519 fe_sub(const Fe25519& f, const Fe25519& g) {
 
     Fe25519 h;
     h.v[0] = (f.v[0] + ((1ULL << 52) - 38)) - g.v[0];
-    h.v[1] = (f.v[1] + ((1ULL << 52) - 2))  - g.v[1];
-    h.v[2] = (f.v[2] + ((1ULL << 52) - 2))  - g.v[2];
-    h.v[3] = (f.v[3] + ((1ULL << 52) - 2))  - g.v[3];
-    h.v[4] = (f.v[4] + ((1ULL << 52) - 2))  - g.v[4];
+    h.v[1] = (f.v[1] + ((1ULL << 52) - 2)) - g.v[1];
+    h.v[2] = (f.v[2] + ((1ULL << 52) - 2)) - g.v[2];
+    h.v[3] = (f.v[3] + ((1ULL << 52) - 2)) - g.v[3];
+    h.v[4] = (f.v[4] + ((1ULL << 52) - 2)) - g.v[4];
     return fe_reduce(h);
 }
 
@@ -132,7 +135,7 @@ inline Fe25519 fe_inv(const Fe25519& z) {
 }
 
 inline Fe25519 fe_frombytes(const uint8_t s[32]) {
-    uint64_t h0 = (uint64_t)s[0]  | ((uint64_t)s[1] <<8) | ((uint64_t)s[2] <<16) |
+    uint64_t h0 = (uint64_t)s[0] | ((uint64_t)s[1] <<8) | ((uint64_t)s[2] <<16) |
                   ((uint64_t)s[3] <<24) | ((uint64_t)s[4] <<32) | ((uint64_t)s[5] <<40) |
                   ((uint64_t)s[6] & 0x07) << 48;
     uint64_t h1 = ((uint64_t)s[6] >>3) | ((uint64_t)s[7] <<5) | ((uint64_t)s[8] <<13) |
@@ -262,7 +265,9 @@ inline void sc_tobytes(uint8_t s[32], const Scalar& a) {
     }
 }
 
-inline Scalar sc_reduce512(const uint64_t w[8]) {
+enum class ScalarRule { Prior, Wide };
+
+inline Scalar sc_reduce512(const uint64_t w[8], ScalarRule rule = ScalarRule::Prior) {
 
     uint64_t r[5] = {0, 0, 0, 0, 0};
 
@@ -270,7 +275,9 @@ inline Scalar sc_reduce512(const uint64_t w[8]) {
 
         r[4] = r[3]; r[3] = r[2]; r[2] = r[1]; r[1] = r[0]; r[0] = w[i];
 
-        uint64_t hi = (r[3] >> 60) | (r[4] << 4);
+        const u128 hi = rule == ScalarRule::Wide
+            ? (u128(r[3]) >> 60) | (u128(r[4]) << 4)
+            : u128((r[3] >> 60) | (r[4] << 4));
 
         r[3] &= 0x0FFFFFFFFFFFFFFFULL;
         r[4] = 0;
@@ -372,7 +379,7 @@ inline Scalar sc_sub(const Scalar& a, const Scalar& b) {
     return sc_reduce512(w);
 }
 
-inline Scalar sc_mul(const Scalar& a, const Scalar& b) {
+inline Scalar sc_mul(const Scalar& a, const Scalar& b, ScalarRule rule = ScalarRule::Prior) {
 
     uint64_t w[8] = {0};
     for (int i = 0; i < 4; i++) {
@@ -384,7 +391,7 @@ inline Scalar sc_mul(const Scalar& a, const Scalar& b) {
         }
         w[i+4] = (uint64_t)carry;
     }
-    return sc_reduce512(w);
+    return sc_reduce512(w, rule);
 }
 
 inline Scalar sc_neg(const Scalar& a) {
@@ -400,13 +407,13 @@ inline Scalar sc_from_fp_signed(const Fp& x) {
     return sc_from_fp(x);
 }
 
-inline Scalar sc_random() {
+inline Scalar sc_random(ScalarRule rule = ScalarRule::Prior) {
     uint64_t r[8];
     for (int i = 0; i < 8; i++) r[i] = csprng_u64();
-    return sc_reduce512(r);
+    return sc_reduce512(r, rule);
 }
 
-inline Scalar sc_inv(const Scalar& a) {
+inline Scalar sc_inv(const Scalar& a, ScalarRule rule = ScalarRule::Prior) {
 
     uint64_t exp[4] = {
         SC_L[0] - 2, SC_L[1], SC_L[2], SC_L[3]
@@ -417,11 +424,22 @@ inline Scalar sc_inv(const Scalar& a) {
 
     for (int i = 0; i < 256; i++) {
         if ((exp[i >> 6] >> (i & 63)) & 1)
-            result = sc_mul(result, base);
-        base = sc_mul(base, base);
+            result = sc_mul(result, base, rule);
+        base = sc_mul(base, base, rule);
     }
     return result;
 }
+
+struct ScalarOps {
+    const ScalarRule rule;
+
+    explicit ScalarOps(ScalarRule value = ScalarRule::Prior) : rule(value) {}
+
+    Scalar mul(const Scalar& a, const Scalar& b) const { return sc_mul(a, b, rule); }
+    Scalar inv(const Scalar& a) const { return sc_inv(a, rule); }
+    Scalar random() const { return sc_random(rule); }
+    Scalar reduce(const uint64_t w[8]) const { return sc_reduce512(w, rule); }
+};
 
 struct ExtPoint {
     Fe25519 X, Y, Z, T;

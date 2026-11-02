@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <cstdint>
@@ -57,10 +60,14 @@ struct LinearCombination {
     }
 
     LinearCombination operator*(const Scalar& s) const {
+        return scale(s, ScalarOps());
+    }
+
+    LinearCombination scale(const Scalar& s, const ScalarOps& ops) const {
         LinearCombination result;
         result.terms.reserve(terms.size());
         for (const auto& [var, coeff] : terms)
-            result.terms.push_back({var, sc_mul(coeff, s)});
+            result.terms.push_back({var, ops.mul(coeff, s)});
         return result;
     }
 

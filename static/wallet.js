@@ -1,29 +1,8 @@
-/*
-    This file is part of Octra Wallet (webcli).
-
-    Octra Wallet is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 2 of the License, or
-    (at your option) any later version.
-
-    Octra Wallet is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with Octra Wallet.  If not, see <http://www.gnu.org/licenses/>.
-
-    This program is released under the GPL with the additional exemption
-    that compiling, linking, and/or using OpenSSL is allowed.
-    You are free to remove this exemption from derived works.
-
-    Copyright 2025-2026 Octra Labs
-              2025-2026 David A.
-              2025-2026 Alex T.
-              2025-2026 Vadim S.
-              2025-2026 Julia L.
-*/
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+// NikBel0x ヽ(*・ω・)ﾉ
+// Julia L.
+// Review: Vadim S.
 
 function validatePin(pin) {
   if (!pin || pin.length === 0) return 'PIN required';
@@ -114,6 +93,12 @@ function ideMenu(title, options) {
 
 var _walletAddr = '';
 var _historyOffset = 0;
+let _historyShown = [];
+const privateRequests = new Map();
+let _historyDraw = 0;
+let _dashDraw = 0;
+let _txDraw = 0;
+let _historySource = '';
 var _historyLimit = 20;
 var _refreshTimer = null;
 var _prevView = 'dashboard';
@@ -143,16 +128,19 @@ var _fees = {};
 var _rpcHost = '';
 var _hasMasterSeed = false;
 var _addressRuntime = {};
+let _historyEpoch = 0;
 var _tokenMetaInflight = {};
 var _pvacUpgradeStatus = null;
+let _pvacStatusRead = 0;
+let _stagingRequest = null;
 var _pvacUpgradeInFlight = false;
 var _privateOpInFlight = false;
 var _walletSwitching = false;
 var HISTORY_CACHE_TTL_MS = 12000;
-var HISTORY_STALE_REFRESH_MS = 3000;
+var HISTORY_CACHE_REFRESH_MS = 3000;
 var BALANCE_CACHE_TTL_MS = 5000;
 var TOKEN_CACHE_TTL_MS = 15000;
-var TOKEN_STALE_REFRESH_MS = 3000;
+var TOKEN_CACHE_REFRESH_MS = 3000;
 var PERSISTED_CACHE_TTL_MS = 300000;
 let _balanceFailures = 0;
 let _balanceSuccessAt = 0;
@@ -161,6 +149,8 @@ const BALANCE_OFFLINE_GRACE_MS = 45000;
 const setConnectionStatus = state => {
   const status = $('hdr-status');
   if (!status) return;
+  status.lockFailure = false;
+  status.title = '';
   const suffix = _rpcHost ? ' | ' + networkLabel(_rpcHost) : '';
   status.textContent = state + suffix;
   status.className = state === 'online'
@@ -178,8 +168,8 @@ const markBalanceOnline = () => {
 
 const markBalanceFailure = () => {
   _balanceFailures += 1;
-  const stale = Date.now() - _balanceSuccessAt > BALANCE_OFFLINE_GRACE_MS;
-  setConnectionStatus(_balanceFailures >= 2 && stale ? 'offline' : 'syncing');
+  const expired = Date.now() - _balanceSuccessAt > BALANCE_OFFLINE_GRACE_MS;
+  setConnectionStatus(_balanceFailures >= 2 && expired ? 'offline' : 'syncing');
 };
 
 function ensureAddressRuntime(addr) {
@@ -210,6 +200,9 @@ function clearAddressRuntime(addr) {
 }
 
 function clearAllAddressRuntime() {
+  _historyEpoch += 1;
+  privateRequests.clear();
+  _historyShown = [];
   _addressRuntime = {};
   _tokenMetaInflight = {};
 }
@@ -260,19 +253,11 @@ function restorePersistedBalance(addr) {
 }
 
 function persistHistoryPage(addr, limit, offset, response) {
-  if (!addr || !response) return;
-  persistedWrite(persistedCachePrefix(addr) + 'history:' + historyPageKey(limit, offset), {
-    ts: Date.now(),
-    response: response
-  });
+  if (addr) persistedRemovePrefix(persistedCachePrefix(addr) + 'history:');
 }
 
 function restorePersistedHistoryPage(addr, limit, offset) {
-  if (!addr) return null;
-  var cached = persistedRead(persistedCachePrefix(addr) + 'history:' + historyPageKey(limit, offset));
-  if (!cached || !cached.response || !cached.ts) return null;
-  if ((Date.now() - cached.ts) > PERSISTED_CACHE_TTL_MS) return null;
-  return cached;
+  return null;
 }
 
 function persistTokens(addr, tokens) {
@@ -316,6 +301,8 @@ function dropAllPersistedRuntime() {
   persistedRemovePrefix('octra_webcli:');
 }
 
+dropAllPersistedRuntime();
+
 function historyPageKey(limit, offset) {
   return String(limit) + ':' + String(offset);
 }
@@ -348,7 +335,8 @@ function cacheHistoryPage(addr, limit, offset, response) {
   return response;
 }
 
-async function reconcileHistoryResponse(addr, limit, offset, response) {
+async function mergeHistoryResponse(addr, limit, offset, response) {
+  const epoch = _historyEpoch;
   if (!addr || !response || !Array.isArray(response.transactions) || response.transactions.length === 0) {
     return response;
   }
@@ -376,34 +364,88 @@ async function reconcileHistoryResponse(addr, limit, offset, response) {
       changed = true;
     } catch (e) {}
   }));
+  if (_walletAddr !== addr || _historyEpoch !== epoch) throw new Error('wallet changed');
   if (!changed) return response;
   var nextResponse = Object.assign({}, response, { transactions: nextTxs });
   cacheHistoryPage(addr, limit, offset, nextResponse);
   return nextResponse;
 }
 
-async function fetchHistoryPage(limit, offset, force) {
+async function fetchHistoryPage(limit, offset, force, source = '') {
   var addr = _walletAddr;
+  const epoch = _historyEpoch;
   if (_walletSwitching) return { transactions: [] };
   if (!addr) return { transactions: [] };
+  if (source) {
+    const response = await api('GET', '/history?limit=' + limit + '&offset=' + offset +
+      '&source=' + encodeURIComponent(source));
+    if (_walletAddr !== addr || _historyEpoch !== epoch) throw new Error('wallet changed');
+    return response;
+  }
   var state = ensureAddressRuntime(addr);
   var key = historyPageKey(limit, offset);
   var cached = peekHistoryPage(addr, limit, offset);
   if (!force && cached && (Date.now() - cached.ts) < HISTORY_CACHE_TTL_MS) {
-    return reconcileHistoryResponse(addr, limit, offset, cached.response);
+    return mergeHistoryResponse(addr, limit, offset, cached.response);
   }
   if (state.historyInflight[key]) return state.historyInflight[key];
   state.historyInflight[key] = api('GET', '/history?limit=' + limit + '&offset=' + offset)
     .then(function(response) {
+      if (_walletAddr !== addr || _historyEpoch !== epoch) throw new Error('wallet changed');
       return cacheHistoryPage(addr, limit, offset, response);
     })
     .then(function(response) {
-      return reconcileHistoryResponse(addr, limit, offset, response);
+      return mergeHistoryResponse(addr, limit, offset, response);
     })
     .finally(function() {
       delete state.historyInflight[key];
     });
   return state.historyInflight[key];
+}
+
+const historyRows = response => {
+  const rows = new Map();
+  for (const row of [...(response.rejected || []),
+    ...(response.transactions || [])]) {
+    if (row && row.hash) rows.set(row.hash, row);
+  }
+  for (const row of response.local || []) {
+    if (!row || !row.hash) continue;
+    const publicRow = rows.get(row.hash);
+    if (!publicRow) rows.set(row.hash, row);
+    else if (row.local_record) {
+      const status = ['confirmed', 'rejected', 'dropped'].includes(publicRow.status)
+        ? publicRow.status : row.status;
+      rows.set(row.hash, {...publicRow, ...row, status,
+        ...(publicRow.epoch ? {epoch: publicRow.epoch} : {})});
+    } else rows.set(row.hash, {...row, ...publicRow});
+  }
+  return [...rows.values()].sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+};
+
+const historyEmpty = response => response.local_error
+  ? 'local history unavailable: ' + response.local_error
+  : response.history_status === 'unavailable' ? 'public history unavailable' : 'no records returned';
+
+const historyNav = response => {
+  const more = response.has_more
+    ? '<button class="load-more" data-action="loadMoreHistory">load more</button>' : '';
+  const source = _historySource === 'archive'
+    ? '<button class="load-more" data-action="loadHistorySource" data-arg="live">recent history</button>'
+    : response.history_archive && response.history_source !== 'archive'
+      ? '<button class="load-more" data-action="loadHistorySource" data-arg="archive">archive history</button>' : '';
+  const notice = response.local_error
+    ? '<div class="error-box">local history unavailable: ' + escapeHtml(response.local_error) + '</div>'
+    : response.history_status === 'unavailable'
+      ? '<div class="error-box">public history unavailable; showing local records</div>' : '';
+  return notice + more + source;
+};
+
+async function loadHistorySource(source) {
+  ++_historyDraw;
+  _historySource = source === 'archive' ? 'archive' : '';
+  _historyOffset = 0;
+  await loadHistory();
 }
 
 function cacheAddressTokens(addr, tokens) {
@@ -520,6 +562,11 @@ function invalidateCurrentAddressState() {
 
 function setPrivateOpBusy(active) {
   _privateOpInFlight = !!active;
+  if (active) {
+    _pvacStatusRead += 1;
+    renderEncryptRoom(null);
+  }
+  if ($('st-wallet-work')) $('st-wallet-work').textContent = active ? 'wallet operation in progress' : '';
 }
 
 var _ideProject = null;
@@ -1102,7 +1149,8 @@ async function doCompileProject() {
     _compiledProgramMinimum = res.program_min_ou || null;
     applyProgramDeployFee(_compiledDeployPayload, _compiledProgramMinimum);
     const ver = res.version ? ('AppliedML ' + escapeHtml(res.version) + ' - ') : '';
-    const msg = ver + 'compiled: ' + escapeHtml(String(res.instructions)) + ' instructions, ' + escapeHtml(String(res.size)) + ' bytes (' + files.length + ' files)';
+    const detail = res.verification ? ' | ' + verificationLabel(res.verification) : '';
+    const msg = ver + 'compiled: ' + escapeHtml(String(res.instructions)) + ' instructions, ' + escapeHtml(String(res.size)) + ' bytes (' + files.length + ' files)' + detail;
     showResult('ct-compile-result', true, msg);
     if (res.abi) {
       _compiledAbi = res.abi;
@@ -1119,7 +1167,6 @@ async function doCompileProject() {
       _compiledVerification = res.verification;
       _compiledCertificate = res.certificate || null;
       renderVerificationReport(res.verification, _compiledCertificate);
-      msg += ' | ' + verificationLabel(res.verification);
       showResult('ct-compile-result', verificationLevel(res.verification) !== 'error', msg + (verificationLevel(res.verification) === 'error' ? ' (deploy not blocked yet)' : ''));
       logVerificationTrace(res.verification);
     }
@@ -1230,16 +1277,8 @@ function mergeBalanceData(bal) {
   if (next.account_unknown && prev && !prev.account_unknown) {
     next.public_balance = prev.public_balance;
     next.nonce = prev.nonce;
-    next.staging = prev.staging;
     next.account_unknown = false;
-    next.account_stale = true;
-  }
-  if (next.encrypted_balance_unknown && next.encrypted_cipher_present !== true && prev && !prev.encrypted_balance_unknown) {
-    next.encrypted_balance = prev.encrypted_balance;
-    next.encrypted_balance_known = prev.encrypted_balance_known;
-    next.encrypted_cipher_present = prev.encrypted_cipher_present;
-    next.encrypted_balance_unknown = false;
-    next.encrypted_balance_stale = true;
+    next.account_expired = true;
   }
   return next;
 }
@@ -1255,24 +1294,20 @@ function applyBalanceData(bal) {
   var enc = _encKnown ? (next.encrypted_balance || '0') : '';
   _encryptedBalanceRaw = _encKnown ? (parseInt(enc) || 0) : 0;
   if ($('btn-key-switch')) {
-    if (encUnknown) {
-      $('btn-key-switch').style.display = 'none';
-    } else {
-      if (_encPresent || _encryptedBalanceRaw > 0) {
-        $('btn-key-switch').textContent = 'checking encryption upgrade...';
-        $('btn-key-switch').style.display = '';
-      }
-      refreshPvacUpgradeStatus();
-    }
+    refreshPvacUpgradeStatus();
   }
-  var encText = _encKnown ? fmtOct(enc) : (_encPresent ? 'legacy encrypted balance' : '-');
+  const encState = next.encrypted_balance_state;
+  const encText = _encKnown ? fmtOct(enc)
+    : encState === 'unavailable' ? 'private balance temporarily unavailable'
+    : !_encPresent ? '-' : encState === 'legacy_upgrade_required'
+    ? 'legacy encrypted balance' : 'private balance unreadable';
   var pubText = accountUnknown ? '-' : fmtOct(pub);
   var nonceText = accountUnknown ? '-' : (next.nonce || '0');
   if ($('st-balance')) $('st-balance').textContent = pubText;
   if ($('st-enc-balance')) $('st-enc-balance').textContent = encText;
+  if ($('st-enc-balance')) $('st-enc-balance').title = next.encrypted_balance_error || '';
   if ($('ct-struct-link')) $('ct-struct-link').hidden = !_encPresent;
   if ($('st-nonce')) $('st-nonce').textContent = nonceText;
-  if ($('st-staging')) $('st-staging').textContent = next.staging || '0';
   if ($('send-bal')) $('send-bal').textContent = pubText;
   if ($('enc-pub-bal')) $('enc-pub-bal').textContent = pubText;
   if ($('enc-enc-bal')) $('enc-enc-bal').textContent = encText;
@@ -1287,11 +1322,14 @@ function resetDashboardView() {
   _encPresent = false;
   _encKnown = false;
   _pvacUpgradeStatus = null;
+  _pvacStatusRead += 1;
+  renderEncryptRoom(null);
   if ($('st-balance')) $('st-balance').textContent = '-';
   if ($('st-enc-balance')) $('st-enc-balance').textContent = '-';
   if ($('ct-struct-link')) $('ct-struct-link').hidden = true;
   if ($('st-nonce')) $('st-nonce').textContent = '-';
   if ($('st-staging')) $('st-staging').textContent = '-';
+  if ($('st-wallet-work')) $('st-wallet-work').textContent = '';
   if ($('send-bal')) $('send-bal').textContent = '-';
   if ($('enc-pub-bal')) $('enc-pub-bal').textContent = '-';
   if ($('enc-enc-bal')) $('enc-enc-bal').textContent = '-';
@@ -1347,8 +1385,23 @@ async function fetchBalance(force) {
   return request;
 }
 
-async function api(method, path, body) {
-  var opts = { method: method, headers: {} };
+const walletApproval = async () => {
+  const address = _walletAddr;
+  const session = await api('GET', '/wallet/session');
+  if (!address || address !== _walletAddr || session.address !== address
+      || !/^[0-9]+$/.test(String(session.generation)))
+    throw new Error('wallet session changed; approve again');
+  return Object.freeze({address, generation: String(session.generation),
+    local_decrypt_without_pin: session.local_decrypt_without_pin === true});
+};
+
+async function api(method, path, body, session) {
+  if (!session && method === 'POST' && path === '/fhe/encrypt') session = await walletApproval();
+  const opts = { method: method, headers: {} };
+  if (session) {
+    opts.headers['X-Webcli-Wallet'] = session.address;
+    opts.headers['X-Webcli-Generation'] = session.generation;
+  }
   var timeoutMs = apiTimeoutMs(method, path);
   var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   var timeoutId = null;
@@ -1361,34 +1414,46 @@ async function api(method, path, body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  var res;
   try {
-    res = await fetch('/api' + path, opts);
+    const res = await fetch('/api' + path, opts);
+    const text = await res.text();
+    if (!text) throw new Error('empty response from RPC (possible timeout)');
+    let j;
+    try { j = JSON.parse(text); } catch (e) { throw new Error('invalid server response'); }
+    if ((j && j.error) || !res.ok) {
+      const error = new Error(String(j.error || j.message || 'request failed'));
+      if ((res.status === 403 || res.status === 429) && Number.isInteger(j.retry_after)
+          && j.retry_after > 0 && j.retry_after <= 900) error.retryAfter = j.retry_after;
+      throw error;
+    }
+    return j;
   } catch (e) {
-    if (e && e.name === 'AbortError') throw new Error('request timed out');
+    if (e && e.name === 'AbortError') {
+      throw new Error(method === 'GET' ? 'request timed out' :
+        'request timed out; outcome unknown; check history before retrying');
+    }
     throw e;
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
+    if (method === 'POST' && ['/pvac/upgrade', '/key_switch', '/pvac/upgrade_ack',
+        '/pvac/upgrade_reject', '/encrypt', '/decrypt', '/stealth/send', '/stealth/claim'].includes(path)) {
+      _pvacStatusRead += 1;
+      _pvacUpgradeStatus = null;
+    }
   }
-  var text = await res.text();
-  if (!text || text.length === 0) throw new Error('empty response from RPC (possible timeout)');
-  var j;
-  try { j = JSON.parse(text); } catch (e) { throw new Error('invalid server response: ' + escapeHtml(text.substring(0, 200))); }
-  if (j && j.error) throw new Error(escapeHtml(j.error || j.message || 'request failed'));
-  if (!res.ok) throw new Error(escapeHtml(j.error || j.message || 'request failed'));
-  return j;
 }
 
 function apiTimeoutMs(method, path) {
   if (method !== 'GET') {
+    if (path === '/fhe/encrypt' || path === '/fhe/decrypt') return 300000;
     if (path === '/pvac/upgrade' || path === '/key_switch') return 900000;
     if (path === '/encrypt' || path === '/decrypt') return 900000;
     if (path === '/stealth/send' || path === '/stealth/claim') return 900000;
     return 30000;
   }
   if (path === '/stealth/scan') return 30000;
-  if (path === '/balance') return 30000;
-  if (path === '/pvac/upgrade_status') return 30000;
+  if (path === '/balance') return 90000;
+  if (path === '/pvac/upgrade_status') return 180000;
   return 10000;
 }
 
@@ -1403,11 +1468,40 @@ async function fetchFees() {
 }
 
 function ouToOct(ou) {
-  var n = parseInt(ou);
-  if (isNaN(n) || n <= 0) return '?';
-  var oct = n / 1000000;
-  return oct % 1 === 0 ? oct.toFixed(0) : oct.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  return AmountUnits.format(ou, 6);
 }
+
+const feeMinimum = kind => {
+  const floor = ['key_switch', 'encrypt', 'decrypt', 'stealth'].includes(kind) ? 5000n
+    : kind === 'claim' ? 3000n : 1n;
+  const remote = String(_fees[kind]?.minimum || '');
+  if (!/^[1-9][0-9]*$/.test(remote)) return floor > 1n ? floor.toString() : '';
+  return (BigInt(remote) > floor ? BigInt(remote) : floor).toString();
+};
+
+const feeChoice = (id, kind) => {
+  const text = String((id && $(id)?.value.trim()) || feeMinimum(kind));
+  if (!/^[1-9][0-9]*$/.test(text) || BigInt(text) > 10000000n)
+    throw new Error('fee unavailable or outside supported range');
+  const minimum = feeMinimum(kind);
+  if (minimum && BigInt(text) < BigInt(minimum))
+    throw new Error('operation fee must be at least ' + minimum + ' OU');
+  return text;
+};
+
+const feeTerms = (fee, amount = '0', kind = 'key_switch', count = 1) => {
+  const total = (BigInt(AmountUnits.parse(amount, 6)) + BigInt(fee) * BigInt(count)).toString();
+  const reference = {key_switch: '5000', encrypt: '5000', decrypt: '5000',
+    stealth: '5000', claim: '3000', call: '1000', deploy: '200000', standard: '30000'};
+  const minimum = reference[kind] || '1000';
+  const ceiling = ['key_switch', 'encrypt', 'decrypt', 'stealth'].includes(kind)
+    ? BigInt(minimum) + 50000n : 5n * BigInt(minimum);
+  const warning = BigInt(fee) > ceiling
+    ? '\nWARNING: fee exceeds local review threshold (' + AmountUnits.format(ceiling.toString(), 6) + ' OCT). Check the fee before approving.' : '';
+  return '\nfee: ' + AmountUnits.format(fee, 6) + ' OCT (' + fee + ' OU)'
+    + (count > 1 ? '\nmaximum total OCT debit: ' : '\ntotal OCT debit: ')
+    + AmountUnits.format(total, 6) + warning;
+};
 
 function applyFeeDefaults() {
   var map = {
@@ -1424,12 +1518,15 @@ function applyFeeDefaults() {
     if (id === 'ct-deploy-fee' && _compiledDeployPayload) continue;
     var fee = _fees[map[id]];
     if (input && fee) {
-      var rec = fee.recommended || fee.minimum || '';
+      const minimum = feeMinimum(map[id]);
+      const quote = String(fee.recommended || '');
+      const rec = /^[1-9][0-9]*$/.test(quote) && BigInt(quote) > BigInt(minimum || '0')
+        ? quote : minimum;
       if (!input.value || input.value === input.getAttribute('data-prev-default')) {
         input.value = rec;
         input.setAttribute('data-prev-default', rec);
       }
-      input.placeholder = 'min: ' + (fee.minimum || '?');
+      input.placeholder = 'min: ' + (minimum || '?');
     }
   }
   var btnDeploy = $('btn-deploy');
@@ -1442,20 +1539,11 @@ function applyFeeDefaults() {
 }
 
 function validateFee(inputId, opType) {
-  var input = $(inputId);
-  if (!input) return true;
-  var val = input.value.trim();
-  if (!val) return true;
-  var n = parseInt(val);
-  if (isNaN(n) || n <= 0 || String(n) !== val) return false;
-  var fee = _fees[opType];
-  if (fee && fee.minimum && n < parseInt(fee.minimum)) return false;
-  return true;
+  try { feeChoice(inputId, opType); return true; } catch (error) { return false; }
 }
 
 function feeError(resultId, inputId, opType) {
-  var fee = _fees[opType];
-  var minStr = (fee && fee.minimum) ? fee.minimum : '?';
+  const minStr = feeMinimum(opType) || '?';
   showResult(resultId, false, 'invalid fee - must be integer >= ' + minStr);
   if ($(inputId)) $(inputId).focus();
 }
@@ -1476,6 +1564,7 @@ const applyProgramDeployFee = (payload, required) => {
 };
 
 function switchView(name) {
+  resetApiKey();
   if (name !== 'tx') _prevView = name;
   var views = document.querySelectorAll('.view');
   for (var i = 0; i < views.length; i++) views[i].classList.remove('active');
@@ -1492,7 +1581,11 @@ var tabId = tabs[i].getAttribute('data-view');
     }
   }
   if (name === 'dashboard') loadDashboard();
-  if (name === 'history') { _historyOffset = 0; loadHistory(); }
+  if (name === 'history') {
+    _historyOffset = 0;
+    _historySource = '';
+    loadHistory();
+  }
   if (name === 'keys') showKeys();
   if (name === 'settings') loadSettings();
   if (name === 'send') refreshSendBalance();
@@ -1524,15 +1617,7 @@ function fmtOct(raw) {
 }
 
 function formatUnits(rawStr, decimals) {
-  var dec = parseInt(decimals) || 0;
-  var s = String(rawStr).replace(/[^0-9]/g, '');
-  if (s === '' || s === '0') return '0';
-  if (dec === 0) return s;
-  while (s.length <= dec) s = '0' + s;
-  var intPart = s.slice(0, s.length - dec);
-  var fracPart = s.slice(s.length - dec).replace(/0+$/, '');
-  if (!intPart) intPart = '0';
-  return fracPart ? intPart + '.' + fracPart : intPart;
+  return AmountUnits.format(rawStr, decimals);
 }
 
 function fmtTokenAmount(raw, decimals) {
@@ -1624,9 +1709,9 @@ function statusTag(st) {
 }
 
 function showResult(elId, ok, msg) {
-  var el = $(elId);
+  const el = $(elId);
   if (!el) return;
-  el.innerHTML = '<div class="result-msg ' + (ok ? 'result-ok' : 'result-error') + '">' + msg + '</div>';
+  el.innerHTML = '<div class="result-msg ' + (ok ? 'result-ok' : 'result-error') + '">' + (ok ? msg : escapeHtml(msg)) + '</div>';
 }
 
 function clearResult(elId) {
@@ -1634,7 +1719,10 @@ function clearResult(elId) {
   if (el) el.innerHTML = '';
 }
 
-const networkText = value => String(value || '').replace(/\bnode\b/gi, 'network');
+const networkText = value => String(value || '');
+
+const tokenSymbol = value => /^[A-Za-z0-9]{1,12}$/.test(String(value))
+  && !['oct', '0ct'].includes(String(value).toLowerCase()) ? String(value) : '';
 
 function validAddr(addr) {
   return /^oct[1-9A-HJ-NP-Za-km-z]{44}$/.test(addr);
@@ -1677,7 +1765,7 @@ const appendPrivateLog = (id, selector, msg, cls) => {
   settleActiveLog(el);
   el.insertAdjacentHTML(
     'beforeend',
-    msg ? renderLogRow(logState(cls), msg) : '<div class="op-log-gap"></div>'
+    msg ? renderLogRow(logState(cls), cls === 'log-err' ? escapeHtml(msg) : msg) : '<div class="op-log-gap"></div>'
   );
   el.scrollTop = el.scrollHeight;
 };
@@ -1711,6 +1799,9 @@ function clearEncryptLog() {
 
 function txStatusTag(st) {
   if (st === 'rejected') return '<span class="rejected-tag">rejected</span>';
+  if (st === 'unaccepted') return '<span class="rejected-tag">not accepted</span>';
+  if (st === 'replaced') return '<span class="rejected-tag">nonce used</span>';
+  if (st === 'discarded') return '<span class="rejected-tag">discarded</span>';
   if (st === 'confirmed') return '<span class="confirmed-tag">confirmed</span>';
   if (st === 'pending') return '<span class="pending-text">pending</span>';
   return '<span class="pending-text">' + escapeHtml(st || 'pending') + '</span>';
@@ -1720,12 +1811,15 @@ const tokenTransfer = tx => {
   const token = tx.token_address || tx.to_ || tx.to || '';
   const tagged = tx.token_transfer === true ||
     (tx.op_type === 'call' && tx.encrypted_data === 'transfer');
-  if (!tagged || !token) return null;
+  if (!tagged || !validAddr(token)) return null;
   let recipient = tx.recipient || '';
-  let amount = tx.token_amount_raw === undefined ? '' : String(tx.token_amount_raw);
+  let amount = typeof tx.token_amount_raw === 'string' ? tx.token_amount_raw
+    : Number.isSafeInteger(tx.token_amount_raw) ? String(tx.token_amount_raw) : '';
   if ((!recipient || !amount) && tx.message) {
     try {
-      const params = JSON.parse(tx.message);
+      if (typeof tx.message !== 'string' || tx.message.length > 1048576) return null;
+      const params = JSON.parse(tx.message.replace(/"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g,
+        token => token[0] === '"' ? token : JSON.stringify(token)));
       if (Array.isArray(params) && params.length >= 2) {
         recipient = recipient || String(params[0] || '');
         amount = amount || String(params[1]);
@@ -1739,11 +1833,13 @@ const tokenTransfer = tx => {
 function txAmt(tx) {
   var transfer = tokenTransfer(tx);
   if (transfer) {
-    var sym = _tokenSymbols[transfer.token] || '';
+    const sym = tokenSymbol(_tokenSymbols[transfer.token] || '');
     var dec = _tokenDecimals[transfer.token] || '0';
     var cls = tx.from === _walletAddr ? ' red' : (transfer.recipient === _walletAddr ? ' green' : '');
     return {
-      amt: fmtTokenCompact(transfer.amount, dec) + (sym ? ' ' + sym : ''),
+      amt: fmtTokenCompact(transfer.amount, dec),
+      label: 'TOKEN' + (sym ? ' ' + sym : ''),
+      full: AmountUnits.format(transfer.amount, dec) + ' TOKEN [' + transfer.token + ']',
       cls: cls,
       toOverride: transfer.recipient
     };
@@ -1766,7 +1862,9 @@ function txRow(tx) {
   h += '<td>' + txLink(tx.hash) + '</td>';
   h += '<td>' + addrLink(tx.from) + '</td>';
   h += '<td>' + addrLink(toAddr) + '</td>';
-  h += '<td class="mono amount' + a.cls + '">' + escapeHtml(a.amt) + '</td>';
+  h += '<td class="mono amount' + a.cls + '" title="' + escapeAttr(a.full || a.amt) + '">'
+    + '<span class="amount-value">' + escapeHtml(a.amt) + '</span>'
+    + (a.label ? '<span class="amount-label">' + escapeHtml(a.label) + '</span>' : '') + '</td>';
   h += '<td>' + txStatusTag(st) + '</td>';
   h += '<td class="gray">' + fmtDate(tx.timestamp) + '</td>';
   h += '</tr>';
@@ -1781,7 +1879,9 @@ function txCardHtml(tx) {
   c += '<div class="card-row"><span class="card-label">tx</span><span class="card-val">' + txLink(tx.hash) + '</span></div>';
   c += '<div class="card-row"><span class="card-label">from</span><span class="card-val">' + addrLink(tx.from) + '</span></div>';
   c += '<div class="card-row"><span class="card-label">to</span><span class="card-val">' + addrLink(toAddr) + '</span></div>';
-  c += '<div class="card-row"><span class="card-label">amount</span><span class="card-val mono amount' + a.cls + '">' + escapeHtml(a.amt) + '</span></div>';
+  c += '<div class="card-row"><span class="card-label">amount</span><span class="card-val mono amount' + a.cls + '" title="'
+    + escapeAttr(a.full || a.amt) + '">' + escapeHtml(a.amt)
+    + (a.label ? ' ' + escapeHtml(a.label) : '') + '</span></div>';
   c += '<div class="card-row"><span class="card-label">status</span><span class="card-val">' + txStatusTag(st) + '</span></div>';
   c += '<div class="card-row"><span class="card-label">time</span><span class="card-val gray">' + fmtDate(tx.timestamp) + '</span></div>';
   c += '</div>';
@@ -1789,10 +1889,13 @@ function txCardHtml(tx) {
 }
 
 async function showTx(hash) {
+  const epoch = _historyEpoch;
+  const draw = ++_txDraw;
   switchView('tx');
   $('tx-detail').innerHTML = '<div class="loading">loading...</div>';
   try {
     var res = await api('GET', '/tx?hash=' + encodeURIComponent(hash));
+    if (_historyEpoch !== epoch || _txDraw !== draw) return;
     var st = res.status || 'pending';
     var h = '<table class="detail-table">';
 
@@ -1801,6 +1904,7 @@ async function showTx(hash) {
     h += '<tr><td>hash</td><td class="mono">' + escapeHtml(fullHash) + ' <a href="' + escapeHtml(explorerLink) + '" target="_blank" style="font-size:10px;color:#8C9DB6;margin-left:4px">explorer</a></td></tr>';
     h += '<tr><td>status</td><td>' + txStatusTag(st) + '</td></tr>';
     if (res.reject_reason) h += '<tr><td>reason</td><td class="result-error">' + escapeHtml(res.reject_reason) + '</td></tr>';
+    if (res.submit_error) h += '<tr><td>submission</td><td class="result-error">' + escapeHtml(res.submit_error) + '</td></tr>';
       h += '<tr><td>from</td><td>' + addrLink(res.from || '') + '</td></tr>';
       h += '<tr><td>to</td><td>' + addrLink(res.to || res.to_ || '') + '</td></tr>';
        var amtRaw = res.amount_raw || res.amount || '0';
@@ -1810,22 +1914,80 @@ async function showTx(hash) {
       h += '<tr><td>type</td><td>' + (opTag(op) || escapeHtml(op)) + '</td></tr>';
       if (res.epoch) h += '<tr><td>epoch</td><td>' + escapeHtml(String(res.epoch)) + '</td></tr>';
       if (res.block_height) h += '<tr><td>block</td><td>' + escapeHtml(String(res.block_height)) + '</td></tr>';
-    h += '<tr><td>nonce</td><td>' + (res.nonce || '') + '</td></tr>';
+    h += '<tr><td>nonce</td><td>' + escapeHtml(String(res.nonce ?? '')) + '</td></tr>';
     if (res.ou) h += '<tr><td>ou (fee)</td><td class="mono">' + fmtOct(res.ou) + '</td></tr>';
     h += '<tr><td>time</td><td>' + fmtDate(res.timestamp) + '</td></tr>';
 
     if (res.signature) h += '<tr><td>signature</td><td class="mono">' + escapeHtml(res.signature) + '</td></tr>';
     if (res.public_key) h += '<tr><td>public key</td><td class="mono">' + escapeHtml(res.public_key) + '</td></tr>';
     h += '</table>';
+    if (res.retryable === true && /^[0-9a-f]{64}$/.test(fullHash)) {
+      h += '<button class="action-btn" data-action="retrySavedTx" data-arg="' + fullHash + '">retry saved transaction</button>';
+    }
+    if (res.discardable === true && /^[0-9a-f]{64}$/.test(fullHash)) {
+      h += '<button class="action-btn" data-action="discardSavedTx" data-arg="' + fullHash + '">discard saved transaction</button>';
+    }
     if (res.message && res.message !== 'null' && res.message !== '') {
       h += '<div class="tx-message">';
       h += '<div class="section-title">message</div>';
-      h += '<div class="msg-box">' + escapeHtml(res.message) + '</div>';
+      const message = String(res.message);
+      if (message.length > 300) {
+        const preview = message.slice(0, 300).replace(/[\uD800-\uDBFF]$/, '');
+        h += '<details class="tx-message-expand"><summary><span class="tx-message-preview">'
+          + escapeHtml(preview) + '...</span><span class="tx-message-open">show full message</span>'
+          + '<span class="tx-message-close">collapse message</span></summary>'
+          + '<div class="msg-box">' + escapeHtml(message) + '</div></details>';
+      } else {
+        h += '<div class="msg-box">' + escapeHtml(message) + '</div>';
+      }
       h += '</div>';
     }
     $('tx-detail').innerHTML = h;
   } catch (e) {
+    if (_historyEpoch !== epoch || _txDraw !== draw) return;
     $('tx-detail').innerHTML = '<div class="error-box">' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+async function retrySavedTx(hash) {
+  if (_privateOpInFlight || !/^[0-9a-f]{64}$/.test(hash)) return;
+  const epoch = _historyEpoch;
+  setPrivateOpBusy(true);
+  try {
+    const session = await walletApproval();
+    const pin = await modalPrompt('retry saved transaction',
+      'enter PIN to resend the same signed transaction without a new nonce', { pin: true, btnText: 'retry' });
+    if (!pin || _historyEpoch !== epoch) return;
+    await api('POST', '/tx/retry', { hash: hash, pin: pin }, session);
+    if (_historyEpoch !== epoch) return;
+    invalidateCurrentAddressState();
+    await showTx(hash);
+  } catch (error) {
+    if (_historyEpoch === epoch)
+      $('tx-detail').innerHTML = '<div class="error-box">' + escapeHtml(error.message) + '</div>';
+  } finally {
+    setPrivateOpBusy(false);
+  }
+}
+
+async function discardSavedTx(hash) {
+  if (_privateOpInFlight || !/^[0-9a-f]{64}$/.test(hash)) return;
+  const epoch = _historyEpoch;
+  setPrivateOpBusy(true);
+  try {
+    const session = await walletApproval();
+    const pin = await modalPrompt('discard saved transaction',
+      'only transactions known not to have been accepted can be discarded', { pin: true, btnText: 'discard' });
+    if (!pin || _historyEpoch !== epoch) return;
+    await api('POST', '/tx/discard', { hash: hash, pin: pin }, session);
+    if (_historyEpoch !== epoch) return;
+    invalidateCurrentAddressState();
+    await showTx(hash);
+  } catch (error) {
+    if (_historyEpoch === epoch)
+      $('tx-detail').innerHTML = '<div class="error-box">' + escapeHtml(error.message) + '</div>';
+  } finally {
+    setPrivateOpBusy(false);
   }
 }
 
@@ -1867,7 +2029,11 @@ function renderDashTxs(txs) {
 
 async function loadDashboard() {
   if (_walletSwitching) return;
+  const epoch = _historyEpoch;
+  const draw = ++_dashDraw;
+  const current = () => _historyEpoch === epoch && _dashDraw === draw;
   fetchBalance(false);
+  fetchStaging();
   var rendered = false;
   try {
     var lim = dashTxLimit();
@@ -1875,31 +2041,37 @@ async function loadDashboard() {
     var cachedEmpty = false;
     if (cached) {
       rendered = true;
-      var cachedTxs = cached.response.transactions || [];
+      var cachedTxs = historyRows(cached.response);
       if (cachedTxs.length === 0) {
         cachedEmpty = true;
         $('dash-tx-count').textContent = '0';
-        $('dash-txs').innerHTML = '<div class="staging-empty">no transactions yet</div>';
+        $('dash-txs').innerHTML = '<div class="staging-empty">' + historyEmpty(cached.response) + '</div>';
         $('dash-more').innerHTML = '';
       } else {
         renderDashTxs(cachedTxs);
-        fetchMissingSymbols(cachedTxs).then(function() { renderDashTxs(cachedTxs); });
+        fetchMissingSymbols(cachedTxs).then(() => {
+          if (current()) renderDashTxs(cachedTxs);
+        });
       }
-      if (!cachedEmpty && (Date.now() - cached.ts) <= HISTORY_STALE_REFRESH_MS) return;
+      if (!cachedEmpty && (Date.now() - cached.ts) <= HISTORY_CACHE_REFRESH_MS) return;
     }
     var hist = await fetchHistoryPage(lim, 0, cachedEmpty);
-    var txs = hist.transactions || [];
+    if (!current()) return;
+    var txs = historyRows(hist);
     if (txs.length === 0) {
       $('dash-tx-count').textContent = '0';
-      $('dash-txs').innerHTML = '<div class="staging-empty">no transactions yet</div>';
+      $('dash-txs').innerHTML = '<div class="staging-empty">' + historyEmpty(hist) + '</div>';
       $('dash-more').innerHTML = '';
       return;
     }
     renderDashTxs(txs);
-    fetchMissingSymbols(txs).then(function() { renderDashTxs(txs); });
+    fetchMissingSymbols(txs).then(() => {
+      if (current()) renderDashTxs(txs);
+    });
   } catch (e) {
-    if (!rendered && $('dash-txs') && !$('dash-txs').innerHTML.trim()) {
-      $('dash-txs').innerHTML = '<div class="error-box">history temporarily unavailable</div>';
+    if (!current()) return;
+    if (!rendered && $('dash-txs')) {
+      $('dash-txs').innerHTML = '<div class="error-box">history unavailable</div>';
     }
   }
 }
@@ -1917,13 +2089,15 @@ async function doSend() {
   if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) { showResult('send-result', false, 'invalid amount'); return; }
   if (!validateFee('send-fee', 'standard')) { feeError('send-result', 'send-fee', 'standard'); return; }
   try {
-    var pin = await modalPrompt('confirm send', 'enter PIN to send ' + amount + ' oct to ' + to, { pin: true, btnText: 'send' });
+    const fee = feeChoice('send-fee', 'standard');
+    const session = await walletApproval();
+    const pin = await modalPrompt('confirm send', 'enter PIN to send ' + amount + ' OCT to ' + to
+      + feeTerms(fee, amount, 'standard'), { pin: true, btnText: 'send' });
     if (!pin) { showResult('send-result', false, 'send cancelled'); return; }
     var body = { to: to, amount: amount, pin: pin };
     if (msg) body.message = msg;
-    var fee = $('send-fee') ? $('send-fee').value.trim() : '';
-    if (fee) body.ou = fee;
-    var res = await api('POST', '/send', body);
+    body.ou = fee;
+    const res = await api('POST', '/send', body, session);
     var txHash = res.hash || res.tx_hash || '';
     invalidateCurrentAddressState();
     showResult('send-result', true, 'sent ' + amount + ' oct - tx: ' + txLink(txHash));
@@ -1945,35 +2119,91 @@ async function refreshStealthBalance() {
   await fetchBalance();
 }
 
+const renderEncryptRoom = st => {
+  const count = st && st.encrypt_remaining;
+  const known = Number.isSafeInteger(count) && count >= 0
+    && st.encrypt_refresh_required === (count === 0);
+  const text = 'encrypt before refresh: ' + (known ? String(count) : 'not checked');
+  for (const id of ['st-encrypt-room', 'enc-room']) {
+    if ($(id)) $(id).textContent = text;
+  }
+  if ($('spend-room')) {
+    $('spend-room').textContent = st && st.private_spend_refresh_required === true
+      ? 'decrypt / stealth: refresh required' : '';
+    $('spend-room').hidden = !st || st.private_spend_refresh_required !== true;
+  }
+};
+
+async function fetchStaging() {
+  if (_walletSwitching) return;
+  const epoch = _historyEpoch;
+  if (_stagingRequest && _stagingRequest.epoch === epoch) return _stagingRequest.request;
+  const entry = { epoch, request: null };
+  _stagingRequest = entry;
+  entry.request = (async () => {
+    let value = null;
+    try { value = await api('GET', '/staging'); } catch (e) {}
+    if (_walletSwitching || _historyEpoch !== epoch || _stagingRequest !== entry) return;
+    const count = value && Number.isSafeInteger(value.staging) && value.staging >= 0;
+    const text = count && value.staging_known === true ? String(value.staging)
+      : count && value.staging_partial === true && value.staging > 0 ? '>= ' + value.staging : '-';
+    if ($('st-staging')) $('st-staging').textContent = text;
+  })().finally(() => {
+    if (_stagingRequest === entry) _stagingRequest = null;
+  });
+  return entry.request;
+}
+
 async function refreshPvacUpgradeStatus() {
   if (_walletSwitching) return _pvacUpgradeStatus;
+  const epoch = _historyEpoch;
+  if (_pvacStatusRequest && _pvacStatusRequest.epoch === epoch
+      && _pvacStatusRequest.read === _pvacStatusRead) return _pvacStatusRequest.request;
+  const entry = {epoch, read: _pvacStatusRead + 1, request: null};
+  _pvacStatusRequest = entry;
+  entry.request = readPvacUpgradeStatus(epoch).finally(() => {
+    if (_pvacStatusRequest === entry) _pvacStatusRequest = null;
+  });
+  return entry.request;
+}
+
+let _pvacStatusRequest = null;
+
+async function readPvacUpgradeStatus(epoch) {
+  const read = ++_pvacStatusRead;
   try {
     const st = await api('GET', '/pvac/upgrade_status');
+    if (_walletSwitching || _historyEpoch !== epoch || _pvacStatusRead !== read) return null;
     _pvacUpgradeStatus = st;
+    renderEncryptRoom(st);
     const btn = $('btn-key-switch');
     if (!btn) return st;
     if (_pvacUpgradeInFlight || st.upgrade_inflight) {
-      btn.textContent = 'upgrade in progress...';
+      btn.textContent = '(in progress)';
       btn.disabled = true;
       btn.style.display = '';
       return st;
     }
     if (st.mode === 'upgrade_recent') {
-      btn.textContent = 'upgrade submitted';
+      btn.textContent = '(submitted)';
       btn.disabled = true;
       btn.style.display = '';
       return st;
     }
     btn.disabled = false;
     const resetMode = st.mode === 'legacy_zero_reset';
-    const upgradeMode = st.mode === 'key_bound_migration' || st.mode === 'legacy_public_migration' || st.mode === 'legacy_commitment_migration';
+    const upgradeMode = st.mode === 'cipher_proof' || st.mode === 'key_bound_migration' || st.mode === 'legacy_public_migration' || st.mode === 'legacy_commitment_migration';
     const repairMode = st.repair_required === true;
     const compactMode = st.compact_refresh === true;
     if (st.can_submit) {
-      btn.textContent = resetMode ? 'reset encrypted balance' : (repairMode ? 'repair encrypted balance' : (compactMode ? 'refresh encrypted balance' : (upgradeMode ? 'upgrade encrypted balance' : 'switch encryption key')));
+      btn.textContent = st.retry_nonce ? '(retry)' : resetMode ? '(reset)' : repairMode ? '(repair)' : compactMode ? '(refresh)' : upgradeMode ? '(upgrade)' : '(switch key)';
+      btn.title = compactMode && st.encrypt_refresh_required === false
+        ? 'refresh required for decrypt / stealth; encryption is still available'
+        : st.retry_nonce ? 'retry migration at the same nonce' : '';
       btn.style.display = '';
     } else if (st.mode === 'legacy_blocked' || st.mode === 'key_mismatch' || st.mode === 'blocked' || st.mode === 'fee_blocked') {
-      btn.textContent = st.mode === 'fee_blocked' ? 'public fee required for upgrade' : 'encryption upgrade unavailable';
+      btn.textContent = '(check upgrade)';
+      btn.title = st.mode === 'fee_blocked' ? 'public fee required for upgrade' : 'encryption upgrade unavailable';
       btn.disabled = false;
       btn.style.display = '';
     } else {
@@ -1981,27 +2211,32 @@ async function refreshPvacUpgradeStatus() {
     }
     return st;
   } catch (e) {
+    if (_walletSwitching || _historyEpoch !== epoch || _pvacStatusRead !== read) return null;
+    _pvacUpgradeStatus = null;
+    renderEncryptRoom(null);
     const btn = $('btn-key-switch');
-    if (btn && (_encPresent || _encryptedBalanceRaw > 0)) {
-      btn.textContent = 'check encryption upgrade';
-      btn.style.display = '';
-    }
+    if (btn) btn.style.display = 'none';
     return null;
   }
 }
 
 async function doKeySwitch() {
   if (_pvacUpgradeInFlight) return;
+  let session;
+  try { session = await walletApproval(); } catch (error) {
+    showResult('modal-result', false, error.message);
+    return;
+  }
   hideAllModalPanels();
   $('modal-sub').textContent = 'encryption key switching';
-  const st = _pvacUpgradeStatus || await refreshPvacUpgradeStatus();
+  const st = await refreshPvacUpgradeStatus();
   if (!st) {
     $('modal-result').innerHTML = '<div class="result-msg result-error" style="margin:20px 0">cannot read encryption upgrade status</div>';
     $('modal-overlay').style.display = 'flex';
     return;
   }
-  const resetMode = st.mode === 'legacy_zero_reset';
-  const upgradeMode = st.mode === 'key_bound_migration' || st.mode === 'legacy_public_migration' || st.mode === 'legacy_commitment_migration';
+  const resetMode = st.mode === 'legacy_zero_reset' || st.retry_mode === 'legacy_zero_reset';
+  const upgradeMode = st.mode === 'cipher_proof' || st.mode === 'key_bound_migration' || st.mode === 'legacy_public_migration' || st.mode === 'legacy_commitment_migration';
   const repairMode = st.repair_required === true;
   const compactMode = st.compact_refresh === true;
   const title = resetMode ? 'encrypted balance reset' : (repairMode ? 'encrypted balance repair' : (compactMode ? 'encrypted balance refresh' : (upgradeMode ? 'encrypted balance upgrade' : 'encryption key switch')));
@@ -2029,12 +2264,20 @@ async function doKeySwitch() {
     return;
   }
   h += detailRow('status', networkText(st.reason || st.mode || ''), false);
+  if (st.retry_nonce) {
+    h += detailRow('retry nonce', String(st.retry_nonce), true);
+    h += detailRow('previous transaction', String(st.tx_hash || ''), true);
+    h += '<div class="modal-detail-note">Only one attempt at this nonce can execute. The previous attempt may still confirm. A staged attempt may require a higher approved fee.</div>';
+  }
   const balanceText = st.encrypted_balance_known
     ? fmtOct(st.encrypted_balance_raw || '0')
-    : (st.cipher_present ? 'legacy ciphertext | upgrade required' : '0 oct');
+    : (st.mode === 'unavailable' || st.retry_mode === 'unavailable' ? 'private balance temporarily unavailable'
+      : st.cipher_present ? 'encrypted balance unreadable' : '0 oct');
   h += detailRow('encrypted balance', balanceText, true);
   if (st.required_public_fee_raw) {
     h += detailRow('required public fee', fmtOct(st.required_public_fee_raw), true);
+    if (st.retry_nonce) h += '<label for="ks-fee">retry fee (OU)</label><input id="ks-fee" inputmode="numeric" value="'
+      + escapeHtml(String(st.required_public_fee_raw)) + '">';
   }
   if (st.public_balance_raw) {
     h += detailRow('public balance', fmtOct(st.public_balance_raw), true);
@@ -2046,6 +2289,8 @@ async function doKeySwitch() {
       h += '<div class="modal-detail-note">Rebuilds the same balance after a local proof failure.</div>';
     } else if (compactMode) {
       h += '<div class="modal-detail-note">Rebuilds the same balance as a compact ciphertext.</div>';
+    } else if (st.mode === 'cipher_proof') {
+      h += '<div class="modal-detail-note">Proves the current encrypted balance and preserves it under the new key without publishing its amount. Keep this wallet open.</div>';
     } else if (st.mode === 'legacy_commitment_migration') {
       h += '<div class="modal-detail-note">Rebuilds the balance from verified history commitments. Keep this wallet open.</div>';
     } else if (st.mode === 'legacy_public_migration') {
@@ -2071,6 +2316,11 @@ async function doKeySwitch() {
   };
   if (!st.can_submit) return;
   $('ks-confirm').onclick = async function() {
+    const upgradeFee = String(st.retry_nonce ? $('ks-fee').value : st.required_public_fee_raw || '');
+    if (!/^[1-9][0-9]*$/.test(upgradeFee) || BigInt(upgradeFee) < 5000n || BigInt(upgradeFee) > 10000000n) {
+      showResult('modal-result', false, 'upgrade fee unavailable or outside supported range');
+      return;
+    }
     const resetPhrase = 'RESET ENCRYPTED BALANCE';
     const resetConfirm = resetMode
       ? await modalPrompt(
@@ -2088,10 +2338,11 @@ async function doKeySwitch() {
     const promptTitle = resetMode ? 'confirm encrypted balance reset' : (repairMode ? 'confirm encryption repair' : (compactMode ? 'confirm encrypted balance refresh' : 'confirm encryption upgrade'));
     const promptText = resetMode ? 'enter PIN to authorize the zero reset' : (repairMode ? 'enter PIN to repair the encrypted balance' : (compactMode ? 'enter PIN to refresh the encrypted balance' : 'enter PIN to authorize the upgrade'));
     const promptButton = resetMode ? 'reset to zero' : (repairMode ? 'repair' : (compactMode ? 'refresh' : (upgradeMode ? 'upgrade' : 'switch')));
-    const pin = await modalPrompt(promptTitle, promptText, { pin: true, btnText: promptButton });
+    const pin = await modalPrompt(promptTitle, promptText + feeTerms(upgradeFee), { pin: true, btnText: promptButton });
     if (!pin) return;
     _pvacUpgradeInFlight = true;
     let currentUpgradeStage = 'checking_fee';
+    let upgradeClosed = false;
     let pollUpgradeStatus = null;
     const btn = $('btn-key-switch');
     if (btn) {
@@ -2121,7 +2372,9 @@ async function doKeySwitch() {
     const renderUpgradeLog = function(stage, detail, txHash, failed, finished) {
       const safeStage = stage || currentUpgradeStage || 'checking_fee';
       if (safeStage !== 'error') currentUpgradeStage = safeStage;
-      const terminal = finished || safeStage === 'confirmed';
+      const terminal = safeStage === 'confirmed';
+      const closed = finished || terminal;
+      if (closed || failed) upgradeClosed = true;
       const displayStage = failed ? currentUpgradeStage : safeStage;
       const activeIndexRaw = upgradeStageIndex(displayStage);
       const activeIndex = activeIndexRaw >= 0 ? activeIndexRaw : 1;
@@ -2151,14 +2404,14 @@ async function doKeySwitch() {
       if (detailText && !detailRedundant) {
         out += '<div class="note-box' + (failed ? ' note-error' : '') + '"><b>detail:</b> ' + escapeHtml(detailText) + '</div>';
       }
-      if (!failed && !terminal) {
+      if (!failed && !closed) {
         out += '<div class="upgrade-wait">building proof (keep wallet open)</div>';
       }
       out += '</div>';
-      if (terminal && txHash) {
+      if (closed && txHash) {
         out += '<div style="margin:12px 0;font-size:13px">tx: ' + txLinkExt(txHash) + '</div>';
       }
-      if (failed || terminal) {
+      if (failed || closed) {
         out += '<div class="action-row"><button class="action-btn" id="ks-close">close</button></div>';
       }
       $('modal-result').innerHTML = out;
@@ -2169,10 +2422,14 @@ async function doKeySwitch() {
         fetchBalance();
       };
     };
+    let pollingUpgrade = false;
     const pollUpgrade = async function() {
+      if (pollingUpgrade || upgradeClosed) return;
+      pollingUpgrade = true;
       try {
         if (currentUpgradeStage === 'confirmed') return;
         const progress = await api('GET', '/pvac/upgrade_status');
+        if (upgradeClosed) return;
         const stage = progress.stage || (progress.upgrade_inflight ? 'building_proof' : currentUpgradeStage);
         if (currentUpgradeStage === 'confirmed' && stage !== 'error') return;
         const detail = progress.detail || progress.reason || '';
@@ -2180,7 +2437,7 @@ async function doKeySwitch() {
         if (progress.upgrade_inflight || stage === 'submitted') {
           renderUpgradeLog(stage, detail, txHash, false, false);
         }
-      } catch (e) {}
+      } catch (e) {} finally { pollingUpgrade = false; }
     };
     const waitUpgradeTx = async function(txHash) {
       if (!txHash) return { ok: false, terminal: true, detail: 'missing transaction hash' };
@@ -2188,7 +2445,11 @@ async function doKeySwitch() {
         try {
           const tx = await api('GET', '/tx?hash=' + encodeURIComponent(txHash));
           const st = tx.status || '';
-          if (st === 'confirmed' || st === 'accepted') return { ok: true, terminal: true, detail: 'confirmed' };
+          if (st === 'confirmed') return { ok: true, terminal: true, detail: 'confirmed' };
+          if (st === 'dropped') return {ok: false, terminal: false,
+            detail: 'transaction dropped locally; check upgrade status for a same-nonce retry'};
+          if (st === 'replaced') return {ok: false, terminal: false,
+            detail: 'account nonce used; check upgrade status for the actual key and balance'};
           if (st === 'rejected') {
             const reason = tx.reject_reason || tx.reject_type || tx.error || 'rejected';
             return { ok: false, terminal: true, detail: String(reason) };
@@ -2201,13 +2462,15 @@ async function doKeySwitch() {
     renderUpgradeLog('checking_fee', 'checking key_switch fee and public balance', '', false, false);
     pollUpgradeStatus = setInterval(pollUpgrade, 1500);
     try {
-      const upgradeBody = { pin: pin };
+      const upgradeBody = { pin: pin, ou: upgradeFee };
+      if (st.retry_nonce) upgradeBody.retry_hash = st.tx_hash;
       if (resetMode) upgradeBody.reset_confirm = resetConfirm;
-      const res = await api('POST', '/pvac/upgrade', upgradeBody);
+      const res = await api('POST', '/pvac/upgrade', upgradeBody, session);
       const txHash = res.hash || res.tx_hash || '';
       invalidateCurrentAddressState();
       _pvacUpgradeStatus = null;
-      renderUpgradeLog('submitted', 'transaction submitted (waiting for final status)', txHash, false, false);
+      renderUpgradeLog('submitted', res.reused ? 'existing migration restored; no new transaction submitted'
+        : res.warning || 'transaction submitted (waiting for final status)', txHash, false, false);
       const finalStatus = await waitUpgradeTx(txHash);
       if (!finalStatus.ok) {
         if (finalStatus.terminal) {
@@ -2216,8 +2479,8 @@ async function doKeySwitch() {
               tx_hash: txHash,
               detail: finalStatus.detail,
               pin: pin
-            });
-          } catch(e) {}
+            }, session);
+          } catch(e) { finalStatus.detail += '; status update refused: ' + e.message; }
         }
         renderUpgradeLog(
           'submitted',
@@ -2228,7 +2491,7 @@ async function doKeySwitch() {
         );
       } else {
         renderUpgradeLog('confirmed', 'transaction confirmed (refreshing wallet state)', txHash, false, true);
-        try { await api('POST', '/pvac/upgrade_ack', { tx_hash: txHash }); } catch(e) {}
+        try { await api('POST', '/pvac/upgrade_ack', { tx_hash: txHash }, session); } catch(e) {}
         try { await fetchBalance(); } catch(e) {}
         try { await loadHistory(); } catch(e) {}
       }
@@ -2246,34 +2509,36 @@ async function doKeySwitch() {
 }
 
 async function doEncrypt() {
+  if (_privateOpInFlight) return;
   clearResult('enc-result');
   clearEncryptLog();
   var amount = $('enc-amount').value.trim();
   if (!amount || !/^\d+(\.\d{1,6})?$/.test(amount) || parseFloat(amount) <= 0) { logEncrypt('error: invalid amount', 'log-err'); return; }
-  if (!validateFee('enc-fee', 'encrypt')) { logEncrypt('error: invalid fee - must be integer >= ' + ((_fees.encrypt && _fees.encrypt.minimum) || '?'), 'log-err'); return; }
-  var btn = document.querySelector('button[data-action="doEncrypt"]');
+  if (!validateFee('enc-fee', 'encrypt')) { logEncrypt('error: invalid fee - must be integer >= ' + feeMinimum('encrypt'), 'log-err'); return; }
+  const btn = document.querySelector('button[data-action="doEncrypt"]');
+  setPrivateOpBusy(true);
   try {
     logEncrypt('initiating encrypt', 'log-info');
     logEncrypt('amount: ' + amount + ' oct', 'log-info');
     logEncrypt('waiting for PIN', 'log-info');
-    var pin = await modalPrompt('confirm encrypt', 'enter PIN to encrypt ' + amount + ' oct', { pin: true, btnText: 'encrypt' });
+    const encFee = feeChoice('enc-fee', 'encrypt');
+    const session = await walletApproval();
+    const pin = await modalPrompt('confirm encrypt', 'enter PIN to encrypt ' + amount + ' OCT'
+      + feeTerms(encFee, amount, 'encrypt'), { pin: true, btnText: 'encrypt' });
     if (!pin) { logEncrypt('encrypt cancelled', 'log-err'); return; }
     if (btn) {
       btn.disabled = true;
       btn.textContent = 'encrypting...';
     }
-    setPrivateOpBusy(true);
     logEncrypt('pin accepted locally', 'log-ok');
-    await ensurePrivateSpendCompact(pin, logEncrypt);
-    logEncrypt('building ciphertext and bound proof (keep wallet open)', 'log-info');
+    await ensurePrivateSpendCompact(pin, logEncrypt, 'encrypt', session);
+    logEncrypt('building ciphertext and cipher proof (keep wallet open)', 'log-info');
     var encBody = { amount: amount, pin: pin };
-    var encFee = $('enc-fee') ? $('enc-fee').value.trim() : '';
-    if (encFee) encBody.ou = encFee;
-    var res = await api('POST', '/encrypt', encBody);
-    var txHash = res.hash || res.tx_hash || '';
+    encBody.ou = encFee;
+    const res = await api('POST', '/encrypt', encBody, session);
+    const txHash = res.hash || res.tx_hash || '';
     invalidateCurrentAddressState();
-    logEncrypt('encrypt transaction accepted by network', 'log-ok');
-    if (txHash) logEncrypt('tx: ' + txLink(txHash), 'log-ok');
+    if (!await privateTxFinal(txHash, logEncrypt)) return;
     showResult('enc-result', true, 'encrypted ' + amount + ' oct');
     $('enc-amount').value = '';
     loadDashboard();
@@ -2292,19 +2557,21 @@ async function doEncrypt() {
   }
 }
 
-async function waitPrivateTx(txHash, logFn) {
+async function waitPrivateTx(txHash, logFn, migration = false) {
   if (!txHash) return { ok: false, terminal: true, detail: 'missing transaction hash' };
   for (var i = 0; i < heavyTxConfirmationPolls; i++) {
     try {
       var tx = await api('GET', '/tx?hash=' + encodeURIComponent(txHash));
       var st = tx.status || '';
-      if (st === 'confirmed' || st === 'accepted') return { ok: true, terminal: true, detail: 'confirmed' };
-      if (st === 'rejected') {
-        var reason = tx.reject_reason || tx.reject_type || tx.error || 'rejected';
+      if (migration && st === 'dropped') return {ok: false, terminal: false,
+        detail: 'transaction dropped locally; check upgrade status for a same-nonce retry'};
+      if (st === 'confirmed' || (!migration && st === 'accepted')) return { ok: true, terminal: true, detail: 'confirmed' };
+      if (['rejected', 'dropped', 'unaccepted', 'replaced', 'discarded'].includes(st)) {
+        var reason = tx.submit_error || tx.reject_reason || tx.reject_type || tx.error || st;
         return { ok: false, terminal: true, detail: String(reason) };
       }
     } catch (e) {}
-    if (logFn && (i === 0 || i % 5 === 0)) logFn('waiting for compact refresh confirmation', 'log-info');
+    if (logFn && (i === 0 || i % 5 === 0)) logFn('waiting for transaction confirmation', 'log-info');
     await new Promise(function(resolve) { setTimeout(resolve, heavyTxConfirmationIntervalMs); });
   }
   return { ok: false, terminal: false, detail: 'confirmation still pending' };
@@ -2321,68 +2588,94 @@ const statusNeedsPrivateSpendRefresh = st => {
     && baseLayers >= maxLayers;
 };
 
-async function ensurePrivateSpendCompact(pin, logFn) {
-  const st = await api('GET', '/pvac/upgrade_status');
+async function ensurePrivateSpendCompact(pin, logFn, op = 'spend', session) {
+  if (!session) session = await walletApproval();
+  const st = await api('GET', '/pvac/upgrade_status', undefined, session);
+  if (op === 'encrypt' && st && st.encrypt_refresh_required === false) return false;
   if (!statusNeedsPrivateSpendRefresh(st)) return false;
   if (!st.can_submit) {
-    throw new Error(escapeHtml(st.reason || 'encrypted balance refresh is currently unavailable'));
+    throw new Error(st.reason || 'encrypted balance refresh is currently unavailable');
   }
   const baseLayers = Number(st.base_layers || 0);
   const layerText = Number.isSafeInteger(baseLayers) && baseLayers > 0
     ? ' (' + baseLayers + ' base layers)'
     : '';
-  logFn('encrypted balance needs compact refresh before private spend' + layerText, 'log-info');
+  logFn('encrypted balance needs compact refresh before ' + op + layerText, 'log-info');
   logFn('submitting compact refresh key_switch', 'log-info');
-  const refresh = await api('POST', '/key_switch', { pin: pin, refresh: true, force_refresh: true });
+  const fee = String(st.required_public_fee_raw || '');
+  if (!/^[1-9][0-9]*$/.test(fee) || BigInt(fee) < 5000n || BigInt(fee) > 10000000n)
+    throw new Error('private refresh fee unavailable');
+  const approval = await modalPrompt('confirm private refresh',
+    'This additional transaction is required before continuing.' + feeTerms(fee),
+    {pin: true, btnText: 'refresh'});
+  if (!approval) throw new Error('private refresh cancelled');
+  const refresh = await api('POST', '/key_switch', {pin: approval, ou: fee, refresh: true, force_refresh: true,
+    ...(st.retry_nonce ? {retry_hash: st.tx_hash} : {})}, session);
   const txHash = refresh.hash || refresh.tx_hash || '';
   if (txHash) logFn('compact refresh tx: ' + txLink(txHash), 'log-info');
-  const finalStatus = await waitPrivateTx(txHash, logFn);
+  const finalStatus = await waitPrivateTx(txHash, logFn, true);
   if (!finalStatus.ok && finalStatus.terminal) {
     try {
-      await api('POST', '/pvac/upgrade_reject', { tx_hash: txHash, detail: finalStatus.detail, pin: pin });
-    } catch(e) {}
-    throw new Error('compact refresh failed: ' + escapeHtml(finalStatus.detail));
+      await api('POST', '/pvac/upgrade_reject', { tx_hash: txHash, detail: finalStatus.detail, pin: pin }, session);
+    } catch(e) { logFn('status update refused: ' + networkText(e.message), 'log-err'); }
+    throw new Error('compact refresh failed: ' + finalStatus.detail);
   }
-  if (!finalStatus.ok) throw new Error('compact refresh still pending; check transaction history before retrying');
-  try { await api('POST', '/pvac/upgrade_ack', { tx_hash: txHash }); } catch(e) {}
-  logFn('compact refresh confirmed (continuing private spend)', 'log-ok');
+  if (!finalStatus.ok) throw new Error('compact refresh unresolved; check encryption upgrade status for a same-nonce retry');
+  try { await api('POST', '/pvac/upgrade_ack', { tx_hash: txHash }, session); } catch(e) {}
+  logFn('compact refresh confirmed (continuing ' + op + ')', 'log-ok');
   invalidateCurrentAddressState();
   try { await fetchBalance(true); } catch(e) {}
   try { await refreshPvacUpgradeStatus(); } catch(e) {}
   return true;
 }
 
+async function privateTxFinal(txHash, logFn) {
+  if (!txHash) throw new Error('missing transaction hash; check history before retrying');
+  fetchStaging();
+  logFn('transaction submitted: ' + txLink(txHash), 'log-info');
+  const status = await waitPrivateTx(txHash, logFn);
+  if (!status.ok && status.terminal) throw new Error(status.detail || 'transaction rejected');
+  if (!status.ok) {
+    logFn('transaction still pending; check history before retrying', 'log-info');
+    return false;
+  }
+  logFn('transaction confirmed', 'log-ok');
+  return true;
+}
+
 async function doDecrypt() {
+  if (_privateOpInFlight) return;
   clearResult('dec-result');
   clearDecryptLog();
   var amount = $('dec-amount').value.trim();
   if (!amount || !/^\d+(\.\d{1,6})?$/.test(amount) || parseFloat(amount) <= 0) { logDecrypt('error: invalid amount', 'log-err'); return; }
   var needRaw = Math.round(parseFloat(amount) * 1000000);
-  if (_encPresent && !_encKnown) { logDecrypt('error: encrypted balance upgrade required before decrypt', 'log-err'); return; }
+  if (!_encKnown) { logDecrypt('error: private balance unavailable or unreadable; check balance and upgrade status', 'log-err'); return; }
   if (_encryptedBalanceRaw <= 0) { logDecrypt('error: no encrypted balance to decrypt', 'log-err'); return; }
   if (needRaw > _encryptedBalanceRaw) { logDecrypt('error: insufficient encrypted balance: have ' + fmtOct(_encryptedBalanceRaw) + ', need ' + amount + ' oct', 'log-err'); return; }
-  if (!validateFee('dec-fee', 'decrypt')) { logDecrypt('error: invalid fee - must be integer >= ' + ((_fees.decrypt && _fees.decrypt.minimum) || '?'), 'log-err'); return; }
+  if (!validateFee('dec-fee', 'decrypt')) { logDecrypt('error: invalid fee - must be integer >= ' + feeMinimum('decrypt'), 'log-err'); return; }
   logDecrypt('initiating decrypt', 'log-info');
   logDecrypt('amount: ' + amount + ' oct', 'log-info');
   logDecrypt('waiting for PIN', 'log-info');
+  setPrivateOpBusy(true);
   try {
-    var pin = await modalPrompt('confirm decrypt', 'enter PIN to decrypt ' + amount + ' oct', { pin: true, btnText: 'decrypt' });
+    const decFee = feeChoice('dec-fee', 'decrypt');
+    const session = await walletApproval();
+    const pin = await modalPrompt('confirm decrypt', 'enter PIN to decrypt ' + amount + ' OCT'
+      + feeTerms(decFee, '0', 'decrypt'), { pin: true, btnText: 'decrypt' });
     if (!pin) { logDecrypt('decrypt cancelled', 'log-err'); return; }
-    setPrivateOpBusy(true);
     logDecrypt('pin accepted locally', 'log-ok');
-    await ensurePrivateSpendCompact(pin, logDecrypt);
+    await ensurePrivateSpendCompact(pin, logDecrypt, 'decrypt', session);
     var decBody = { amount: amount, pin: pin };
-    var decFee = $('dec-fee') ? $('dec-fee').value.trim() : '';
-    if (decFee) decBody.ou = decFee;
-    logDecrypt('building ciphertext and bound proofs (keep wallet open)', 'log-info');
-    var res = await api('POST', '/decrypt', decBody);
+    decBody.ou = decFee;
+    logDecrypt('building ciphertext and cipher proofs (keep wallet open)', 'log-info');
+    const res = await api('POST', '/decrypt', decBody, session);
     invalidateCurrentAddressState();
     if (res.steps) {
       for (var i = 0; i < res.steps.length; i++) logDecrypt(escapeHtml(networkText(res.steps[i])), 'log-info');
     }
-    logDecrypt('', '');
+    if (!await privateTxFinal(res.hash || res.tx_hash || '', logDecrypt)) return;
     logDecrypt('decrypt complete', 'log-ok');
-    if (res.hash || res.tx_hash) logDecrypt('tx: ' + txLink(res.hash || res.tx_hash), 'log-ok');
     $('dec-amount').value = '';
     loadDashboard();
     refreshEncryptBalances();
@@ -2393,41 +2686,70 @@ async function doDecrypt() {
   }
 }
 
+const privateRequest = (op, fields) => {
+  const key = JSON.stringify([_historyEpoch, _walletAddr, op, fields]);
+  if (!privateRequests.has(key)) {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    privateRequests.set(key, Array.from(bytes, value => value.toString(16).padStart(2, '0')).join(''));
+  }
+  return {key, id: privateRequests.get(key)};
+};
+
 async function doStealthSend() {
+  if (_privateOpInFlight) return;
   clearStealthLog();
   var to = $('stealth-to').value.trim();
   var amount = $('stealth-amount').value.trim();
   if (!validAddr(to)) { logStealth('error: invalid recipient address', 'log-err'); return; }
   if (!amount || !/^\d+(\.\d{1,6})?$/.test(amount) || parseFloat(amount) <= 0) { logStealth('error: invalid amount', 'log-err'); return; }
   var needRaw = Math.round(parseFloat(amount) * 1000000);
-  if (_encPresent && !_encKnown) { logStealth('error: encrypted balance upgrade required before send', 'log-err'); return; }
+  if (!_encKnown) { logStealth('error: private balance unavailable or unreadable; check balance and upgrade status', 'log-err'); return; }
   if (_encryptedBalanceRaw <= 0) { logStealth('error: no encrypted balance - encrypt funds first', 'log-err'); return; }
   if (needRaw > _encryptedBalanceRaw) { logStealth('error: insufficient encrypted balance: have ' + fmtOct(_encryptedBalanceRaw) + ', need ' + amount + ' oct', 'log-err'); return; }
-  if (!validateFee('stealth-fee', 'stealth')) { logStealth('error: invalid fee - must be integer >= ' + ((_fees.stealth && _fees.stealth.minimum) || '?'), 'log-err'); return; }
+  if (!validateFee('stealth-fee', 'stealth')) { logStealth('error: invalid fee - must be integer >= ' + feeMinimum('stealth'), 'log-err'); return; }
   logStealth('initiating stealth send', 'log-info');
   logStealth('to: ' + to, 'log-info');
   logStealth('amount: ' + amount + ' oct', 'log-info');
   logStealth('waiting for PIN', 'log-info');
+  setPrivateOpBusy(true);
   try {
-    var pin = await modalPrompt('confirm stealth send', 'enter PIN to send ' + amount + ' oct to ' + to, { pin: true, btnText: 'send' });
+    const stFee = feeChoice('stealth-fee', 'stealth');
+    const session = await walletApproval();
+    const pin = await modalPrompt('confirm stealth send', 'enter PIN to send ' + amount + ' OCT to ' + to
+      + feeTerms(stFee, '0', 'stealth'), { pin: true, btnText: 'send' });
     if (!pin) { logStealth('stealth send cancelled', 'log-err'); return; }
-    setPrivateOpBusy(true);
     logStealth('pin accepted locally', 'log-ok');
-    await ensurePrivateSpendCompact(pin, logStealth);
+    await ensurePrivateSpendCompact(pin, logStealth, 'send', session);
     var stBody = { to: to, amount: amount, pin: pin };
-    var stFee = $('stealth-fee') ? $('stealth-fee').value.trim() : '';
-    if (stFee) stBody.ou = stFee;
-    logStealth('building stealth ciphertext and bound proofs (keep wallet open)', 'log-info');
-    var res = await api('POST', '/stealth/send', stBody);
+    stBody.ou = stFee;
+    const request = privateRequest('stealth', [to, amount, stFee]);
+    stBody.request_id = request.id;
+    logStealth('building stealth ciphertext and cipher proofs (keep wallet open)', 'log-info');
+    const res = await api('POST', '/stealth/send', stBody, session);
     invalidateCurrentAddressState();
     if (res.steps) {
-      for (var i = 0; i < res.steps.length; i++) logStealth(escapeHtml(networkText(res.steps[i])), 'log-info');
+      const labels = {
+        '[1/8] ECDH x25519 key exchange': '[1/8] key exchange',
+        '[7/8] Pedersen commitment + AES-GCM envelope': '[7/8] Pedersen commitment + envelope'
+      };
+      for (const step of res.steps) {
+        const text = networkText(step);
+        logStealth(escapeHtml(Object.hasOwn(labels, text) ? labels[text] : text), 'log-info');
+      }
     }
-    logStealth('', '');
+    const txHash = res.tx_hash || res.hash || '';
+    if (/^[0-9a-f]{64}$/.test(txHash)) {
+      privateRequests.delete(request.key);
+      $('stealth-to').value = '';
+      $('stealth-amount').value = '';
+    }
+    if (['rejected', 'unaccepted', 'replaced', 'discarded'].includes(res.status)) {
+      logStealth('submission stopped: ' + (res.submit_error || res.status), 'log-err');
+      return;
+    }
+    if (res.warning) logStealth(escapeHtml(res.warning), 'log-info');
+    if (!await privateTxFinal(txHash, logStealth)) return;
     logStealth('stealth send complete', 'log-ok');
-    if (res.tx_hash || res.hash) logStealth('tx: ' + txLink(res.tx_hash || res.hash), 'log-ok');
-    $('stealth-to').value = '';
-    $('stealth-amount').value = '';
     loadDashboard();
     refreshStealthBalance();
   } catch (e) {
@@ -2504,27 +2826,42 @@ function claimSelected() {
 }
 
 async function doStealthClaim(ids) {
+  if (_privateOpInFlight) return;
   clearStealthLog();
   logStealth('claiming ' + ids.length + ' output(s)', 'log-info');
   logStealth('waiting for PIN', 'log-info');
+  setPrivateOpBusy(true);
   try {
-    var pin = await modalPrompt('confirm stealth claim', 'enter PIN to claim ' + ids.length + ' stealth output(s)', { pin: true, btnText: 'claim' });
+    ids = [...ids];
+    const claimFee = feeChoice('', 'claim');
+    const totalFee = (BigInt(claimFee) * BigInt(ids.length)).toString();
+    const session = await walletApproval();
+    const pin = await modalPrompt('confirm stealth claim', 'enter PIN to claim ' + ids.length
+      + ' stealth output(s)\nfee per output: ' + AmountUnits.format(claimFee, 6) + ' OCT'
+      + '\nmaximum total fee: ' + AmountUnits.format(totalFee, 6) + ' OCT'
+      + feeTerms(claimFee, '0', 'claim', ids.length), { pin: true, btnText: 'claim' });
     if (!pin) { logStealth('stealth claim cancelled', 'log-err'); return; }
-    setPrivateOpBusy(true);
     logStealth('pin accepted locally', 'log-ok');
     logStealth('building stealth claim transaction (keep wallet open)', 'log-info');
-    var res = await api('POST', '/stealth/claim', { ids: ids, pin: pin });
+    const request = privateRequest('claim', [...ids].map(String).sort());
+    const res = await api('POST', '/stealth/claim', { ids: ids, pin: pin, ou: claimFee, request_id: request.id }, session);
     invalidateCurrentAddressState();
-    logStealth('claim transaction submitted (waiting for confirmation)', 'log-info');
+    logStealth('claim submission results', 'log-info');
     if (res.results) {
+      if (res.results.every(result => result.ok && /^[0-9a-f]{64}$/.test(result.tx_hash || '')))
+        privateRequests.delete(request.key);
       for (var i = 0; i < res.results.length; i++) {
         var r = res.results[i];
-        if (r.ok) {
+        if (r.ok && !['rejected', 'unaccepted', 'replaced', 'discarded'].includes(r.status)) {
           _pendingClaimIds[String(r.id)] = true;
           if (r.tx_hash) _pendingClaimTxs[String(r.id)] = r.tx_hash;
-          logStealth(escapeHtml(r.id) + ': submitted ' + escapeHtml(r.tx_hash || ''), 'log-info');
+          const status = r.status === 'pending' ? 'submitted'
+            : r.status === 'confirmed' ? 'confirmed' : 'submission not confirmed';
+          logStealth(escapeHtml(r.id) + ': ' + status + ' ' + escapeHtml(r.tx_hash || ''), 'log-info');
+          if (r.submit_error) logStealth(r.submit_error, 'log-err');
+          if (r.warning) logStealth(escapeHtml(r.warning), 'log-info');
         } else {
-          logStealth(escapeHtml(r.id) + ': failed - ' + escapeHtml(r.error || ''), 'log-err');
+          logStealth(r.id + ': not submitted - ' + (r.submit_error || r.error || r.status || ''), 'log-err');
         }
       }
     }
@@ -2554,12 +2891,12 @@ function pollPendingClaims() {
         try {
           const tx = await api('GET', '/tx?hash=' + encodeURIComponent(hash));
           const st = tx.status || 'pending';
-          if (st === 'rejected') {
-            const reason = tx.reject_reason || tx.reject_type || 'rejected';
-            logStealth(id + ': rejected - ' + escapeHtml(reason), 'log-err');
+          if (['rejected', 'dropped', 'unaccepted', 'replaced', 'discarded'].includes(st)) {
+            const reason = tx.submit_error || tx.reject_reason || tx.reject_type || st;
+            logStealth(id + ': ' + st + ' - ' + reason, 'log-err');
             delete _pendingClaimIds[id];
             delete _pendingClaimTxs[id];
-          } else if (st === 'confirmed' || st === 'accepted') {
+          } else if (st === 'confirmed') {
             logStealth(id + ': confirmed', 'log-ok');
             delete _pendingClaimIds[id];
             delete _pendingClaimTxs[id];
@@ -2739,8 +3076,8 @@ async function doCompile() {
     _compiledProgramEnvelope = res.program_envelope || null;
     _compiledProgramMinimum = res.program_min_ou || null;
     applyProgramDeployFee(_compiledDeployPayload, _compiledProgramMinimum);
-    var ver = res.version ? ('AppliedML ' + res.version + ' - ') : '';
-    var msg = ver + 'compiled: ' + res.instructions + ' instructions, ' + res.size + ' bytes';
+    const ver = res.version ? ('AppliedML ' + escapeHtml(res.version) + ' - ') : '';
+    let msg = ver + 'compiled: ' + escapeHtml(String(res.instructions)) + ' instructions, ' + escapeHtml(String(res.size)) + ' bytes';
     showResult('ct-compile-result', true, msg);
     if (res.abi) {
       _compiledAbi = res.abi;
@@ -3012,20 +3349,31 @@ function verifySourceRetry(addr, source, depFiles, attempts) {
   }, 12000);
 }
 
+const deployArgs = (text, certificate) => {
+  const raw = text || '[]';
+  const values = AmountUnits.paramShape(raw);
+  const root = certificate && certificate.facts && certificate.facts.root;
+  if (Array.isArray(root) && values.length !== root.length) {
+    throw new Error('constructor requires ' + root.length + ' params, received ' + values.length);
+  }
+  return raw;
+};
+
 async function doDeploy() {
   clearResult('ct-deploy-result');
   var bytecode = $('ct-bytecode').value.trim();
   if (!bytecode) { showResult('ct-deploy-result', false, 'bytecode required (compile first)'); return; }
-  var params = $('ct-deploy-params').value.trim();
-  if (params && params !== '[]') {
-    try { JSON.parse(params); } catch (e) {
-      showResult('ct-deploy-result', false, 'invalid json params');
-      return;
-    }
+  let params;
+  try {
+    params = deployArgs($('ct-deploy-params').value.trim(),
+      bytecode === _compiledProgramEnvelope ? _compiledCertificate : null);
+  } catch (e) {
+    showResult('ct-deploy-result', false, e.message);
+    return;
   }
   if (!validateFee('ct-deploy-fee', 'deploy')) { feeError('ct-deploy-result', 'ct-deploy-fee', 'deploy'); return; }
-  const sourceBound = Boolean(_compiledDeployPayload);
-  if (sourceBound) {
+  const sourceChecked = Boolean(_compiledDeployPayload);
+  if (sourceChecked) {
     if (!_compiledProgramEnvelope || bytecode !== _compiledProgramEnvelope) {
       showResult('ct-deploy-result', false,
         'compiled Program changed - compile again before deployment');
@@ -3040,24 +3388,33 @@ async function doDeploy() {
       return;
     }
   }
+  let deployFee;
+  let session;
+  try {
+    deployFee = feeChoice('ct-deploy-fee', 'deploy');
+    session = await walletApproval();
+  } catch (error) {
+    showResult('ct-deploy-result', false, error.message);
+    return;
+  }
+  const deployPayload = _compiledDeployPayload;
   const pin = await modalPrompt(
     'confirm program deployment',
-    'enter PIN to deploy this program',
+    'enter PIN to deploy this program' + feeTerms(deployFee, '0', 'deploy') + '\nparams: ' + params,
     { pin: true, btnText: 'deploy' });
   if (!pin) return;
   try {
     var body = { bytecode: bytecode, pin: pin };
-    if (_compiledDeployPayload) body.deploy_payload = _compiledDeployPayload;
+    if (deployPayload) body.deploy_payload = deployPayload;
     if (params) body.params = params;
-    var deployFee = $('ct-deploy-fee') ? $('ct-deploy-fee').value.trim() : '';
-    if (deployFee) body.ou = deployFee;
-    var res = await api('POST', '/contract/deploy', body);
+    body.ou = deployFee;
+    const res = await api('POST', '/contract/deploy', body, session);
     var addr = res.contract_address || '';
     var hash = res.tx_hash || '';
     invalidateCurrentAddressState();
     showResult('ct-deploy-result', true,
-      'deployed to <span class="mono">' + escapeHtml(addr) + '</span> - tx: ' + txLink(hash) +
-      (sourceBound ? ' (source bound)' : ' (verifying source...)'));
+      'deployment submitted for <span class="mono">' + escapeHtml(addr) + '</span> - tx: ' + txLink(hash) +
+      (sourceChecked ? ' (source verified)' : ' (verifying source...)'));
     $('ct-call-addr').value = addr;
     $('ct-info-addr').value = addr;
     var source = _ideProject ? (_ideFiles['main.aml'] || '') : ($('ct-source').value || '');
@@ -3067,7 +3424,7 @@ async function doDeploy() {
         if (path !== 'main.aml') depFiles.push({ path: path, source: _ideFiles[path] });
       }
     }
-    if (!sourceBound && source.trim()) verifySourceRetry(addr, source, depFiles, 5);
+    if (!sourceChecked && source.trim()) verifySourceRetry(addr, source, depFiles, 5);
     loadDashboard();
   } catch (e) {
     showResult('ct-deploy-result', false, e.message);
@@ -3080,30 +3437,40 @@ async function doContractCall() {
   var method = $('ct-call-method').value.trim();
   if (!addr) { showResult('ct-call-result', false, 'program address required'); return; }
   if (!method) { showResult('ct-call-result', false, 'method name required'); return; }
-  var params_str = $('ct-call-params').value.trim() || '[]';
-  var params;
-  try { params = JSON.parse(params_str); } catch (e) {
-    showResult('ct-call-result', false, 'invalid json params');
+  const params_str = $('ct-call-params').value.trim() || '[]';
+  let params;
+  try { params = AmountUnits.paramText(params_str); } catch (e) {
+    showResult('ct-call-result', false, e.message);
     return;
   }
-  var amount = $('ct-call-amount').value.trim() || '0';
-  var amount_raw = '0';
-  if (amount !== '0' && amount !== '') {
-    var f = parseFloat(amount);
-    if (isNaN(f) || f < 0) { showResult('ct-call-result', false, 'invalid amount'); return; }
-    amount_raw = String(Math.round(f * 1000000));
+  const amount = $('ct-call-amount').value.trim() || '0';
+  let amount_raw;
+  try {
+    amount_raw = parseUnits(amount, 6);
+  } catch (error) {
+    showResult('ct-call-result', false, error.message);
+    return;
   }
   if (!validateFee('ct-call-fee', 'call')) { feeError('ct-call-result', 'ct-call-fee', 'call'); return; }
+  let callFee;
+  let session;
+  try {
+    callFee = feeChoice('ct-call-fee', 'call');
+    session = await walletApproval();
+  } catch (error) {
+    showResult('ct-call-result', false, error.message);
+    return;
+  }
   const pin = await modalPrompt(
     'confirm program call',
-    'enter PIN to call ' + method,
+    'program: ' + addr + '\nmethod: ' + method + '\namount: ' + amount + ' OCT'
+      + feeTerms(callFee, amount, 'call') + '\nparams: ' + params,
     { pin: true, btnText: 'send call' });
   if (!pin) return;
   try {
-    var callBody = { address: addr, method: method, params: params, amount: amount_raw, pin: pin };
-    var callFee = $('ct-call-fee') ? $('ct-call-fee').value.trim() : '';
-    if (callFee) callBody.ou = callFee;
-    var res = await api('POST', '/contract/call', callBody);
+    const callBody = { address: addr, method: method, params_raw: params, amount: amount_raw, pin: pin };
+    callBody.ou = callFee;
+    const res = await api('POST', '/contract/call', callBody, session);
     var hash = res.tx_hash || '';
     invalidateCurrentAddressState();
     showResult('ct-call-result', true, 'program call submitted - tx: ' + txLink(hash));
@@ -3120,27 +3487,38 @@ async function expandEncParams(params_str) {
   var match;
   var replacements = [];
   while ((match = re.exec(params_str)) !== null) {
-    replacements.push({start: match.index, end: match.index + match[0].length, value: parseInt(match[1])});
+    replacements.push({start: match.index, end: match.index + match[0].length, value: fheValue(match[1])});
   }
   if (replacements.length === 0) return params_str;
   for (var i = replacements.length - 1; i >= 0; i--) {
     var r = replacements[i];
-    var res = await api('POST', '/fhe/encrypt', {value: r.value});
+    const res = await api('POST', '/fhe/encrypt', {value: r.value, proof: false});
     params_str = params_str.substring(0, r.start) + '"' + res.ciphertext + '"' + params_str.substring(r.end);
   }
   return params_str;
 }
 
+const fheDecodedValue = res => {
+  const raw = res.value_raw;
+  if (typeof raw === 'string' && /^-?(0|[1-9][0-9]*)$/.test(raw) && raw.length <= 20) {
+    const value = BigInt(raw);
+    if (value >= -(1n << 63n) && value < (1n << 63n)) return raw;
+  }
+  if (raw === undefined && Number.isSafeInteger(res.value)) return String(res.value);
+  throw new Error('invalid or imprecise decrypted value');
+};
+
 async function tryFheDecrypt(val) {
   if (typeof val !== 'string' || val.length < 100) return null;
-  var pin = await modalPrompt(
-    'decrypt program output',
-    'enter PIN to decrypt this ciphertext',
-    { pin: true, btnText: 'decrypt' });
-  if (!pin) return null;
   try {
-    var res = await api('POST', '/fhe/decrypt', {ciphertext: val, pin: pin});
-    return res.value;
+    const session = await walletApproval();
+    const pin = await modalPrompt(
+      'decrypt program output',
+      'enter PIN to decrypt this ciphertext',
+      { pin: true, btnText: 'decrypt' });
+    if (!pin) return null;
+    const res = await api('POST', '/fhe/decrypt', {ciphertext: val, pin: pin}, session);
+    return fheDecodedValue(res);
   } catch (e) {
     return null;
   }
@@ -3188,36 +3566,62 @@ async function doContractView() {
   }
 }
 
+let _fheBusy = false;
+
+const fheBusy = busy => {
+  _fheBusy = busy;
+  document.querySelectorAll('[data-action="doFheEncrypt"], [data-action="doFheDecrypt"]')
+    .forEach(button => { button.disabled = busy; });
+};
+
+const fheValue = text => {
+  if (!/^[0-9]+$/.test(text) || !Number.isSafeInteger(Number(text))) {
+    throw new Error('enter a non-negative integer no greater than 9007199254740991');
+  }
+  return Number(text);
+};
+
 async function doFheEncrypt() {
+  if (_fheBusy) return;
   clearResult('fhe-result');
-  var val = $('fhe-enc-value').value.trim();
-  if (val === '') { showResult('fhe-result', false, 'enter an integer value'); return; }
-  var num = parseInt(val);
-  if (isNaN(num)) { showResult('fhe-result', false, 'invalid integer'); return; }
   try {
-    var res = await api('POST', '/fhe/encrypt', {value: num});
+    const num = fheValue($('fhe-enc-value').value.trim());
+    fheBusy(true);
+    $('fhe-enc-output').value = '';
+    $('fhe-enc-result-row').style.display = 'none';
+    showResult('fhe-result', true, 'encrypting locally...');
+    const res = await api('POST', '/fhe/encrypt', {value: num, proof: false});
+    if (typeof res.ciphertext !== 'string' || !res.ciphertext) throw new Error('missing ciphertext');
     $('fhe-enc-output').value = res.ciphertext;
     $('fhe-enc-result-row').style.display = '';
     showResult('fhe-result', true, 'encrypted ' + num + ' (' + res.ciphertext.length + ' chars)');
   } catch (e) {
     showResult('fhe-result', false, e.message);
+  } finally {
+    fheBusy(false);
   }
 }
 
 async function doFheDecrypt() {
+  if (_fheBusy) return;
   clearResult('fhe-result');
-  var ct = $('fhe-dec-input').value.trim();
+  const ct = $('fhe-dec-input').value.trim();
   if (!ct) { showResult('fhe-result', false, 'paste a ciphertext'); return; }
-  var pin = await modalPrompt(
-    'decrypt ciphertext',
-    'enter PIN to decrypt this ciphertext',
-    { pin: true, btnText: 'decrypt' });
-  if (!pin) return;
+  fheBusy(true);
   try {
-    var res = await api('POST', '/fhe/decrypt', {ciphertext: ct, pin: pin});
-    showResult('fhe-result', true, 'decrypted value: <span class="mono">' + escapeHtml(String(res.value)) + '</span>');
+    const session = await walletApproval();
+    const pin = session.local_decrypt_without_pin === true ? '' : await modalPrompt(
+      'decrypt ciphertext',
+      'enter PIN to decrypt this ciphertext',
+      { pin: true, btnText: 'decrypt' });
+    if (!pin && session.local_decrypt_without_pin !== true) return;
+    showResult('fhe-result', true, 'decrypting locally...');
+    const res = await api('POST', '/fhe/decrypt', {ciphertext: ct, ...(pin ? {pin} : {})}, session);
+    showResult('fhe-result', true, 'decrypted value: <span class="mono">' + escapeHtml(fheDecodedValue(res)) + '</span>');
   } catch (e) {
     showResult('fhe-result', false, e.message);
+  } finally {
+    fheBusy(false);
   }
 }
 
@@ -3281,7 +3685,7 @@ async function doVerifyContract() {
 async function loadTokenSymbols() {
   var cached = restoreAddressTokens(_walletAddr);
   var state = ensureAddressRuntime(_walletAddr);
-  if (cached && state && (Date.now() - state.tokensTs) <= TOKEN_STALE_REFRESH_MS) return;
+  if (cached && state && (Date.now() - state.tokensTs) <= TOKEN_CACHE_REFRESH_MS) return;
   try {
     _tokens = await fetchAddressTokens(false);
     _tokensLoaded = true;
@@ -3301,7 +3705,7 @@ async function fetchMissingSymbols(txs) {
     if (_tokenMetaInflight[ca]) return _tokenMetaInflight[ca];
     _tokenMetaInflight[ca] = Promise.all([
       api('GET', '/contract-storage?address=' + encodeURIComponent(ca) + '&key=symbol').then(function(r) {
-        if (r && r.value) _tokenSymbols[ca] = String(r.value).slice(0, 32);
+        if (r && r.value) _tokenSymbols[ca] = tokenSymbol(r.value);
       }).catch(function() {}),
       api('GET', '/contract-storage?address=' + encodeURIComponent(ca) + '&key=decimals').then(function(r) {
         if (r && r.value) _tokenDecimals[ca] = String(r.value);
@@ -3319,7 +3723,7 @@ async function loadTokens() {
   var state = ensureAddressRuntime(_walletAddr);
   if (restored) {
     renderTokenList();
-    if (state && (Date.now() - state.tokensTs) <= TOKEN_STALE_REFRESH_MS) {
+    if (state && (Date.now() - state.tokensTs) <= TOKEN_CACHE_REFRESH_MS) {
       loadTokenTxs();
       return;
     }
@@ -3389,9 +3793,13 @@ function renderTokenList() {
     var balCls = (bal === '0') ? 'token-zero' : 'token-balance';
     h += '<div class="token-card">';
     h += '<div class="token-header">';
-    h += '<div><span class="token-symbol">' + escapeHtml(t.symbol) + '</span>';
-    h += '<span class="token-name">' + escapeHtml(t.name) + '</span></div>';
-    h += '<div class="' + balCls + '">' + fmtTokenCompact(bal, t.decimals) + ' ' + escapeHtml(t.symbol) + '</div>';
+    const symbol = tokenSymbol(t.symbol);
+    const name = /^[\x20-\x7e]{1,64}$/.test(String(t.name || '')) ? t.name : '';
+    h += '<div><span class="token-symbol">TOKEN ' + escapeHtml(symbol) + '</span>';
+    h += '<span class="token-name">' + escapeHtml(name) + '</span></div>';
+    const amountText = t.balance_is_encrypted === true && t.balance_kind === 'encrypted'
+      ? 'encrypted' : fmtTokenCompact(bal, t.decimals);
+    h += '<div class="' + balCls + '">' + amountText + ' ' + escapeHtml(symbol) + '</div>';
     h += '</div>';
     h += '<div class="token-row">';
     h += '<span class="mono gray">' + escapeHtml(short(t.address)) + '</span>';
@@ -3406,7 +3814,7 @@ function renderTokenList() {
 
 function openTokenTransfer(idx) {
   _selectedToken = _tokens[idx];
-  $('tok-transfer-sym').textContent = _selectedToken.symbol;
+  $('tok-transfer-sym').textContent = 'TOKEN ' + tokenSymbol(_selectedToken.symbol);
   $('tok-to').value = '';
   $('tok-amount').value = '';
   clearResult('tok-transfer-result');
@@ -3420,19 +3828,7 @@ function closeTokenTransfer() {
 }
 
 function parseUnits(humanStr, decimals) {
-  var dec = parseInt(decimals) || 0;
-  var s = String(humanStr).trim();
-  if (!s || s === '0') return '';
-  var neg = false;
-  if (s[0] === '-') { neg = true; s = s.slice(1); }
-  var parts = s.split('.');
-  var intPart = parts[0].replace(/[^0-9]/g, '') || '0';
-  var fracPart = parts.length > 1 ? parts[1].replace(/[^0-9]/g, '') : '';
-  if (fracPart.length > dec) fracPart = fracPart.slice(0, dec);
-  while (fracPart.length < dec) fracPart += '0';
-  var raw = (intPart + fracPart).replace(/^0+/, '') || '0';
-  if (raw === '0') return '';
-  return neg ? '-' + raw : raw;
+  return AmountUnits.parse(humanStr, decimals);
 }
 
 async function doTokenTransfer() {
@@ -3444,20 +3840,26 @@ async function doTokenTransfer() {
   if (!humanAmt || isNaN(parseFloat(humanAmt)) || parseFloat(humanAmt) <= 0) {
     showResult('tok-transfer-result', false, 'invalid amount'); return;
   }
-  var rawAmount = parseUnits(humanAmt, _selectedToken.decimals);
-  if (!rawAmount) { showResult('tok-transfer-result', false, 'invalid amount'); return; }
+  let rawAmount;
+  try { rawAmount = parseUnits(humanAmt, _selectedToken.decimals); }
+  catch (error) { showResult('tok-transfer-result', false, error.message); return; }
+  if (!rawAmount || rawAmount === '0') { showResult('tok-transfer-result', false, 'invalid amount'); return; }
   if (!validateFee('tok-fee', 'call')) { feeError('tok-transfer-result', 'tok-fee', 'call'); return; }
   try {
-    var pin = await modalPrompt('confirm token transfer', 'enter PIN to transfer ' + humanAmt + ' to ' + to, { pin: true, btnText: 'transfer' });
+    const token = {..._selectedToken};
+    const tokFee = feeChoice('tok-fee', 'call');
+    const session = await walletApproval();
+    const pin = await modalPrompt('confirm token transfer', 'token: ' + token.address
+      + '\nlabel (untrusted): ' + tokenSymbol(token.symbol)
+      + '\namount: ' + humanAmt + '\nraw units: ' + rawAmount + '\ndecimals (RPC): ' + token.decimals
+      + '\nrecipient: ' + to + feeTerms(tokFee, '0', 'call'), { pin: true, btnText: 'transfer' });
     if (!pin) { showResult('tok-transfer-result', false, 'transfer cancelled'); return; }
-    var tokBody = { token: _selectedToken.address, to: to, amount: rawAmount, pin: pin };
-    var tokFee = $('tok-fee') ? $('tok-fee').value.trim() : '';
-    if (tokFee) tokBody.ou = tokFee;
-    var res = await api('POST', '/token/transfer', tokBody);
+    const tokBody = {token: token.address, to, amount: rawAmount, pin, ou: tokFee};
+    const res = await api('POST', '/token/transfer', tokBody, session);
     var txHash = res.hash || res.tx_hash || '';
     invalidateCurrentAddressState();
     showResult('tok-transfer-result', true,
-      'sent ' + escapeHtml(humanAmt) + ' ' + escapeHtml(_selectedToken.symbol) + ' - tx: ' + txLink(txHash));
+      'sent ' + escapeHtml(humanAmt) + ' TOKEN ' + escapeHtml(tokenSymbol(token.symbol)) + ' - tx: ' + txLink(txHash));
     $('tok-to').value = '';
     $('tok-amount').value = '';
     setTimeout(function() { loadTokens(); }, 2000);
@@ -3466,8 +3868,10 @@ async function doTokenTransfer() {
   }
 }
 
-function renderHistoryTxs(txs) {
-  $('hist-count').textContent = String(_historyOffset + txs.length);
+function renderHistoryTxs(txs, append = false) {
+  _historyShown = historyRows({transactions: append ? _historyShown.concat(txs) : txs});
+  txs = _historyShown;
+  $('hist-count').textContent = String(txs.length);
   var h = '<table class="desktop-table"><tr><th>hash</th><th>from</th><th>to</th><th class="col-amount">amount</th><th class="col-status">status</th><th class="col-time">time</th></tr>';
   var cards = '<div class="card-list">';
   for (var i = 0; i < txs.length; i++) {
@@ -3480,41 +3884,48 @@ function renderHistoryTxs(txs) {
 }
 
 async function loadHistory() {
-  var cached = peekHistoryPage(_walletAddr, _historyLimit, _historyOffset);
+  const epoch = _historyEpoch;
+  const draw = ++_historyDraw;
+  const current = () => _historyEpoch === epoch && _historyDraw === draw;
+  var cached = _historySource ? null : peekHistoryPage(_walletAddr, _historyLimit, _historyOffset);
   if (!cached) $('history-list').innerHTML = '<div class="loading">loading...</div>';
   $('history-more').innerHTML = '';
   var rendered = false;
   try {
     if (cached) {
       rendered = true;
-      var cachedTxs = cached.response.transactions || [];
-      $('hist-total').textContent = String(cached.response.total || cachedTxs.length);
+      var cachedTxs = historyRows(cached.response);
+      $('hist-total').textContent = String(cached.response.total || 0);
       if (cachedTxs.length === 0 && _historyOffset === 0) {
+        _historyShown = [];
         $('hist-count').textContent = '0';
-        $('history-list').innerHTML = '<div class="staging-empty">no transactions yet</div>';
+        $('history-list').innerHTML = '<div class="staging-empty">' + historyEmpty(cached.response) + '</div>';
       } else {
         renderHistoryTxs(cachedTxs);
-        if (cached.response.has_more) {
-          $('history-more').innerHTML = '<button class="load-more" data-action="loadMoreHistory">load more</button>';
-        }
-        fetchMissingSymbols(cachedTxs).then(function() { renderHistoryTxs(cachedTxs); });
+        $('history-more').innerHTML = historyNav(cached.response);
+        fetchMissingSymbols(cachedTxs).then(() => {
+          if (current()) renderHistoryTxs(_historyShown);
+        });
       }
-      if ((Date.now() - cached.ts) <= HISTORY_STALE_REFRESH_MS) return;
+      if ((Date.now() - cached.ts) <= HISTORY_CACHE_REFRESH_MS) return;
     }
-    var res = await fetchHistoryPage(_historyLimit, _historyOffset, false);
-    var txs = res.transactions || [];
-    $('hist-total').textContent = String(res.total || txs.length);
+    var res = await fetchHistoryPage(_historyLimit, _historyOffset, false, _historySource);
+    if (!current()) return;
+    var txs = historyRows(res);
+    $('hist-total').textContent = String(res.total || 0);
+    $('history-more').innerHTML = historyNav(res);
     if (txs.length === 0 && _historyOffset === 0) {
+      _historyShown = [];
       $('hist-count').textContent = '0';
-      $('history-list').innerHTML = '<div class="staging-empty">no transactions yet</div>';
+      $('history-list').innerHTML = '<div class="staging-empty">' + historyEmpty(res) + '</div>';
       return;
     }
     renderHistoryTxs(txs);
-    if (res.has_more) {
-      $('history-more').innerHTML = '<button class="load-more" data-action="loadMoreHistory">load more</button>';
-    }
-    fetchMissingSymbols(txs).then(function() { renderHistoryTxs(txs); });
+    fetchMissingSymbols(txs).then(() => {
+      if (current()) renderHistoryTxs(_historyShown);
+    });
   } catch (e) {
+    if (!current()) return;
     if (!rendered) {
       $('hist-count').textContent = '0';
       $('history-list').innerHTML = '<div class="error-box">' + escapeHtml(e.message) + '</div>';
@@ -3523,56 +3934,34 @@ async function loadHistory() {
 }
 
 function loadMoreHistory() {
-  _historyOffset += _historyLimit;
   loadHistoryAppend();
 }
 
 async function loadHistoryAppend() {
+  const epoch = _historyEpoch;
+  const draw = ++_historyDraw;
+  const current = () => _historyEpoch === epoch && _historyDraw === draw;
   var btn = $('history-more').querySelector('button');
   if (btn) { btn.disabled = true; btn.textContent = 'loading...'; }
+  const nextOffset = _historyOffset + _historyLimit;
   try {
-    var res = await fetchHistoryPage(_historyLimit, _historyOffset, false);
-    var txs = res.transactions || [];
+    var res = await fetchHistoryPage(_historyLimit, nextOffset, false, _historySource);
+    if (!current()) return;
+    _historyOffset = nextOffset;
+    var txs = historyRows(res);
     $('hist-total').textContent = String(res.total || txs.length);
     if (txs.length === 0) {
       $('history-more').innerHTML = '<div class="staging-empty">no more transactions</div>';
       return;
     }
-    var tbl = $('history-list').querySelector('.desktop-table');
-    var cardList = $('history-list').querySelector('.card-list');
-    for (var i = 0; i < txs.length; i++) {
-      if (tbl) {
-        var row = tbl.insertRow(-1);
-        row.innerHTML = txRow(txs[i]).replace(/<\/?tr>/g, '');
-      }
-      if (cardList) cardList.insertAdjacentHTML('beforeend', txCardHtml(txs[i]));
-    }
-    fetchMissingSymbols(txs).then(function() {
-      if (tbl) {
-        for (var j = 0; j < txs.length; j++) {
-          var rowIndex = tbl.rows.length - txs.length + j;
-          if (rowIndex > 0 && tbl.rows[rowIndex]) tbl.rows[rowIndex].innerHTML = txRow(txs[j]).replace(/<\/?tr>/g, '');
-        }
-      }
-      if (cardList) {
-        var all = $('history-list').querySelector('.card-list');
-        if (all) {
-          var cards = all.querySelectorAll('.tx-card');
-          for (var k = 0; k < txs.length; k++) {
-            var cardIndex = cards.length - txs.length + k;
-            if (cardIndex >= 0 && cards[cardIndex]) cards[cardIndex].outerHTML = txCardHtml(txs[k]);
-          }
-        }
-      }
+    renderHistoryTxs(txs, true);
+    fetchMissingSymbols(txs).then(() => {
+      if (current()) renderHistoryTxs(_historyShown);
     });
-    $('hist-count').textContent = String(_historyOffset + txs.length);
-    if (res.has_more) {
-      $('history-more').innerHTML = '<button class="load-more" data-action="loadMoreHistory">load more</button>';
-    } else {
-      $('history-more').innerHTML = '';
-    }
+    $('history-more').innerHTML = historyNav(res);
   } catch (e) {
-    $('history-more').innerHTML = '<div class="error-box">' + escapeHtml(e.message) + '</div>';
+    if (!current()) return;
+    $('history-more').innerHTML = '<button class="load-more" data-action="loadMoreHistory">retry</button>';
   }
 }
 
@@ -3594,13 +3983,14 @@ async function showKeys() {
 }
 
 async function revealPrivateKeys() {
-  var pin = await modalPrompt('reveal private keys', 'enter PIN', { pin: true, btnText: 'reveal' });
-  if (!pin) return;
   try {
+    const session = await walletApproval();
+    const pin = await modalPrompt('reveal private keys', 'enter PIN', { pin: true, btnText: 'reveal' });
+    if (!pin) return;
     var res = await api('POST', '/keys/private', {
       pin: pin,
       confirm: 'I_UNDERSTAND_KEY_EXPORT_RISK'
-    });
+    }, session);
     var pkCell = $('privkey-cell');
     if (pkCell) {
       pkCell.className = 'mono';
@@ -3622,10 +4012,59 @@ async function revealPrivateKeys() {
   }
 }
 
+let _apiKeyRead = 0;
+const _apiKeyEvents = (() => {
+  try { return new BroadcastChannel('webcli-wallet-view'); } catch (_) { return null; }
+})();
+
+const resetApiKey = (notify = false) => {
+  _apiKeyRead += 1;
+  $('api-key-value').value = '';
+  $('api-key-row').style.display = 'none';
+  $('api-key-show').disabled = false;
+  $('api-key-copy').disabled = true;
+  $('api-key-result').textContent = '';
+  if (notify === true && _apiKeyEvents) _apiKeyEvents.postMessage('clear');
+};
+if (_apiKeyEvents) _apiKeyEvents.onmessage = () => resetApiKey();
+
+const showApiKey = async () => {
+  if ($('api-key-show').disabled || !$('view-settings').classList.contains('active')) return;
+  const read = ++_apiKeyRead;
+  $('api-key-show').disabled = true;
+  try {
+    const result = await api('GET', '/access/key');
+    if (read !== _apiKeyRead) return;
+    if (typeof result.key !== 'string' || !/^[0-9a-f]{64}$/.test(result.key))
+      throw new Error('invalid API key response');
+    $('api-key-value').value = result.key;
+    $('api-key-row').style.display = '';
+    $('api-key-copy').disabled = false;
+    $('api-key-result').textContent = '';
+  } catch (error) {
+    if (read === _apiKeyRead) $('api-key-result').textContent = error.message;
+  } finally {
+    if (read === _apiKeyRead) $('api-key-show').disabled = false;
+  }
+};
+
+const copyApiKey = async () => {
+  const read = _apiKeyRead;
+  const key = $('api-key-value').value;
+  if (!key || $('api-key-copy').disabled) return;
+  try {
+    await navigator.clipboard.writeText(key);
+    if (read === _apiKeyRead) $('api-key-result').textContent = 'copied';
+  } catch (_) {
+    if (read === _apiKeyRead) $('api-key-result').textContent = 'Copy unavailable. Select the key and copy it manually.';
+  }
+};
+
 async function loadSettings() {
+  resetApiKey();
   try {
     var w = await api('GET', '/wallet');
-    $('settings-rpc').value = w.rpc_url || 'https://octra.network/rpc';
+    $('settings-rpc').value = w.rpc_url || 'https://devnet.octrascan.io/rpc';
     $('settings-explorer').value = w.explorer_url || 'https://octrascan.io';
     $('settings-bridge-signer').value = w.bridge_signer_url || 'https://relayer-002838819188.octra.network';
   } catch (e) {}
@@ -3706,16 +4145,19 @@ function modalPrompt(title, label, opts) {
     $('modal-result').innerHTML = '';
     if (opts.pin) {
       $('modal-pin').style.display = 'block';
-      var lbl = $('modal-pin-label');
-      if (lbl) lbl.textContent = label;
+      const lbl = $('modal-pin-label');
+      if (lbl) lbl.textContent = 'PIN';
+      const terms = $('modal-pin-terms');
+      if (terms) terms.textContent = label;
       $('modal-pin-input').value = '';
       $('pin-back-btn').style.display = '';
       var unlockBtn = $('modal-pin').querySelector('.action-btn');
       if (unlockBtn) unlockBtn.textContent = _modalPromptBtnText;
+      renderPinWait();
       $('modal-pin-input').focus();
       $('modal-overlay').style.display = 'flex';
     } else {
-      var h = '<div class="form-row"><label>' + escapeHtml(label) + '</label>';
+      let h = '<div class="form-row"><label style="white-space:pre-wrap;text-transform:none;overflow-wrap:anywhere">' + escapeHtml(label) + '</label>';
       h += '<input type="text" id="modal-prompt-input"';
       if (opts.placeholder) h += ' placeholder="' + escapeAttr(opts.placeholder) + '"';
       h += ' autocomplete="off"></div>';
@@ -3750,12 +4192,14 @@ function modalPrompt(title, label, opts) {
 }
 
 async function doSwitchAccount(addr) {
+  resetApiKey(true);
   var pin = await modalPrompt('switch account', 'enter PIN', { pin: true, btnText: 'switch' });
   if (!pin) return;
   clearResult('wallet-mgmt-result');
   _walletSwitching = true;
   try {
     await api('POST', '/wallet/switch', { addr: addr, pin: pin });
+    resetApiKey(true);
     showResult('wallet-mgmt-result', true, 'switched account');
     ['send-result','enc-result','dec-result','fhe-result','ct-compile-result','ct-deploy-result','ct-call-result','ct-info-result','ct-verify-result','tok-transfer-result','settings-result'].forEach(function(id) { clearResult(id); });
     var sl = $('stealth-log'); if (sl) sl.remove();
@@ -3911,6 +4355,25 @@ var _pendingAction = null;
 var _pendingPriv = '';
 var _pendingMnemonic = '';
 var _importMode = 'seed';
+let _recoveryAddress = null;
+let _pinBusy = false;
+let _pinUntil = 0;
+let _pinTimer = null;
+let _pinEntry = false;
+
+const renderPinWait = () => {
+  clearTimeout(_pinTimer);
+  _pinTimer = null;
+  const seconds = Math.max(0, Math.ceil((_pinUntil - performance.now()) / 1000));
+  $('pin-unlock-btn').disabled = _pinBusy || seconds > 0;
+  $('modal-pin-input').disabled = _pinBusy;
+  $('pin-back-btn').disabled = _pinBusy;
+  $('pin-recover-btn').style.pointerEvents = _pinBusy ? 'none' : '';
+  $('pin-wait').textContent = _pinBusy ? 'checking PIN...'
+    : seconds ? 'try again in ' + seconds + 's' : '';
+  if (seconds && !_pinBusy && $('modal-pin').style.display !== 'none')
+    _pinTimer = setTimeout(renderPinWait, 1000);
+};
 
 const clearPinFields = () => {
   ['modal-pin-input', 'modal-pin-new', 'modal-pin-confirm'].forEach(id => {
@@ -3920,23 +4383,32 @@ const clearPinFields = () => {
 };
 
 function hideAllModalPanels() {
+  clearTimeout(_pinTimer);
+  _pinTimer = null;
   $('modal-btns').style.display = 'none';
+  $('wallet-back-btn').style.display = 'none';
   $('modal-import').style.display = 'none';
   $('modal-pin').style.display = 'none';
   $('modal-pin-setup').style.display = 'none';
   $('modal-mnemonic-show').style.display = 'none';
   $('modal-result').innerHTML = '';
+  $('pin-recover-btn').style.display = 'none';
+  $('import-recovery').style.display = 'none';
   clearPinFields();
   const lbl = $('modal-pin-label');
   if (lbl) lbl.textContent = 'enter PIN to unlock';
+  const terms = $('modal-pin-terms');
+  if (terms) terms.textContent = '';
 }
 
 function showPinEntry(showBack) {
   hideAllModalPanels();
   $('modal-pin').style.display = 'block';
   $('modal-pin-input').value = '';
+  $('pin-recover-btn').style.display = _selectedUnlockAddr || _selectedUnlockFile ? '' : 'none';
   var backBtn = $('pin-back-btn');
   if (backBtn) backBtn.style.display = showBack ? '' : 'none';
+  renderPinWait();
   $('modal-pin-input').focus();
 }
 
@@ -3950,10 +4422,30 @@ function showPinSetup(action) {
 }
 
 function modalShowImport() {
+  _recoveryAddress = null;
   hideAllModalPanels();
   $('modal-import').style.display = 'block';
   switchImportTab('seed');
 }
+
+const modalRecover = () => {
+  if (_pinBusy) return;
+  if (_pinEntry) {
+    $('modal-result').textContent = 'to recover access, open the wallet link from the webcli terminal. your seed phrase or private key is still required.';
+    return;
+  }
+  if (!_selectedUnlockAddr && !_selectedUnlockFile) return;
+  _recoveryAddress = _selectedUnlockAddr || '';
+  _pendingPriv = '';
+  _pendingMnemonic = '';
+  hideAllModalPanels();
+  $('modal-sub').textContent = 'recover access with your seed phrase or private key';
+  $('modal-import').style.display = 'block';
+  $('import-recovery').style.display = _selectedUnlockAddr ? 'none' : 'block';
+  $('import-recovery-address').value = _recoveryAddress;
+  $('import-recovery-address').readOnly = Boolean(_selectedUnlockAddr);
+  switchImportTab('seed');
+};
 
 function switchImportTab(mode) {
   _importMode = mode;
@@ -3971,6 +4463,7 @@ function switchImportTab(mode) {
 }
 
 function modalBack() {
+  _recoveryAddress = null;
   _selectedUnlockAddr = '';
   _selectedUnlockFile = '';
   hideAllModalPanels();
@@ -3983,6 +4476,8 @@ function modalBack() {
 }
 
 function modalBackFromPin() {
+  if (_pinBusy) return;
+  _recoveryAddress = null;
   if (_modalPromptResolve) {
     var cb = _modalPromptResolve;
     _modalPromptResolve = null;
@@ -4003,11 +4498,20 @@ function modalBackFromPin() {
 }
 
 function modalCreate() {
+  _recoveryAddress = null;
   showPinSetup('create');
   $('modal-sub').textContent = 'set a PIN for your new wallet';
 }
 
 function modalDoImport() {
+  if (_recoveryAddress !== null) {
+    const address = _selectedUnlockAddr || $('import-recovery-address').value.trim();
+    if (!/^oct[1-9A-HJ-NP-Za-km-z]{44}$/.test(address)) {
+      $('modal-result').innerHTML = '<div class="result-msg result-error">valid public address required for recovery</div>';
+      return;
+    }
+    _recoveryAddress = address;
+  }
   if (_importMode === 'seed') {
     var mn = $('modal-mnemonic').value.trim().toLowerCase();
     if (!mn) {
@@ -4032,8 +4536,10 @@ function modalDoImport() {
     _pendingMnemonic = '';
     $('modal-privkey').value = '';
   }
-  showPinSetup('import');
-  $('modal-sub').textContent = 'set a PIN for your wallet';
+  showPinSetup(_recoveryAddress ? 'recover' : 'import');
+  $('modal-sub').textContent = _recoveryAddress
+    ? 'set a new PIN; your old wallet file will be kept'
+    : 'set a PIN for your wallet';
 }
 
 function showMnemonicWords(mnemonic) {
@@ -4059,24 +4565,27 @@ function modalMnemonicDone() {
 }
 
 async function modalUnlock() {
-  var pin = $('modal-pin-input').value;
+  if (_pinBusy || performance.now() < _pinUntil || $('modal-pin').style.display === 'none') return;
+  const pin = $('modal-pin-input').value;
   if (!pin || pin.length === 0) {
     $('modal-result').innerHTML = '<div class="result-msg result-error">PIN required</div>';
     return;
   }
   if (_modalPromptResolve) {
-    var cb = _modalPromptResolve;
+    const cb = _modalPromptResolve;
     _modalPromptResolve = null;
-    var unlockBtn = $('modal-pin').querySelector('.action-btn');
+    const unlockBtn = $('modal-pin').querySelector('.action-btn');
     if (unlockBtn) unlockBtn.textContent = 'unlock';
     hideAllModalPanels();
     $('modal-overlay').style.display = 'none';
     cb(pin);
     return;
   }
-  $('modal-result').innerHTML = '<div class="loading">unlocking...</div>';
+  _pinBusy = true;
+  renderPinWait();
+  $('modal-result').innerHTML = '';
   try {
-    var unlockBody = { pin: pin };
+    const unlockBody = { pin: pin };
     if (_selectedUnlockAddr) unlockBody.addr = _selectedUnlockAddr;
     if (_selectedUnlockFile) unlockBody.file = _selectedUnlockFile;
     await api('POST', '/wallet/unlock', unlockBody);
@@ -4087,16 +4596,21 @@ async function modalUnlock() {
     await loadWalletInfo();
     startRefreshTimer();
   } catch (e) {
+    if (Number.isInteger(e.retryAfter) && e.retryAfter > 0 && e.retryAfter <= 900)
+      _pinUntil = performance.now() + e.retryAfter * 1000;
     $('modal-result').innerHTML = '<div class="result-msg result-error">' + escapeHtml(e.message) + '</div>';
     $('modal-pin-input').value = '';
-    $('modal-pin-input').focus();
+  } finally {
+    _pinBusy = false;
+    renderPinWait();
+    if ($('modal-overlay').style.display !== 'none') $('modal-pin-input').focus();
   }
 }
 
 async function modalFinishSetup() {
-  var pin = $('modal-pin-new').value;
-  var confirm = $('modal-pin-confirm').value;
-  var pinErr = validatePin(pin);
+  const pin = $('modal-pin-new').value;
+  const confirm = $('modal-pin-confirm').value;
+  const pinErr = validatePin(pin);
   if (pinErr) {
     $('modal-result').innerHTML = '<div class="result-msg result-error">' + pinErr + '</div>';
     return;
@@ -4109,7 +4623,7 @@ async function modalFinishSetup() {
   $('modal-result').innerHTML = '<div class="loading">processing...</div>';
   try {
     if (_pendingAction === 'create') {
-      var resp = await api('POST', '/wallet/create', { pin: pin });
+      const resp = await api('POST', '/wallet/create', { pin: pin });
       if (resp.mnemonic) {
         hideAllModalPanels();
         $('modal-sub').textContent = 'your seed phrase';
@@ -4117,8 +4631,15 @@ async function modalFinishSetup() {
         showMnemonicWords(resp.mnemonic);
         return;
       }
-    } else if (_pendingAction === 'import') {
-      var importBody = { pin: pin };
+    } else if (_pendingAction === 'import' || _pendingAction === 'recover') {
+      const importBody = { pin: pin };
+      if (_pendingAction === 'recover') {
+        if (!/^oct[1-9A-HJ-NP-Za-km-z]{44}$/.test(_recoveryAddress)) {
+          throw new Error('select a wallet to recover');
+        }
+        importBody.recover = true;
+        importBody.address = _recoveryAddress;
+      }
       if (_pendingMnemonic) {
         importBody.mnemonic = _pendingMnemonic;
         _pendingMnemonic = '';
@@ -4126,7 +4647,8 @@ async function modalFinishSetup() {
         importBody.priv = _pendingPriv;
         _pendingPriv = '';
       }
-      var resp = await api('POST', '/wallet/import', importBody);
+      const resp = await api('POST', '/wallet/import', importBody);
+      _recoveryAddress = null;
       if (resp.switched === false) {
         clearPinFields();
         $('modal-overlay').style.display = 'none';
@@ -4135,7 +4657,7 @@ async function modalFinishSetup() {
         return;
       }
     } else if (_pendingAction === 'migrate') {
-      await api('POST', '/wallet/unlock', { pin: pin });
+      await api('POST', '/wallet/unlock', { pin: pin, migrate_legacy: true });
     }
     clearPinFields();
     $('modal-overlay').style.display = 'none';
@@ -4177,9 +4699,37 @@ async function loadWalletInfo() {
 }
 
 async function doLogout() {
-  try { await api('POST', '/wallet/lock', {}); } catch (e) {}
+  resetApiKey(true);
   if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+  $('hdr-status').lockFailure = false;
+  $('hdr-logout').disabled = true;
+  try {
+    await api('POST', '/wallet/lock', {});
+  } catch (e) {
+    let locked = false;
+    try {
+      const status = await api('GET', '/wallet/status');
+      locked = status.loaded === false;
+    } catch (_) {}
+    if (!locked) {
+      $('hdr-status').lockFailure = true;
+      $('hdr-status').textContent = 'lock failed';
+      $('hdr-status').title = e.message;
+      $('hdr-status').className = 'right error';
+      startRefreshTimer();
+      return;
+    }
+  } finally {
+    $('hdr-logout').disabled = false;
+  }
+  resetApiKey(true);
+  if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+  dropAllPersistedRuntime();
   clearAllAddressRuntime();
+  for (const id of ['dash-txs', 'history-list', 'history-more', 'tx-detail']) {
+    const element = $(id);
+    if (element) element.textContent = '';
+  }
   _walletAddr = '';
   _cachedBal = null;
   _encryptedBalanceRaw = 0;
@@ -4204,8 +4754,10 @@ async function doLogout() {
 function startRefreshTimer() {
   if (_refreshTimer) return;
   bgStealthScan();
+  fetchStaging();
   _refreshTimer = setInterval(function() {
     if (_walletSwitching) return;
+    fetchStaging();
     if (_privateOpInFlight) return;
     fetchBalance(true);
     bgStealthScan();
@@ -4259,15 +4811,28 @@ function pickWallet(el) {
 }
 
 function showImportOptions() {
+  if (_pinEntry) {
+    $('modal-sub').textContent = 'unlock a wallet first to add another, or open the wallet link from the webcli terminal for setup.';
+    return;
+  }
   hideAllModalPanels();
   $('modal-sub').textContent = 'add wallet';
   $('modal-btns').style.display = 'flex';
+  $('wallet-back-btn').style.display = '';
   $('modal-result').innerHTML = '';
 }
 
 async function init() {
   try {
-    var st = await api('GET', '/wallet/status');
+    const st = await api('GET', '/wallet/status');
+    _pinEntry = Boolean(st.pin_entry);
+    if (st.setup_required) {
+      $('modal-sub').textContent = 'first setup: open the wallet link from the webcli terminal to create or import a wallet. after setup, use this address and your pin.';
+      $('modal-btns').style.display = 'none';
+      $('wallet-back-btn').style.display = 'none';
+      $('modal-overlay').style.display = 'flex';
+      return;
+    }
     if (st.loaded) {
       await loadWalletInfo();
       startRefreshTimer();
@@ -4283,6 +4848,7 @@ async function init() {
     if (wallets.length === 0) {
       $('modal-sub').textContent = 'no wallet found';
       $('modal-btns').style.display = 'flex';
+      $('wallet-back-btn').style.display = 'none';
       $('modal-overlay').style.display = 'flex';
       return;
     }
@@ -4309,19 +4875,19 @@ $('modal-pin-confirm').addEventListener('keydown', function(e) {
 
 function wireDelegation() {
   var actions = {
-    modalShowImport, modalCreate, modalDoImport, modalBack, modalMnemonicDone,
+    modalShowImport, modalRecover, modalCreate, modalDoImport, modalBack, modalMnemonicDone,
     modalUnlock, modalBackFromPin, modalFinishSetup, doLogout, doKeySwitch,
     doSend, doEncrypt, doDecrypt, doStealthSend, doStealthScan, doTokenTransfer,
     closeTokenTransfer, onLangChange, editorUpdateWithLiveCompile, doCompile,
     loadTemplate, doPreviewDeploy, doDeploy, doContractCall, doContractView,
     doFheEncrypt, doFheDecrypt, doContractInfo, doContractReceipt, doVerifyContract,
-    doSaveSettings, doChangePin, goBack, switchView, switchImportTab, switchBottomTab,
+    doSaveSettings, doChangePin, showApiKey, copyApiKey, resetApiKey, goBack, switchView, switchImportTab, switchBottomTab,
     ideCloseProject, ideExportZip, ideNewFile, ideOpenFile, ideCloseTab, ideNewProject,
-    ideLoadProject, ideDeleteProject, showTx, claimSelected, openTokenTransfer,
-    loadMoreHistory, revealPrivateKeys, doSwitchAccount, doChangePinForWallet,
+    ideLoadProject, ideDeleteProject, showTx, retrySavedTx, discardSavedTx, claimSelected, openTokenTransfer,
+    loadMoreHistory, loadHistorySource, revealPrivateKeys, doSwitchAccount, doChangePinForWallet,
     doDeriveAccount, showImportAnother, showImportOptions,
-    navTo: function(a) { window.location.href = a; },
-    openTab: function(a) { window.open(a, '_blank'); },
+    navTo: function(a) { if (typeof a === 'string' && a.length && /^\/?[a-z0-9_/-]*(?:\.html)?$/.test(a) && !a.startsWith('//')) window.location.href = a; },
+    openTab: function(a) { window.open(a, '_blank', 'noopener,noreferrer'); },
     selectSelf: function(a, el) { el.select(); },
     importFiles: function(a, el) { ideImportFiles(el.files); },
     fileMenu: function(a, el, e) { ideFileMenu(e, a); },

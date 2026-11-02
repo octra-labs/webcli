@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 const $ = (id) => document.getElementById(id)
 const bindIfPresent = (id, eventName, handler) => {
   const element = $(id)
@@ -77,7 +80,7 @@ const h256Raw = async (tag, parts) => {
 
 const h256Hex = async (tag, parts) => hexOfBytes(await h256Raw(tag, parts))
 
-const resourceKeyOfPath = (circleId, canonicalPath) => h256Hex('octra:circle_resource_key:v1', [utf8Bytes(circleId), utf8Bytes(canonicalPath)])
+const resourceKeyOfPath = (circleId, assetPath) => h256Hex('octra:circle_resource_key:v1', [utf8Bytes(circleId), utf8Bytes(assetPath)])
 const resourceKeyOfSlotRef = (circleId, slotRef) => h256Hex('octra:circle_resource_key:slot:v1', [utf8Bytes(circleId), utf8Bytes(slotRef)])
 
 const buildCircleDeployPayload = () => CircleBridgePolicy.deployPayload('sealed')
@@ -222,7 +225,28 @@ const toggleExpandedPreview = () => {
   openExpandedPreview()
 }
 
-const circleConfirm = (title, message, confirmLabel = 'confirm') => new Promise((resolve) => {
+let circlePromptOpen = false
+let cancelCirclePrompt = null
+const bridgePending = new Map()
+const circleDialogs = []
+
+const queueCircleDialog = (show, empty) => new Promise((resolve, reject) => {
+  if (circleDialogs.length > 8) { reject(new Error('dialog queue full')); return }
+  const context = activeBridgeContext
+  const run = () => {
+    const result = activeBridgeContext === context ? show() : Promise.resolve(empty)
+    result.then(resolve, reject).finally(() => {
+      circleDialogs.shift()
+      if (circleDialogs.length) circleDialogs[0]()
+    })
+  }
+  circleDialogs.push(run)
+  if (circleDialogs.length === 1) run()
+})
+
+const circleConfirm = (title, message, confirmLabel = 'confirm') => queueCircleDialog(() => new Promise((resolve) => {
+  if (circlePromptOpen) { resolve(false); return }
+  circlePromptOpen = true
   const overlay = document.createElement('div')
   const box = document.createElement('div')
   const titleNode = document.createElement('div')
@@ -243,14 +267,26 @@ const circleConfirm = (title, message, confirmLabel = 'confirm') => new Promise(
   messageNode.textContent = message
   cancelButton.textContent = 'cancel'
   confirmButton.textContent = confirmLabel
+  const activates = Date.now() + 500
+  confirmButton.disabled = true
+  const activation = setTimeout(() => { confirmButton.disabled = false }, 500)
 
+  let settled = false
   const close = (accepted) => {
+    if (settled) return
+    settled = true
+    clearTimeout(activation)
+    circlePromptOpen = false
+    cancelCirclePrompt = null
     overlay.remove()
     resolve(accepted)
   }
+  cancelCirclePrompt = () => close(false)
 
   cancelButton.addEventListener('click', () => close(false))
-  confirmButton.addEventListener('click', () => close(true))
+  confirmButton.addEventListener('click', () => {
+    if (Date.now() >= activates) close(true)
+  })
   overlay.addEventListener('click', (event) => {
     if (event.target === overlay) {
       close(false)
@@ -261,10 +297,12 @@ const circleConfirm = (title, message, confirmLabel = 'confirm') => new Promise(
   box.append(titleNode, messageNode, buttons)
   overlay.append(box)
   document.body.append(overlay)
-  confirmButton.focus()
-})
+  cancelButton.focus()
+}), false)
 
-const circlePin = (title, message) => new Promise((resolve) => {
+const circlePin = (title, message, secret = true) => queueCircleDialog(() => new Promise((resolve) => {
+  if (circlePromptOpen) { resolve(''); return }
+  circlePromptOpen = true
   const overlay = document.createElement('div')
   const box = document.createElement('div')
   const titleNode = document.createElement('div')
@@ -281,24 +319,36 @@ const circlePin = (title, message) => new Promise((resolve) => {
   buttons.className = 'modal-buttons'
   cancelButton.className = 'modal-btn'
   confirmButton.className = 'modal-btn modal-btn-primary'
-  input.type = 'password'
-  input.autocomplete = 'current-password'
+  input.type = secret ? 'password' : 'text'
+  input.autocomplete = 'off'
+  if (!secret) input.placeholder = '0'
   input.className = 'input-field'
 
   titleNode.textContent = title
-  messageNode.textContent = message
+  const paramsStart = message.indexOf('\nparams: ')
+  messageNode.textContent = paramsStart < 0 ? message : message.slice(0, paramsStart)
+  const paramsNode = document.createElement('div')
+  paramsNode.className = 'modal-params'
+  paramsNode.textContent = paramsStart < 0 ? '' : message.slice(paramsStart + 1)
   cancelButton.textContent = 'cancel'
-  confirmButton.textContent = 'sign'
+  confirmButton.textContent = secret ? 'sign' : 'continue'
 
+  let settled = false
   const close = (value) => {
+    if (settled) return
+    settled = true
+    circlePromptOpen = false
+    cancelCirclePrompt = null
+    input.value = ''
     overlay.remove()
     resolve(value)
   }
+  cancelCirclePrompt = () => close('')
 
   cancelButton.addEventListener('click', () => close(''))
   confirmButton.addEventListener('click', () => close(input.value))
   input.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
+    if (event.key === 'Enter' && !event.repeat) {
       close(input.value)
     }
   })
@@ -309,13 +359,16 @@ const circlePin = (title, message) => new Promise((resolve) => {
   })
 
   buttons.append(cancelButton, confirmButton)
-  box.append(titleNode, messageNode, input, buttons)
+  box.append(titleNode, messageNode)
+  if (paramsStart >= 0) box.append(paramsNode)
+  box.append(input, buttons)
   overlay.append(box)
   document.body.append(overlay)
   input.focus()
-})
+}), '')
 
 const renderMeta = (info) => {
+  $('circle-info').hidden = false
   $('meta-summary-note').textContent = 'identity | mode | roots | ownership'
   const rows = [
     ['circle_id', info.circle_id],
@@ -346,6 +399,11 @@ const renderMeta = (info) => {
 }
 
 const resetMeta = () => {
+  clearBridgeContext()
+  setPreviewExpandAvailable(false)
+  $('preview-body').replaceChildren()
+  $('circle-info').hidden = true
+  $('circle-preview').hidden = true
   $('meta-summary-note').textContent = 'no information yet'
   $('meta').innerHTML = ''
 }
@@ -360,15 +418,21 @@ const fetchJson = async (url, options = {}) => {
   return json
 }
 
-const postJson = (url, payload) => fetchJson(url, {
+const postJson = (url, payload, session) => fetchJson(url, {
   method: 'POST',
-  headers: {'Content-Type': 'text/plain;charset=utf-8'},
+  headers: {'Content-Type': 'text/plain;charset=utf-8', ...(session ? {
+    'X-Webcli-Wallet': session.address, 'X-Webcli-Generation': session.generation
+  } : {})},
   body: JSON.stringify(payload)
 })
 
 const clearBridgeContext = () => {
+  if (cancelCirclePrompt) cancelCirclePrompt()
   activeBridgeWindow = null
   activeBridgeContext = null
+  bridgeGrantState.clear()
+  bridgePending.clear()
+  bridgeCreatedCircleIds.clear()
 }
 
 const createdCircleIdsForBridge = () => {
@@ -479,10 +543,10 @@ const bridgeGrantTextOf = (context, method) => {
     return `allow this circle to upload public assets to its current or newly created circles for this session?\n\n${context.uri}`
   }
   if (method === 'circle.asset') {
-    return `allow this public circle to read its own bounded assets for this session?\n\n${context.uri}`
+    return `allow this public circle to read its own size-limited assets for this session?\n\n${context.uri}`
   }
   if (method === 'compute.request') {
-    return `allow this public circle to use bounded compute through the configured RPC origin for this session?\n\n${context.uri}`
+    return `allow this public circle to use resource-limited compute through the configured RPC origin for this session?\n\n${context.uri}`
   }
   if (method === 'program.info' || method === 'program.view' || method === 'program.storage' || method === 'program.abi') {
     return `allow this circle to read onchain program state for this session?\n\n${context.uri}`
@@ -518,7 +582,7 @@ const bridgeGrantTextOf = (context, method) => {
     return `allow this circle to send OCT through the active wallet for this session?\n\n${context.uri}`
   }
   if (method === 'fhe.encrypt') {
-    return `allow this circle to request FHE encryption for this session?\n\n${context.uri}`
+    return `allow one FHE encryption request? This can use substantial CPU time.\n\n${context.uri}`
   }
   if (method === 'fhe.load_pk') {
     return `allow this circle to request PVAC public keys for this session?\n\n${context.uri}`
@@ -533,16 +597,16 @@ const bridgeGrantTextOf = (context, method) => {
     return `allow this circle to request FHE amount commitments for this session?\n\n${context.uri}`
   }
   if (method === 'fhe.serialize_cipher') {
-    return `allow this circle to request canonical FHE cipher serialization for this session?\n\n${context.uri}`
+    return `allow this circle to request standard FHE cipher serialization for this session?\n\n${context.uri}`
   }
   if (method === 'fhe.deserialize_cipher') {
-    return `allow this circle to request canonical FHE cipher decoding for this session?\n\n${context.uri}`
+    return `allow this circle to request standard FHE cipher decoding for this session?\n\n${context.uri}`
   }
   if (method === 'fhe.verify_zero') {
     return `allow this circle to request FHE zero-proof verification for this session?\n\n${context.uri}`
   }
   if (method === 'fhe.verify_bound') {
-    return `allow this circle to request FHE bound-proof verification for this session?\n\n${context.uri}`
+    return `allow this circle to verify a cipher proof for this session?\n\n${context.uri}`
   }
   if (method.startsWith('relay.')) {
     return `allow this circle to use the local relay membrane for this session?\n\n${context.uri}`
@@ -590,25 +654,77 @@ const ensureBridgeGrant = async (method) => {
   if (method === 'circle.asset') {
     return
   }
-  const grantKey = `${activeBridgeContext.circle_id}:${bridgeGrantScopeOf(method)}`
-  if (bridgeGrantState.get(grantKey)) {
-    return
+  const context = activeBridgeContext
+  const session = await fetchJson('/api/wallet/session')
+  if (activeBridgeContext !== context) throw new Error('bridge context changed')
+  const grantKey = `${context.circle_id}:${bridgeGrantScopeOf(method)}:${session.address}:${session.generation}`
+  const grant = bridgeGrantState.get(grantKey)
+  if (method !== 'fhe.encrypt' && grant?.context === context && grant.until > Date.now()) {
+    return session
   }
-  const allowed = await circleConfirm('runtime access', bridgeGrantTextOf(activeBridgeContext, method), 'allow')
-  if (!allowed) {
-    throw new Error(`runtime access denied: ${method}`)
+  const pending = bridgePending.get(grantKey)
+  if (pending?.context === context) return pending.promise
+  if (bridgePending.size >= 8) throw new Error('runtime access queue full')
+  const previous = Array.from(bridgePending.values()).at(-1)?.promise
+  const promise = (async () => {
+    if (previous) { try { await previous } catch (_) {} }
+    if (activeBridgeContext !== context) throw new Error('bridge context changed')
+    const allowed = await circleConfirm('runtime access', bridgeGrantTextOf(context, method), 'allow')
+    if (!allowed) throw new Error(`runtime access denied: ${method}`)
+    const current = await fetchJson('/api/wallet/session')
+    if (activeBridgeContext !== context || current.address !== session.address
+      || current.generation !== session.generation) throw new Error('bridge context changed')
+    bridgeGrantState.set(grantKey, {context, until: Date.now() + 300000})
+    return session
+  })()
+  bridgePending.set(grantKey, {context, promise})
+  try { return await promise } finally {
+    if (bridgePending.get(grantKey)?.promise === promise) bridgePending.delete(grantKey)
   }
-  bridgeGrantState.set(grantKey, true)
 }
 
-const bridgeResultOf = async (method, payload = {}) => {
+const bridgeFetchJson = fetchJson
+const programInteractions = new WeakSet()
+
+const bridgeExecute = async (method, incoming = {}) => {
+  const payload = JSON.parse(JSON.stringify(incoming, (_, value) => {
+    if (typeof value === 'number' && !Number.isSafeInteger(value))
+      throw new Error('program numbers must be exact safe integers')
+    return value
+  }))
+  const context = activeBridgeContext
+  const target = context?.circle_id
+  const checkContext = () => {
+    if (activeBridgeContext !== context || activeBridgeContext?.circle_id !== target) {
+      throw new Error('bridge context changed')
+    }
+  }
   if (!activeBridgeContext) {
     throw new Error('sealed bridge inactive')
   }
   if (!activeBridgeContext.bridge_methods.includes(method)) {
     throw new Error(`bridge method not allowed: ${method}`)
   }
-  await ensureBridgeGrant(method)
+  const approvedSession = await ensureBridgeGrant(method)
+  checkContext()
+  const fetchJson = async (url, options = {}) => {
+    checkContext()
+    const headers = new Headers(options.headers)
+    if (approvedSession) {
+      headers.set('X-Webcli-Wallet', approvedSession.address)
+      headers.set('X-Webcli-Generation', approvedSession.generation)
+    }
+    const result = await bridgeFetchJson(url, {...options, headers})
+    checkContext()
+    return result
+  }
+  const postJson = (url, body) => fetchJson(url, {method: 'POST',
+    headers: {'Content-Type': 'text/plain;charset=utf-8'}, body: JSON.stringify(body)})
+  const checkRead = (result) => {
+    checkContext()
+    if (!approvedSession || result.address !== approvedSession.address
+      || result.generation !== approvedSession.generation) throw new Error('wallet session changed')
+  }
   if (method === 'circle.context') {
     return activeBridgeContext
   }
@@ -625,15 +741,44 @@ const bridgeResultOf = async (method, payload = {}) => {
     }
     return bridgeCircleId
   }
+  const callSession = async () => {
+    const session = await fetchJson('/api/wallet/session')
+    checkContext()
+    if (!CircleBridgePolicy.validCircleId(session.address)
+      || typeof session.generation !== 'string' || !/^[0-9]+$/.test(session.generation)
+      || session.address !== approvedSession.address || session.generation !== approvedSession.generation) {
+      throw new Error('wallet session unavailable')
+    }
+    return Object.freeze({expected_wallet: session.address, expected_generation: session.generation})
+  }
   const postWrite = async (path, circleId) => {
-    const fee = String(payload.ou || payload.fee || 'wallet default')
+    const nativeMethod = {
+      'object.policy.define': 'define_object_policy_native',
+      'object.bind': 'bind_object_native',
+      'object.member.attach': 'attach_object_member_native',
+      'object.member.detach': 'detach_object_member_native',
+      'object.transition.apply': 'apply_object_transition_native'
+    }[method]
+    if (nativeMethod) {
+      const terms = CircleBridgePolicy.callTerms(circleId, payload, '0', nativeMethod)
+      const session = await callSession()
+      const pin = await circlePin('confirm circle write', `from: ${session.expected_wallet}\n${terms.text}`)
+      if (!pin) throw new Error(`${method} cancelled`)
+      checkContext()
+      return postJson(path, {...terms.body, ...session, pin})
+    }
+    const baseFee = payload.ciphertext_b64 ? String(circleAssetFeeOfCiphertextB64(payload.ciphertext_b64))
+      : method === 'outbox.open' || method === 'ingress.commit' ? '3000'
+      : method === 'relay.claim' || method === 'relay.cancel' ? '3000' : '1000'
+    const fee = payload.ou || payload.fee || baseFee
     const pin = await circlePin(
       'confirm circle write',
-      `method: ${method}\ncircle: ${circleId}\nfee: ${fee} ou`)
+      `method: ${method}\ncircle: ${circleId}\n${CircleBridgePolicy.paymentTerms(fee, '0', 1, baseFee)}`)
     if (!pin) {
       throw new Error(`${method} cancelled`)
     }
-    return postJson(path, { ...payload, circle_id: circleId, pin })
+    checkContext()
+    return postJson(path, { ...payload, circle_id: circleId, ou: fee, pin })
   }
   if (method === 'circle.asset') {
     if (activeBridgeContext.privacy_class !== 'public') {
@@ -647,13 +792,13 @@ const bridgeResultOf = async (method, payload = {}) => {
     ) {
       throw new Error('circle asset request fields differ')
     }
-    const path = CircleBridgePolicy.canonicalAssetPath(payload.path)
+    const path = CircleBridgePolicy.assetPath(payload.path)
     if (!path || path === '/') {
       throw new Error('circle asset path refused')
     }
     const asset = await fetchJson(
       `/api/circle/asset?circle_id=${encodeURIComponent(bridgeCircleId)}&path=${encodeURIComponent(path)}`)
-    const contentType = CircleBridgePolicy.canonicalContentType(asset?.content_type)
+    const contentType = CircleBridgePolicy.assetMime(asset?.content_type)
     if (
       !asset
       || asset.circle_id !== bridgeCircleId
@@ -687,7 +832,7 @@ const bridgeResultOf = async (method, payload = {}) => {
   if (method === 'circle.deploy') {
     const profile = payload.profile || 'public'
     const deployPayload = CircleBridgePolicy.deployPayload(profile)
-    const pin = await circlePin('confirm circle deploy', `enter PIN to create a new ${profile} circle`)
+    const pin = await circlePin('confirm circle deploy', `enter PIN to create a new ${profile} circle\n${CircleBridgePolicy.paymentTerms('200000', '0', 1, '200000')}`)
     if (!pin) {
       throw new Error('circle deploy cancelled')
     }
@@ -714,14 +859,18 @@ const bridgeResultOf = async (method, payload = {}) => {
       utf8: utf8Bytes,
       sha256: sha256Hex
     })
+    const assetFee = String(circleAssetFeeOfCiphertextB64(plan.asset.body_b64))
+    const chunkFees = plan.direct ? [] : plan.chunks.map(chunk => String(
+      circleAssetFeeOfCiphertextB64({length: 4 * Math.ceil(chunk.size_bytes / 3)})))
+    const totalFee = chunkFees.reduce((sum, fee) => sum + BigInt(fee), BigInt(assetFee)).toString()
     const pin = await circlePin(
       'confirm circle asset',
-      `enter PIN to upload ${prepared.path} | ${plan.raw_bytes} bytes | ${prepared.circle_id}`)
+      `enter PIN to upload ${prepared.path} | ${plan.raw_bytes} bytes | ${prepared.circle_id}\ntransactions: ${chunkFees.length + 1}\n${CircleBridgePolicy.paymentTerms(totalFee, '0', 1, totalFee)}`)
     if (!pin) {
       throw new Error('circle asset upload cancelled')
     }
     if (plan.direct) {
-      return postJson('/api/circle/asset_plain', { ...plan.asset, pin })
+      return postJson('/api/circle/asset_plain', { ...plan.asset, ou: assetFee, pin })
     }
     const uploaded = []
     for (const chunk of plan.chunks) {
@@ -731,11 +880,12 @@ const bridgeResultOf = async (method, payload = {}) => {
         content_type: chunk.content_type,
         body_b64: bytesToBase64(plan.raw.subarray(chunk.offset, chunk.offset + chunk.size_bytes)),
         encoding: chunk.encoding,
+        ou: chunkFees[uploaded.length],
         pin
       })
       uploaded.push(result.tx_hash)
     }
-    const result = await postJson('/api/circle/asset_plain', { ...plan.asset, pin })
+    const result = await postJson('/api/circle/asset_plain', { ...plan.asset, ou: assetFee, pin })
     return {
       ...result,
       chunked: true,
@@ -747,43 +897,43 @@ const bridgeResultOf = async (method, payload = {}) => {
     if (activeBridgeContext.privacy_class !== 'public') {
       throw new Error('compute access requires a public circle')
     }
-    const wallet = await fetchJson('/api/wallet')
     const prepared = CircleBridgePolicy.prepareComputeRequest(
-      wallet.rpc_url,
       payload,
       64 * 1024)
-    const localRequest = {
-      method: prepared.method,
-      path: new URL(prepared.url).pathname
-    }
-    if (prepared.body !== null) {
-      localRequest.body = prepared.body
-    }
-    return postJson('/api/circle/compute', localRequest)
+    const pin = await circlePin('confirm compute terms',
+      `price = ${prepared.unit_price} atomic OCT per fuel unit; cap = ${prepared.fee_cap} atomic OCT. This signs a quote, not a payment. Enter PIN to continue.`)
+    if (!pin) throw new Error('compute request cancelled')
+    return postJson('/api/circle/compute', {
+      ...prepared,
+      pin,
+      circle_id: requireBridgeCircleId()
+    })
   }
   if (method === 'program.info') {
     const effectiveCircleId = requireBridgeCircleId()
-    if (authBridgeRoot) {
-      return fetchJson(`${authBridgeRoot}/api/program/info`)
-    }
     return fetchJson(`/api/program/info?circle_id=${encodeURIComponent(effectiveCircleId)}`)
   }
   if (method === 'program.view') {
     const effectiveCircleId = requireBridgeCircleId()
     const nextPayload = { ...payload, circle_id: effectiveCircleId }
-    if (authBridgeRoot) {
-      return postJson(`${authBridgeRoot}/api/program/view`, nextPayload)
-    }
     return postJson('/api/program/view', nextPayload)
   }
   if (method === 'program.call') {
     const effectiveCircleId = requireBridgeCircleId()
-    const pin = await circlePin('confirm program call', 'enter PIN to sign this circle program call')
+    const preview = CircleBridgePolicy.callTerms(effectiveCircleId, payload, '0')
+    const session = await callSession()
+    const amount = await circlePin('program call amount',
+      `from: ${session.expected_wallet}\n${preview.text}\nEnter the OCT amount yourself. Enter 0 for no transfer. The circle cannot choose this amount.`, false)
+    if (!amount) throw new Error('program call cancelled')
+    checkContext()
+    const terms = CircleBridgePolicy.callTerms(effectiveCircleId, payload, amount)
+    const pin = await circlePin('confirm program call', `from: ${session.expected_wallet}\n${terms.text}`)
     if (!pin) {
       throw new Error('program call cancelled')
     }
-    const nextPayload = { ...payload, circle_id: effectiveCircleId, pin }
-    return postJson('/api/program/call', nextPayload)
+    checkContext()
+    const nextPayload = { ...terms.body, ...session, pin }
+    return await postJson('/api/program/call', nextPayload)
   }
   if (method === 'program.storage') {
     if (!payload.key) {
@@ -1044,25 +1194,37 @@ const bridgeResultOf = async (method, payload = {}) => {
     return fetchJson(`/api/circle/ingress_packet?circle_id=${encodeURIComponent(effectiveCircleId)}&intent_id=${encodeURIComponent(payload.intent_id)}`)
   }
   if (method === 'wallet.info') {
-    return fetchJson('/api/wallet')
+    const result = await fetchJson('/api/wallet')
+    checkRead(result)
+    return {address: result.address, public_key: result.public_key}
   }
   if (method === 'wallet.balance') {
-    return fetchJson('/api/balance')
+    const result = await fetchJson('/api/balance')
+    checkRead(result)
+    return {public_balance: result.public_balance, nonce: result.nonce,
+      account_unknown: result.account_unknown === true}
   }
   if (method === 'wallet.keys') {
-    return fetchJson('/api/keys')
+    const result = await fetchJson('/api/keys')
+    checkRead(result)
+    return {address: result.address, public_key: result.public_key, view_pubkey: result.view_pubkey}
   }
   if (method === 'wallet.send') {
+    if (Object.hasOwn(payload, 'message')) throw new Error('wallet.send message is not supported')
+    const session = await callSession()
     const to = String(payload.to || '')
     const amount = String(payload.amount || '')
-    const fee = String(payload.ou || payload.fee || 'wallet default')
+    const rawAmount = CircleBridgePolicy.callAmount(amount)
+    const referenceFee = BigInt(rawAmount) < 1000000000n ? '10000' : '30000'
+    const fee = payload.ou || payload.fee || referenceFee
     const pin = await circlePin(
       'confirm wallet transfer',
-      `to: ${to}\namount: ${amount} oct\nfee: ${fee} ou`)
+      `to: ${to}\namount: ${amount} oct\n${CircleBridgePolicy.paymentTerms(fee, amount, 1, referenceFee)}`)
     if (!pin) {
       throw new Error('wallet.send cancelled')
     }
-    return postJson('/api/send', { ...payload, pin })
+    checkContext()
+    return postJson('/api/send', {to, amount, ou: fee, pin, ...session})
   }
   if (method === 'fhe.load_pk') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -1070,15 +1232,16 @@ const bridgeResultOf = async (method, payload = {}) => {
   }
   if (method === 'fhe.encrypt') {
     const effectiveCircleId = requireBridgeCircleId()
-    return postJson('/api/circle/fhe/encrypt', { ...payload, circle_id: effectiveCircleId })
+    const result = await fetchJson(`/api/circle/hfhe_policy?circle_id=${encodeURIComponent(effectiveCircleId)}`)
+    const proof = result.policy?.encrypt_proof || 'bound_zero_v1'
+    const receipt = ['zero_receipt_v1', 'bound_zero_receipt_v1', 'range_receipt_v1'].includes(proof)
+    const pin = receipt ? await circlePin('confirm FHE encryption receipt',
+      `circle: ${effectiveCircleId}\nvalue: ${payload.value}\nproof: ${proof}\nEnter PIN to sign the encryption receipt.`) : ''
+    if (receipt && !pin) throw new Error('FHE encryption cancelled')
+    return postJson('/api/circle/fhe/encrypt', {...payload, pin, circle_id: effectiveCircleId})
   }
   if (method === 'fhe.decrypt') {
-    const effectiveCircleId = requireBridgeCircleId()
-    const pin = await circlePin('confirm FHE decrypt', 'enter PIN to decrypt this circle ciphertext')
-    if (!pin) {
-      throw new Error('FHE decrypt cancelled')
-    }
-    return postJson('/api/circle/fhe/decrypt', { ...payload, circle_id: effectiveCircleId, pin })
+    throw new Error('circle plaintext disclosure disabled')
   }
   if (method === 'fhe.commit') {
     const effectiveCircleId = requireBridgeCircleId()
@@ -1135,6 +1298,20 @@ const bridgeResultOf = async (method, payload = {}) => {
   throw new Error(`unsupported bridge method: ${method}`)
 }
 
+const bridgeResultOf = async (method, incoming = {}) => {
+  const context = activeBridgeContext
+  const interactive = ['program.call', 'wallet.send', 'fhe.encrypt', 'circle.deploy', 'compute.request',
+    'circle.asset_plain', 'outbox.open', 'ingress.commit', 'relay.claim', 'relay.cancel',
+    'object.policy.define', 'object.bind', 'object.member.attach', 'object.member.detach',
+    'object.transition.apply', 'key.grant', 'key.extend', 'key.revoke', 'key.erase'].includes(method)
+    || method.endsWith('.put')
+  if (!interactive || !context) return bridgeExecute(method, incoming)
+  if (programInteractions.has(context)) throw new Error('wallet approval already active')
+  programInteractions.add(context)
+  try { return await bridgeExecute(method, incoming) }
+  finally { programInteractions.delete(context) }
+}
+
 window.addEventListener('message', async (event) => {
   if (!activeBridgeWindow || event.source !== activeBridgeWindow) {
     return
@@ -1186,22 +1363,39 @@ const paddedFrame = (plaintextBytes, paddingClass) => {
   return mergeBytes(bare, randomBytes(aligned - bare.length))
 }
 
-const circleAssetDecodedSizeUpperBound = wireLen => Math.ceil(wireLen / 4) * 3
+const circleAssetSizeLimit = wireLen => Math.ceil(wireLen / 4) * 3
 
 const circleAssetFeeOfCiphertextB64 = ciphertextB64 => {
-  const rawUpperBound = circleAssetDecodedSizeUpperBound(ciphertextB64.length)
-  if (rawUpperBound <= 4096) return 5000
-  if (rawUpperBound <= 16384) return 10000
-  if (rawUpperBound <= 32768) return 20000
-  if (rawUpperBound <= 131072) return 40000
-  if (rawUpperBound <= 524288) return 80000
-  if (rawUpperBound <= 2097152) return 160000
-  if (rawUpperBound <= 8388608) return 320000
+  const rawLimit = circleAssetSizeLimit(ciphertextB64.length)
+  if (rawLimit <= 4096) return 5000
+  if (rawLimit <= 16384) return 10000
+  if (rawLimit <= 32768) return 20000
+  if (rawLimit <= 131072) return 40000
+  if (rawLimit <= 524288) return 80000
+  if (rawLimit <= 2097152) return 160000
+  if (rawLimit <= 8388608) return 320000
   return 640000
 }
 
+const sealedText = value => {
+  if (typeof value !== 'string' || Array.from(value).some(character => {
+    const code = character.codePointAt(0)
+    return code >= 0xd800 && code <= 0xdfff
+  })) {
+    throw new Error('invalid sealed text')
+  }
+  return value
+}
+
+const sealedDigestSalt = (circleId, keyId) => JSON.stringify([
+  'octra:circle:sealed_digest', sealedText(circleId), sealedText(keyId)
+]).replace(/\u007f/g, '\\u007f')
+
 const deriveReadKey = async (circleId, keyId, passphrase) => {
-  const cacheKey = `${circleId}:${keyId}:${passphrase}`
+  sealedText(circleId)
+  sealedText(keyId)
+  sealedText(passphrase)
+  const cacheKey = JSON.stringify(['read', circleId, keyId, passphrase])
   if (!keyCache.has(cacheKey)) {
     keyCache.set(cacheKey, (async () => {
       const material = await crypto.subtle.importKey('raw', utf8Bytes(passphrase), 'PBKDF2', false, ['deriveKey'])
@@ -1218,7 +1412,34 @@ const deriveReadKey = async (circleId, keyId, passphrase) => {
   return keyCache.get(cacheKey)
 }
 
-const encryptSealedBytes = async (circleId, keyId, passphrase, plaintextBytes, paddingClass) => {
+const sealedDigestForSalt = async (salt, passphrase, plaintext) => {
+  sealedText(passphrase)
+  const cacheKey = JSON.stringify(['digest', salt, passphrase])
+  if (!keyCache.has(cacheKey)) {
+    keyCache.set(cacheKey, (async () => {
+      const material = await crypto.subtle.importKey('raw', utf8Bytes(passphrase), 'PBKDF2', false, ['deriveKey'])
+      return crypto.subtle.deriveKey(
+        {name: 'PBKDF2', salt: utf8Bytes(salt), iterations: 120000, hash: 'SHA-256'},
+        material,
+        {name: 'HMAC', hash: 'SHA-256', length: 256},
+        false,
+        ['sign']
+      )
+    })())
+  }
+  const key = await keyCache.get(cacheKey)
+  const digest = new Uint8Array(await crypto.subtle.sign('HMAC', key, plaintext))
+  return Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+const sealedDigest = (circleId, keyId, passphrase, plaintext) => sealedDigestForSalt(
+  sealedDigestSalt(circleId, keyId), passphrase, plaintext
+)
+
+const encryptSealedBytes = async (circleId, keyId, passphrase, plaintextBytes, paddingClass, digestMode = 'keyed') => {
+  if (digestMode !== 'compatible' && digestMode !== 'keyed') {
+    throw new Error('invalid sealed digest mode')
+  }
   const key = await deriveReadKey(circleId, keyId, passphrase)
   const nonce = randomBytes(12)
   const frame = paddedFrame(plaintextBytes, paddingClass)
@@ -1226,15 +1447,20 @@ const encryptSealedBytes = async (circleId, keyId, passphrase, plaintextBytes, p
   const envelope = mergeBytes(sealedMagic, nonce, new Uint8Array(cipherBuffer))
   return {
     ciphertext_b64: bytesToBase64(envelope),
-    plaintext_hash: await sha256Hex(plaintextBytes)
+    plaintext_hash: digestMode === 'keyed'
+      ? await sealedDigest(circleId, keyId, passphrase, plaintextBytes)
+      : await sha256Hex(plaintextBytes)
   }
 }
 
 const decryptSealedBytes = async (circleId, asset, passphrase) => {
-  if (!asset.key_id || !asset.plaintext_hash) {
+  if (!asset.key_id || typeof asset.plaintext_hash !== 'string' || !/^[0-9a-f]{64}$/.test(asset.plaintext_hash)) {
     throw new Error('sealed asset metadata incomplete')
   }
   const envelope = base64ToBytes(asset.ciphertext_b64)
+  if (envelope.length < sealedMagic.length + 12 + 16) {
+    throw new Error('invalid sealed envelope')
+  }
   const magicText = bytesToText(envelope.subarray(0, sealedMagic.length))
   if (magicText !== 'OCRS1') {
     throw new Error('invalid sealed envelope')
@@ -1251,9 +1477,13 @@ const decryptSealedBytes = async (circleId, asset, passphrase) => {
     throw new Error('invalid sealed payload length')
   }
   const plaintext = plainFrame.subarray(4, 4 + plainSize)
-  const actualHash = await sha256Hex(plaintext)
-  if (actualHash !== asset.plaintext_hash) {
-    throw new Error('plaintext hash mismatch')
+  if (await sha256Hex(plaintext) !== asset.plaintext_hash
+      && await sealedDigest(circleId, asset.key_id, passphrase, plaintext) !== asset.plaintext_hash) {
+    const browserSalt = JSON.stringify(['octra:circle:sealed_digest', circleId, asset.key_id])
+    if (browserSalt === sealedDigestSalt(circleId, asset.key_id)
+        || await sealedDigestForSalt(browserSalt, passphrase, plaintext) !== asset.plaintext_hash) {
+      throw new Error('plaintext hash mismatch')
+    }
   }
   return plaintext
 }
@@ -1271,7 +1501,7 @@ const loadPlainAsset = async (circleId, path) => fetchJson(`/api/circle/asset?ci
 const loadPublicMaterializedAsset = async (circleId, path) => {
   const normalizedPath = normalizeAssetPath(path)
   const asset = await loadPlainAsset(circleId, normalizedPath)
-  const contentType = CircleBridgePolicy.canonicalContentType(asset?.content_type)
+  const contentType = CircleBridgePolicy.assetMime(asset?.content_type)
   const maxBytes = 1024 * 1024
   if (
     !asset
@@ -2015,7 +2245,7 @@ const renderSealedAsset = async (circleId, path, info, passphrase) => {
   const versionToken = info.assets_root || info.stable_root || ''
   const asset = await loadSealedAsset(circleId, path, passphrase, versionToken)
   setPreviewExpandAvailable(true)
-  $('preview-head').textContent = `oct://${circleId}${asset.canonical_path} | sealed_read | ${asset.content_type} | key_id=${asset.key_id || 'none'}`
+  $('preview-head').textContent = `oct://${circleId}${asset.canonical_path} | sealed_read | ${asset.content_type} | key_id = ${asset.key_id || 'none'}`
   const body = $('preview-body')
   body.innerHTML = ''
   if (asset.content_type.startsWith('text/html')) {
@@ -2071,6 +2301,7 @@ const loadCircle = async () => {
     return
   }
   setStatus('status', 'loading...', false)
+  resetMeta()
   try {
     const info = await fetchJson(`/api/circle/info?circle_id=${encodeURIComponent(circleId)}`)
     renderMeta(info)
@@ -2091,6 +2322,7 @@ const loadCircle = async () => {
       await renderPublicAsset(asset, info)
       setStatus('status', `loaded oct://${circleId}${asset.canonical_path}`, false)
     }
+    $('circle-preview').hidden = false
     const next = new URL(window.location.href)
     next.searchParams.set('uri', circleUriOf(circleId, path))
     next.searchParams.delete('circle')
@@ -2110,7 +2342,8 @@ const deploySealedCircle = async () => {
   setStatus('deploy-status', 'preparing deploy...', false)
   try {
     const payload = buildCircleDeployPayload()
-    const pin = await circlePin('confirm circle deploy', 'enter PIN to create a new sealed circle')
+    const session = await fetchJson('/api/wallet/session')
+    const pin = await circlePin('confirm circle deploy', 'enter PIN to create a new sealed circle\n' + CircleBridgePolicy.paymentTerms('200000', '0', 1, '200000'))
     if (!pin) {
       throw new Error('circle deploy cancelled')
     }
@@ -2118,7 +2351,7 @@ const deploySealedCircle = async () => {
       ...payload,
       ou: '200000',
       pin
-    })
+    }, session)
     const circleId = result.circle_id
     if (!CircleBridgePolicy.validCircleId(circleId)) {
       throw new Error('circle deploy returned invalid id')
@@ -2153,8 +2386,9 @@ const uploadSealedAsset = async () => {
       throw new Error('sealed asset exceeds 32mb circle limit')
     }
     const uploadOu = String(circleAssetFeeOfCiphertextB64(sealed.ciphertext_b64))
+    const session = await fetchJson('/api/wallet/session')
     setStatus('upload-status', `submitting tx | ou ${uploadOu}`, false)
-    const pin = await circlePin('confirm circle asset', `enter PIN to upload ${path} | ${circleId}`)
+    const pin = await circlePin('confirm circle asset', `enter PIN to upload ${path} | ${circleId}\n${CircleBridgePolicy.paymentTerms(uploadOu, '0', 1, uploadOu)}`)
     if (!pin) {
       throw new Error('circle asset upload cancelled')
     }
@@ -2169,7 +2403,7 @@ const uploadSealedAsset = async () => {
       ciphertext_b64: sealed.ciphertext_b64,
       ou: uploadOu,
       pin
-    })
+    }, session)
     decryptedCache.clear()
     setStatus('upload-status', `submitted ${result.tx_hash || 'tx'}`, false)
     if (currentCircleTarget().path === path) {
@@ -2247,8 +2481,8 @@ const startCircle = params.get('circle')
 const startPath = params.get('path')
 const startPassphrase = params.get('passphrase')
 if (startPassphrase) {
-  $('sealed-passphrase').value = startPassphrase
-  $('overlay-sealed-passphrase').value = startPassphrase
+  params.delete('passphrase')
+  history.replaceState(null, '', `${location.pathname}?${params}`)
 }
 if (startUri) {
   const target = parseCircleUri(startUri)
@@ -2257,7 +2491,6 @@ if (startUri) {
     if ($('upload-path')) {
       $('upload-path').value = target.path
     }
-    loadCircle()
   }
 } else if (startCircle) {
   const target = parseCircleTarget(startCircle, startPath || '/index.html')
@@ -2265,5 +2498,4 @@ if (startUri) {
   if ($('upload-path')) {
     $('upload-path').value = target.path
   }
-  loadCircle()
 }

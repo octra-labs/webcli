@@ -1,29 +1,8 @@
-/*
-    This file is part of Octra Wallet (webcli).
-
-    Octra Wallet is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 2 of the License, or
-    (at your option) any later version.
-
-    Octra Wallet is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with Octra Wallet.  If not, see <http://www.gnu.org/licenses/>.
-
-    This program is released under the GPL with the additional exemption
-    that compiling, linking, and/or using OpenSSL is allowed.
-    You are free to remove this exemption from derived works.
-
-    Copyright 2025-2026 Octra Labs
-              2025-2026 David A.
-              2025-2026 Alex T.
-              2025-2026 Vadim S.
-              2025-2026 Julia L.
-*/
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+// NikBel0x ヽ(*・ω・)ﾉ
+// Julia L.
+// Review: Vadim S.
 
 var SWAP_ADDR = 'octBjnQBicZs6iMwcRxrdzLYAzyVTi91KEiA8RGkVjco2w6';
 var TOKEN_ADDR = 'oct6J37Wx7Rb1putvfwFrFbGUStE8hGzsb33fhLgUdpTx6d';
@@ -51,8 +30,12 @@ function esc(s) {
   return d.innerHTML;
 }
 
-async function api(method, path, body) {
+async function api(method, path, body, session) {
   var opts = { method: method, headers: {} };
+  if (session) {
+    opts.headers['X-Webcli-Wallet'] = session.address;
+    opts.headers['X-Webcli-Generation'] = String(session.generation);
+  }
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -73,29 +56,11 @@ function addCommas(s) {
 }
 
 function formatUnits(rawStr, decimals) {
-  var dec = parseInt(decimals) || 0;
-  var s = String(rawStr).replace(/[^0-9]/g, '');
-  if (s === '' || s === '0') return '0';
-  if (dec === 0) return s;
-  while (s.length <= dec) s = '0' + s;
-  var intPart = s.slice(0, s.length - dec);
-  var fracPart = s.slice(s.length - dec).replace(/0+$/, '');
-  if (!intPart) intPart = '0';
-  return fracPart ? intPart + '.' + fracPart : intPart;
+  return AmountUnits.format(rawStr, decimals);
 }
 
 function parseUnits(humanStr, decimals) {
-  var dec = parseInt(decimals) || 0;
-  var s = String(humanStr).replace(/,/g, '').trim();
-  if (!s || s === '0') return '0';
-  var parts = s.split('.');
-  var intPart = parts[0] || '0';
-  var fracPart = parts[1] || '';
-  if (fracPart.length > dec) fracPart = fracPart.slice(0, dec);
-  while (fracPart.length < dec) fracPart += '0';
-  var raw = intPart + fracPart;
-  raw = raw.replace(/^0+/, '') || '0';
-  return raw;
+  return AmountUnits.parse(humanStr, decimals);
 }
 
 function bigMul(a, b) {
@@ -169,8 +134,9 @@ async function checkWallet() {
 }
 
 async function doUnlock() {
-  var pin = $('pin-input').value.trim();
-  if (pin.length < 4) return;
+  const pin = $('pin-input').value;
+  if (!pin.length) return;
+  $('pin-input').value = '';
   try {
     await api('POST', '/wallet/unlock', { pin: pin });
     $('unlock-err').className = 'status-msg';
@@ -253,6 +219,10 @@ function setMax() {
 }
 
 function onInputChange() {
+  if (_swapPending) {
+    $('swap-btn').disabled = true;
+    return;
+  }
   var raw = $('swap-input').value.trim();
   var btn = $('swap-btn');
   if (!raw || raw === '0' || raw === '0.0') {
@@ -262,9 +232,17 @@ function onInputChange() {
     btn.disabled = true;
     return;
   }
-  var amountRaw;
+  let amountRaw;
+  try {
+    amountRaw = parseUnits(raw, _dir === 'buy' ? OCT_DECIMALS : TOKEN_DECIMALS);
+  } catch (_) {
+    $('output-val').textContent = '0';
+    $('impact-val').textContent = '-';
+    btn.textContent = 'invalid amount';
+    btn.disabled = true;
+    return;
+  }
   if (_dir === 'buy') {
-    amountRaw = parseUnits(raw, OCT_DECIMALS);
     if (bigGt(amountRaw, _balOctRaw)) {
       btn.textContent = 'insufficient OCT';
       btn.disabled = true;
@@ -278,7 +256,6 @@ function onInputChange() {
     btn.textContent = 'swap OCT -> ' + TOKEN_SYMBOL;
     btn.disabled = false;
   } else {
-    amountRaw = parseUnits(raw, TOKEN_DECIMALS);
     if (bigGt(amountRaw, _balTokenRaw)) {
       btn.textContent = 'insufficient ' + TOKEN_SYMBOL;
       btn.disabled = true;
@@ -359,38 +336,45 @@ async function waitReceipt(txHash) {
 }
 
 async function confirmSwap() {
+  if (_swapPending) return;
   $('confirm-modal').className = 'modal-bg';
   _swapPending = true;
   $('swap-btn').className = 'swap-btn loading';
   $('swap-btn').textContent = 'processing...';
+  $('swap-btn').disabled = true;
   clearStatus();
-  var raw = $('swap-input').value.trim();
+  const raw = $('swap-input').value.trim();
   try {
     if (_dir === 'buy') {
       await doBuySwap(raw);
     } else {
       await doSellSwap(raw);
     }
+    $('swap-input').value = '';
   } catch (e) {
     showStatus(e.message || 'swap failed', 'err');
   }
-  _swapPending = false;
-  $('swap-btn').className = 'swap-btn';
-  await loadAll();
-  $('swap-input').value = '';
-  onInputChange();
+  try {
+    await loadAll();
+  } finally {
+    _swapPending = false;
+    $('swap-btn').className = 'swap-btn';
+    onInputChange();
+  }
 }
 
 async function doBuySwap(humanAmount) {
   var amountRaw = parseUnits(humanAmount, OCT_DECIMALS);
   showProgress([{ text: 'swapping OCT -> ' + TOKEN_SYMBOL + '...', cls: 'active' }]);
-  var r = await api('POST', '/contract/call', {
+  const r = await pinCall(api, {
     address: SWAP_ADDR,
     method: 'swap_oct_to_token',
     params: [],
     amount: amountRaw,
     ou: SWAP_FEE_OU
-  });
+  }, 'swap ' + humanAmount + ' OCT for ' + TOKEN_SYMBOL + '\nfee: '
+    + AmountUnits.format(SWAP_FEE_OU, 6) + ' OCT\ntotal OCT debit: '
+    + AmountUnits.format((BigInt(amountRaw) + BigInt(SWAP_FEE_OU)).toString(), 6));
   if (!r.tx_hash) throw new Error('no tx_hash');
   showProgress([{ text: 'swapping OCT -> ' + TOKEN_SYMBOL + '... tx: ' + r.tx_hash.slice(0, 10), cls: 'active' }]);
   var receipt = await waitReceipt(r.tx_hash);
@@ -399,17 +383,23 @@ async function doBuySwap(humanAmount) {
 }
 
 async function doSellSwap(humanAmount) {
-  var amountRaw = parseUnits(humanAmount, TOKEN_DECIMALS);
+  const amountRaw = parseUnits(humanAmount, TOKEN_DECIMALS);
+  const amountValue = Number(amountRaw);
+  if (!Number.isSafeInteger(amountValue) || String(amountValue) !== amountRaw) {
+    throw new Error('swap amount exceeds exact JSON integer range');
+  }
   showProgress([
     { text: '1/2 granting ' + TOKEN_SYMBOL + ' access...', cls: 'active' },
     { text: '2/2 swap ' + TOKEN_SYMBOL + ' -> OCT', cls: '' }
   ]);
-  var g = await api('POST', '/contract/call', {
+  const g = await pinCall(api, {
     address: TOKEN_ADDR,
     method: 'grant',
-    params: [SWAP_ADDR, parseInt(amountRaw)],
+    params: [SWAP_ADDR, amountValue],
     ou: GRANT_FEE_OU
-  });
+  }, 'grant ' + humanAmount + ' ' + TOKEN_SYMBOL + ' to ' + SWAP_ADDR + '\nfee: '
+    + AmountUnits.format(GRANT_FEE_OU, 6) + ' OCT\ntotal fees for grant and swap: '
+    + AmountUnits.format((BigInt(GRANT_FEE_OU) + BigInt(SWAP_FEE_OU)).toString(), 6) + ' OCT');
   if (!g.tx_hash) throw new Error('grant: no tx_hash');
   var gr = await waitReceipt(g.tx_hash);
   if (!gr.success) throw new Error('grant failed: ' + (gr.error || 'reverted'));
@@ -417,12 +407,14 @@ async function doSellSwap(humanAmount) {
     { text: '1/2 grant approved', cls: 'done', link: txUrl(g.tx_hash), linkText: g.tx_hash.slice(0, 16) + '...' },
     { text: '2/2 swapping ' + TOKEN_SYMBOL + ' -> OCT...', cls: 'active' }
   ]);
-  var r = await api('POST', '/contract/call', {
+  const r = await pinCall(api, {
     address: SWAP_ADDR,
     method: 'swap_token_to_oct',
-    params: [parseInt(amountRaw)],
+    params: [amountValue],
     ou: SWAP_FEE_OU
-  });
+  }, 'grant confirmed; swap ' + humanAmount + ' ' + TOKEN_SYMBOL + ' for OCT\nfee: '
+    + AmountUnits.format(SWAP_FEE_OU, 6) + ' OCT\ntotal OCT debit for this transaction: '
+    + AmountUnits.format(SWAP_FEE_OU, 6));
   if (!r.tx_hash) throw new Error('swap: no tx_hash');
   showProgress([
     { text: '1/2 grant approved', cls: 'done', link: txUrl(g.tx_hash), linkText: g.tx_hash.slice(0, 16) + '...' },

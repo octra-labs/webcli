@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+// NikBel0x ヽ(*・ω・)ﾉ
+
 const BRIDGE_VAULT = 'oct5MrNfjiXFNRDLwsodn8Zm9hDKNGAYt3eQDCQ52bSpCHq';
 const WOCT_ADDR = '0x4647e1fE715c9e23959022C2416C71867F5a6E80';
 const ETH_BRIDGE = '0xE7eD69b852fd2a1406080B26A37e8E04e7dA4caE';
@@ -59,6 +63,7 @@ let _woctBalance = '0';
 let _ethProvider = null;
 let _ethRpcId = 0;
 let _capRequest = null;
+let _bridgePending = false;
 let _bridgeCaps = Object.freeze({ status: 'loading', mint: null, burn: null });
 
 const ethRpc = async (method, params) => {
@@ -179,12 +184,27 @@ const capError = raw => {
   return '';
 };
 
-async function wcli(method, path, body) {
-  var opts = { method: method, headers: {} };
-  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-  var res = await fetch('/api' + path, opts);
-  if (!res.ok) throw new Error('WebCLI error: ' + res.status);
-  return res.json();
+async function wcli(method, path, body, session) {
+  const opts = { method, headers: {} };
+  if (session) {
+    opts.headers['X-Webcli-Wallet'] = session.address;
+    opts.headers['X-Webcli-Generation'] = String(session.generation);
+  }
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch('/api' + path, opts);
+  const text = await res.text();
+  let result;
+  try { result = JSON.parse(text); } catch (error) {
+    throw new Error(res.ok ? 'invalid WebCLI response' : 'WebCLI HTTP ' + res.status);
+  }
+  if (!res.ok) {
+    const detail = result && (typeof result.error === 'string' ? result.error : result.message);
+    throw new Error(typeof detail === 'string' && detail ? detail : 'WebCLI HTTP ' + res.status);
+  }
+  return result;
 }
 
 async function connectOctra() {
@@ -408,6 +428,7 @@ function setDir(d) {
 
 function validateForm() {
   const btn = $('bridge-btn');
+  if (_bridgePending) { btn.disabled = true; return; }
   const amtStr = $('bridge-amount').value.trim();
   const recip = $('recipient').value.trim();
   const amount = parseAmount(amtStr);
@@ -441,6 +462,7 @@ function setMax() {
 }
 
 async function doBridge() {
+  if (_bridgePending) return;
   if (!await ensureCorrectChain()) return;
   await refreshBridgeCapacity();
   const amt = $('bridge-amount').value.trim();
@@ -477,17 +499,24 @@ async function doBridge() {
 function closeModal() { $('confirm-modal').classList.remove('show'); }
 
 async function confirmBridge() {
+  if (_bridgePending) return;
+  _bridgePending = true;
   closeModal();
-  await refreshBridgeCapacity();
-  const amount = parseAmount($('bridge-amount').value);
-  const capacityError = amount ? capError(amount.raw) : 'enter valid amount';
-  if (capacityError) {
-    showStatus('err', capacityError);
+  validateForm();
+  try {
+    await refreshBridgeCapacity();
+    const amount = parseAmount($('bridge-amount').value);
+    const capacityError = amount ? capError(amount.raw) : 'enter valid amount';
+    if (capacityError) {
+      showStatus('err', capacityError);
+      return;
+    }
+    if (_dir === 'o2e') await doForward();
+    else await doReverse();
+  } finally {
+    _bridgePending = false;
     validateForm();
-    return;
   }
-  if (_dir === 'o2e') await doForward();
-  else await doReverse();
 }
 
 var _pendingClaim = null;
@@ -502,24 +531,26 @@ async function doForward() {
   var rawAmt = parseU(amt, OCT_DECIMALS);
   var btn = $('bridge-btn');
   btn.disabled = true; btn.classList.add('loading'); btn.textContent = 'bridging...';
-  clearStatus();
-
-  _pendingClaim = null;
-  _activeHistoryId = null;
-  var oldClaimBtn = $('claim-btn');
-  if (oldClaimBtn) oldClaimBtn.remove();
-  showProgress([
-    { id: 'lock', text: 'locking ' + amt + ' OCT on octra...' },
-    { id: 'confirm', text: 'waiting for epoch confirmation...' },
-    { id: 'header', text: 'waiting for bridge header on ethereum...' },
-    { id: 'claim', text: 'claim wOCT (your MetaMask transaction)...' }
-  ]);
-  setStep('lock', 'active');
+  let started = false;
   try {
-    var r = await wcli('POST', '/contract/call', {
+    const r = await pinCall(wcli, {
       address: BRIDGE_VAULT, method: 'lock_to_eth', params: [recip], amount: rawAmt, ou: '1000'
-    });
-    if (!r.tx_hash) throw new Error('no tx_hash');
+    }, 'lock ' + amt + ' OCT for ' + recip + '\nfee: 0.001 OCT (1000 OU)'
+      + '\ntotal OCT debit: ' + fmtU(BigInt(rawAmt) + 1000n, OCT_DECIMALS) + ' OCT');
+    if (typeof r.tx_hash !== 'string' || !/^[0-9a-fA-F]{64}$/.test(r.tx_hash))
+      throw new Error('invalid transaction hash');
+    clearStatus();
+    _pendingClaim = null;
+    _activeHistoryId = null;
+    const oldClaimBtn = $('claim-btn');
+    if (oldClaimBtn) oldClaimBtn.remove();
+    showProgress([
+      { id: 'lock', text: 'locking ' + amt + ' OCT on octra...' },
+      { id: 'confirm', text: 'waiting for epoch confirmation...' },
+      { id: 'header', text: 'waiting for bridge header on ethereum...' },
+      { id: 'claim', text: 'claim wOCT (your MetaMask transaction)...' }
+    ]);
+    started = true;
     setStep('lock', 'done'); setStep('confirm', 'active');
     showStatus('info', 'locked! <a href="https://octrascan.io/tx.html?hash=' + r.tx_hash + '" target="_blank" style="color:#3B567F">' + r.tx_hash.substring(0, 16) + '...</a>');
 
@@ -584,7 +615,10 @@ async function doForward() {
     if (_activeHistoryId) historyUpdate(_activeHistoryId, {status:'claimable', claim_data:claimData});
     showClaimButton(amt);
     showStatus('info', 'bridge header verified on ethereum. click button to claim your wOCT:');
-  } catch(e) { showStatus('err', e.message); setCurrentStepFail(); }
+  } catch(e) {
+    showStatus('err', esc(e.message));
+    if (started) setCurrentStepFail();
+  }
   btn.classList.remove('loading'); validateForm();
 }
 
@@ -981,8 +1015,8 @@ async function historyClaim(id) {
   try {
     var claimData = await buildClaimCalldata(entry.epoch, _ethAddr, entry.amount_raw, null);
     if (!claimData) {
-      historyUpdate(id, {status:'claimable', last_error:'canonical claim data unavailable'});
-      showStatus('err', 'canonical claim data unavailable');
+      historyUpdate(id, {status:'claimable', last_error:'verified claim data unavailable'});
+      showStatus('err', 'verified claim data unavailable');
       return;
     }
     historyUpdate(id, {claim_data:claimData});
@@ -1105,9 +1139,9 @@ async function recoveryFetch(silent) {
       return 0;
     }
     var added = 0;
-    var candidates = bucket.slice(0, 100);
-    for (var i = 0; i < candidates.length; i++) {
-      var m = candidates[i];
+    const entries = bucket.slice(0, 100);
+    for (let i = 0; i < entries.length; i++) {
+      const m = entries[i];
       if (!m || typeof m !== 'object') continue;
       var mid = typeof m.message_id === 'string' && /^0x[0-9a-fA-F]{64}$/.test(m.message_id) ? m.message_id : '';
       var ep = typeof m.epoch === 'number' ? m.epoch : parseInt(m.epoch, 10);
@@ -1304,7 +1338,8 @@ async function doReverse() {
     setStep('burn', 'done'); setStep('unlock', 'active');
     showStatus('info', 'wOCT burned. waiting for OCT unlock on octra... <a href="' + explorerBase2 + '/tx/' + burnTx + '" target="_blank" style="color:#3B567F">view tx</a>');
     var ownRecipient = recip === _octraAddr;
-    var expectedOct = ownRecipient ? BigInt(_octBalance) + BigInt(rawAmt) : 0n;
+    if (ownRecipient && !/^[0-9]{1,32}$/.test(String(_octBalance))) throw new Error('invalid OCT balance response');
+    const expectedOct = ownRecipient ? BigInt(_octBalance) + BigInt(rawAmt) : 0n;
     var unlocked = ownRecipient
       ? await pollUntilAtLeast(function() { return getOctBalance(); }, expectedOct, 180)
       : false;
@@ -1317,7 +1352,7 @@ async function doReverse() {
       showStatus('info', 'wOCT burned. OCT unlock may take a few minutes.');
     }
   } catch(e) {
-    showStatus('err', e.message);
+    showStatus('err', esc(e.message));
     setCurrentStepFail();
     if (burnHistoryId) historyUpdate(burnHistoryId, {status:'failed', last_error:(e.message || 'unknown')});
   }

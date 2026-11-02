@@ -1,4 +1,7 @@
 @echo off
+rem SPDX-License-Identifier: BSD-3-Clause
+rem Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 chcp 65001 >nul 2>&1
 setlocal EnableDelayedExpansion
 
@@ -84,12 +87,21 @@ if not exist "%WALLET_DIR%octra_wallet.exe" (
     exit /b 1
 )
 
+if not exist "%WALLET_DIR%webcli.exe" (
+    echo.
+    echo build failed. check errors above.
+    pause
+    exit /b 1
+)
+
 echo.
 echo [3/3] done
 echo.
 echo start the wallet:
 echo   octra_wallet.exe
 echo.
-echo then open http://127.0.0.1:8420 in your browser
+echo program_cli = webcli.exe --help
+echo.
+echo the wallet opens your browser; otherwise use its printed Open wallet link
 echo.
 pause

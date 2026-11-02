@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <cstdint>
 #include <vector>
 #include <array>
+#include <algorithm>
 
 #include "field.hpp"
 #include "bitvec.hpp"
@@ -131,7 +135,7 @@ struct Edge {
     uint16_t idx;
     uint8_t ch;
     std::vector<Fp> w;
-    BitVec  s;
+    BitVec s;
 };
 
 struct Cipher {
@@ -182,6 +186,41 @@ inline bool is_valid_cipher_shape(const Cipher& cipher) {
             return false;
     }
     return true;
+}
+
+inline bool cipher_mul_depth(const Cipher& cipher, size_t& depth) {
+    if (!is_valid_cipher_shape(cipher))
+        return false;
+    std::vector<size_t> layers(cipher.L.size(), 0);
+    depth = 0;
+    for (size_t layer_id = 0; layer_id < cipher.L.size(); ++layer_id) {
+        const auto& layer = cipher.L[layer_id];
+        if (layer.rule == RRule::PROD) {
+            layers[layer_id] = std::max(layers[layer.pa], layers[layer.pb]) + 1;
+            depth = std::max(depth, layers[layer_id]);
+        }
+    }
+    return true;
+}
+
+inline bool pubkey_powers_ok(const PubKey& pk) {
+    const auto& powers = pk.powg_B;
+    if (pk.prm.B < 3 || powers.size() != static_cast<size_t>(pk.prm.B))
+        return false;
+    if (powers[0].lo != 1 || powers[0].hi != 0)
+        return false;
+    const auto ratio = powers[1];
+    if ((ratio.lo <= 1 && ratio.hi == 0) || ratio.hi > MASK63 ||
+        (ratio.hi == MASK63 && ratio.lo == UINT64_MAX))
+        return false;
+    auto expected = ratio;
+    for (size_t i = 2; i < powers.size(); ++i) {
+        expected = fp_mul(expected, ratio);
+        if (powers[i].lo != expected.lo || powers[i].hi != expected.hi)
+            return false;
+    }
+    const auto closing = fp_mul(expected, ratio);
+    return closing.lo == 1 && closing.hi == 0;
 }
 
 inline bool is_valid_pubkey_shape(const PubKey& pk) {
@@ -253,7 +292,7 @@ inline Fp rand_fp_nonzero() {
     for (;;) {
         uint64_t lo = csprng_u64();
         uint64_t hi = csprng_u64() & MASK63;
-        Fp x  = fp_from_words(lo, hi);
+        Fp x = fp_from_words(lo, hi);
 
         if (x.lo || x.hi) {
             return x;

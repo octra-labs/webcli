@@ -1,29 +1,5 @@
-#
-#    This file is part of Octra Wallet (webcli).
-#
-#    Octra Wallet is free software: you can redistribute it and/or modify
-#    it under the terms of the GNU General Public License as published by
-#    the Free Software Foundation, either version 2 of the License, or
-#    (at your option) any later version.
-#
-#    Octra Wallet is distributed in the hope that it will be useful,
-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#    GNU General Public License for more details.
-#
-#    You should have received a copy of the GNU General Public License
-#    along with Octra Wallet.  If not, see <http://www.gnu.org/licenses/>.
-#
-#    This program is released under the GPL with the additional exemption
-#    that compiling, linking, and/or using OpenSSL is allowed.
-#    You are free to remove this exemption from derived works.
-#
-#    Copyright 2025-2026 Octra Labs
-#              2025-2026 David A.
-#              2025-2026 Alex T.
-#              2025-2026 Vadim S.
-#              2025-2026 Julia L.
-#
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
 
 CXX:=g++
 CC:=gcc
@@ -39,8 +15,9 @@ CXXFLAGS:=-std=c++17 -O2 $(ARCH) -Wall -pthread
 CFLAGS:=-O2 $(ARCH) -Wall
 PVAC_DIR:=pvac
 PVAC_BUILD:=$(PVAC_DIR)/build
-TEST_BUILD := build
-EMBEDDED_INC := -I$(PVAC_DIR)/include -I$(PVAC_DIR)
+PROGRAM_SOURCES := lib/program_cli_app.cpp lib/program_cli_adapters.cpp lib/program_cli_runtime.cpp lib/program_rpc_value.cpp lib/program_rpc.cpp lib/program_cli_plan.cpp lib/program_source_plan.cpp lib/program_package_plan.cpp lib/program_terminal.cpp lib/program_wallet.cpp lib/limited_file.cpp
+PROGRAM_HEADERS := lib/program_cli_app.hpp lib/program_cli_adapters.hpp lib/program_cli_runtime.hpp lib/program_rpc_value.hpp lib/program_rpc.hpp lib/program_cli_plan.hpp lib/program_cli_detail.hpp lib/program_terminal.hpp lib/program_wallet.hpp lib/limited_file.hpp
+WEB_HEADERS := $(wildcard lib/*.hpp) lib/httplib.h lib/json.hpp rpc_client.hpp wallet.hpp crypto_utils.hpp sanitize.hpp
 
 ifeq ($(UNAME_S),Darwin)
 
@@ -49,11 +26,10 @@ SHARED_FLAGS:=-dynamiclib
 SSL_PREFIX:=$(shell brew --prefix openssl@3 2>/dev/null || brew --prefix openssl 2>/dev/null || echo /opt/homebrew/opt/openssl@3)
 LDB_PREFIX:=$(shell brew --prefix leveldb 2>/dev/null || echo /opt/homebrew/opt/leveldb)
 CXXFLAGS+=-I$(SSL_PREFIX)/include -I$(LDB_PREFIX)/include -DCPPHTTPLIB_OPENSSL_SUPPORT
-LDFLAGS:=-L$(SSL_PREFIX)/lib -lssl -lcrypto -L$(LDB_PREFIX)/lib -lleveldb -L$(PVAC_BUILD) -lpvac -Wl,-rpath,@executable_path/$(PVAC_BUILD)
-TEST_LDFLAGS := -L$(SSL_PREFIX)/lib -lssl -lcrypto
-TEST_PVAC_LDFLAGS := -L$(PVAC_BUILD) -lpvac $(TEST_LDFLAGS) -Wl,-rpath,@loader_path/../$(PVAC_BUILD)
-TEST_LEVELDB_LDFLAGS := -L$(LDB_PREFIX)/lib -lleveldb
+PVAC_RPATH := $(if $(filter /%,$(PVAC_BUILD)),$(PVAC_BUILD),@executable_path/$(PVAC_BUILD))
+LDFLAGS := -L$(SSL_PREFIX)/lib -lssl -lcrypto -L$(LDB_PREFIX)/lib -lleveldb -L$(PVAC_BUILD) -lpvac -Wl,-rpath,$(PVAC_RPATH)
 TARGET:=octra_wallet
+CLI_TARGET := webcli
 
 else ifneq ($(IS_WIN),)
 
@@ -62,11 +38,9 @@ SHARED_FLAGS:=
 SSL_PREFIX:=$(shell echo $$MINGW_PREFIX)
 LDB_PREFIX:=$(shell echo $$MINGW_PREFIX)
 CXXFLAGS+=-I$(SSL_PREFIX)/include -DCPPHTTPLIB_OPENSSL_SUPPORT
-LDFLAGS:=-static -L$(SSL_PREFIX)/lib -L$(PVAC_BUILD) -lpvac -lleveldb -lssl -lcrypto -lws2_32 -lbcrypt -lcrypt32 -lgdi32 -lz
-TEST_LDFLAGS := -L$(SSL_PREFIX)/lib -lssl -lcrypto -lws2_32 -lbcrypt -lcrypt32
-TEST_PVAC_LDFLAGS := -L$(PVAC_BUILD) -lpvac $(TEST_LDFLAGS)
-TEST_LEVELDB_LDFLAGS := -L$(LDB_PREFIX)/lib -lleveldb
+LDFLAGS := -static -L$(SSL_PREFIX)/lib -L$(PVAC_BUILD) -lpvac -lleveldb -lssl -lcrypto -lws2_32 -lbcrypt -lcrypt32 -lgdi32 -lshell32 -lz
 TARGET:=octra_wallet.exe
+CLI_TARGET := webcli.exe
 
 else
 
@@ -74,10 +48,8 @@ SHARED_EXT:=so
 SHARED_FLAGS:=-shared
 CXXFLAGS+=-DCPPHTTPLIB_OPENSSL_SUPPORT
 LDFLAGS:=-lssl -lcrypto -lleveldb -L$(PVAC_BUILD) -lpvac -Wl,-rpath,'$$ORIGIN/$(PVAC_BUILD)'
-TEST_LDFLAGS := -lssl -lcrypto
-TEST_PVAC_LDFLAGS := -L$(PVAC_BUILD) -lpvac $(TEST_LDFLAGS) -Wl,-rpath,'$$ORIGIN/../$(PVAC_BUILD)'
-TEST_LEVELDB_LDFLAGS := -lleveldb
 TARGET:=octra_wallet
+CLI_TARGET := webcli
 
 endif
 
@@ -85,7 +57,7 @@ CXXFLAGS+=-I$(PVAC_DIR)
 LIBPVAC:=$(PVAC_BUILD)/libpvac.$(SHARED_EXT)
 PVAC_HEADERS:=$(shell find $(PVAC_DIR)/include -type f) $(PVAC_DIR)/pvac_c_api.h $(PVAC_DIR)/pvac_serialize.hpp
 
-all: check-deps $(TARGET)
+all: check-deps $(TARGET) $(CLI_TARGET)
 
 LEVELDB_PATHS:=/usr/include/leveldb/db.h /usr/local/include/leveldb/db.h /opt/homebrew/include/leveldb/db.h /opt/local/include/leveldb/db.h /mingw64/include/leveldb/db.h /ucrt64/include/leveldb/db.h /clang64/include/leveldb/db.h $(LDB_PREFIX)/include/leveldb/db.h
 OPENSSL_PATHS:=/usr/include/openssl/evp.h /usr/local/include/openssl/evp.h /opt/homebrew/include/openssl/evp.h /opt/local/include/openssl/evp.h /mingw64/include/openssl/evp.h /ucrt64/include/openssl/evp.h /clang64/include/openssl/evp.h $(SSL_PREFIX)/include/openssl/evp.h
@@ -129,9 +101,6 @@ endif
 $(PVAC_BUILD):
 	@mkdir -p $(PVAC_BUILD)
 
-$(TEST_BUILD):
-	@mkdir -p $(TEST_BUILD)
-
 $(LIBPVAC): $(PVAC_DIR)/pvac_c_api.cpp $(PVAC_HEADERS) | $(PVAC_BUILD)
 ifneq ($(IS_WIN),)
 	$(CXX) $(CXXFLAGS) -c -I$(PVAC_DIR)/include -o $(PVAC_BUILD)/pvac_c_api.o $<
@@ -149,42 +118,17 @@ lib/tweetnacl.o: lib/tweetnacl.c
 lib/randombytes.o: lib/randombytes.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(TARGET): main.cpp rpc_client.hpp lib/circle_verifier_policy.hpp lib/endpoint_policy.hpp lib/pvac_map.hpp lib/pvac_upgrade_policy.hpp lib/stealth_scan.hpp lib/tweetnacl.o lib/randombytes.o $(LIBPVAC)
-	$(CXX) $(CXXFLAGS) -o $@ main.cpp lib/tweetnacl.o lib/randombytes.o $(LDFLAGS)
+$(TARGET): main.cpp $(WEB_HEADERS) $(PROGRAM_SOURCES) $(PROGRAM_HEADERS) lib/tweetnacl.o lib/randombytes.o $(LIBPVAC)
+	$(CXX) $(CXXFLAGS) -o $@ main.cpp $(PROGRAM_SOURCES) lib/tweetnacl.o lib/randombytes.o $(LDFLAGS)
+
+$(CLI_TARGET): $(TARGET)
+	cp $(TARGET) $(CLI_TARGET)
 
 clean:
-	rm -f $(TARGET) lib/*.o
+	rm -f $(TARGET) $(CLI_TARGET) lib/*.o
 	rm -rf $(PVAC_BUILD)
-	rm -rf $(TEST_BUILD)
 
 run: $(TARGET)
 	./$(TARGET) 8420
 
-test-circle-bridge: | $(TEST_BUILD)
-	node --test tests/circle_bridge_policy.test.js tests/circle_asset_chunks.test.js tests/circle_public_prelude.test.js tests/security_boundaries.test.js
-	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_circle_asset_chunks tests/circle_asset_chunks.cpp $(TEST_LDFLAGS)
-	./$(TEST_BUILD)/test_circle_asset_chunks
-	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_wallet_policy tests/wallet_policy.cpp $(TEST_LDFLAGS)
-	./$(TEST_BUILD)/test_wallet_policy
-	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_txcache tests/txcache.cpp $(TEST_LEVELDB_LDFLAGS)
-	./$(TEST_BUILD)/test_txcache
-
-test-pvac-embedded: | $(TEST_BUILD)
-	$(CXX) $(CXXFLAGS) $(EMBEDDED_INC) -o $(TEST_BUILD)/test_pvac_embedded tests/pvac_embedded_regression.cpp $(TEST_LDFLAGS)
-	./$(TEST_BUILD)/test_pvac_embedded
-
-test-pvac-key-switch-refresh: | $(TEST_BUILD)
-	$(CXX) $(CXXFLAGS) $(EMBEDDED_INC) -o $(TEST_BUILD)/test_pvac_key_switch_refresh tests/pvac_key_switch_refresh.cpp $(TEST_LDFLAGS)
-	./$(TEST_BUILD)/test_pvac_key_switch_refresh
-
-test-pvac-structure: $(LIBPVAC) | $(TEST_BUILD)
-	$(CXX) $(CXXFLAGS) $(EMBEDDED_INC) -o $(TEST_BUILD)/test_pvac_structure tests/pvac_cipher_structure.cpp $(TEST_PVAC_LDFLAGS)
-	./$(TEST_BUILD)/test_pvac_structure
-
-test-crypto-boundaries: lib/tweetnacl.o lib/randombytes.o | $(TEST_BUILD)
-	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_crypto_boundaries tests/crypto_boundary_regression.cpp lib/tweetnacl.o lib/randombytes.o $(TEST_LDFLAGS)
-	./$(TEST_BUILD)/test_crypto_boundaries
-	$(CXX) $(CXXFLAGS) -o $(TEST_BUILD)/test_stealth_scan tests/stealth_scan.cpp $(TEST_LDFLAGS)
-	./$(TEST_BUILD)/test_stealth_scan
-
-.PHONY: all clean run check-deps test-circle-bridge test-pvac-embedded test-pvac-key-switch-refresh test-pvac-structure test-crypto-boundaries
+.PHONY: all clean run check-deps

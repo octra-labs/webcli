@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <cstdint>
@@ -17,6 +20,7 @@
 #include "../core/types.hpp"
 #include "../core/hash.hpp"
 #include "../crypto/lpn.hpp"
+#include "../crypto/lpn_v2.hpp"
 #include "../crypto/matrix.hpp"
 #include "../crypto/circuit_prf_profile.hpp"
 #include "../core/ct_safe.hpp"
@@ -166,6 +170,8 @@ struct Op {
     }
 
     static std::vector<Fp> mul(const std::vector<Fp>& a, const std::vector<Fp>& b) {
+        if (a.size() != b.size())
+            throw std::runtime_error("pvac: field mul: vector size mismatch");
         std::vector<Fp> r(a.size());
         for (size_t i = 0; i < a.size(); ++i) r[i] = fp_mul(a[i], b[i]);
         return r;
@@ -329,7 +335,7 @@ struct Gen {
         s.nonce.hi ^= dd << 32;
         s.ztag ^= dd << 48;
 
-        return prf_R_noise(pk, sk, s);
+        return lpn_v2::noise(pk, sk, s);
     }
 
     Fp operator()(uint32_t i, uint8_t d) const {
@@ -611,29 +617,13 @@ inline alg::Carrier<Edge> merge(alg::Carrier<Edge> edges, const PubKey& pk) {
     if (L > std::numeric_limits<size_t>::max() / static_cast<size_t>(B))
         throw std::runtime_error("pvac: merge edge domain rejected");
 
-    struct Slot {
-        bool active = false;
-        std::vector<Fp> w;
-        BitVec s;
+    const auto position = [](const Edge& edge) {
+        return std::make_tuple(edge.layer_id, edge.idx, edge.ch == SGN_M);
     };
-
-    std::vector<Slot> acc_p(L * B);
-    std::vector<Slot> acc_m(L * B);
-
-    for (auto& e : edges) {
-        size_t idx = static_cast<size_t>(e.layer_id) * B + e.idx;
-        auto& acc = (e.ch == SGN_P) ? acc_p : acc_m;
-
-        if (!acc[idx].active) {
-            acc[idx].active = true;
-            acc[idx].w = std::move(e.w);
-            acc[idx].s = std::move(e.s);
-        } else {
-            for (size_t j = 0; j < S; ++j)
-                acc[idx].w[j] = fp_add(acc[idx].w[j], e.w[j]);
-            acc[idx].s.xor_with(e.s);
-        }
-    }
+    std::stable_sort(edges.data.begin(), edges.data.end(),
+        [&](const Edge& left, const Edge& right) {
+            return position(left) < position(right);
+        });
 
     auto nz = [](const std::vector<Fp>& w, const BitVec& s) {
         for (const auto& x : w)
@@ -644,29 +634,17 @@ inline alg::Carrier<Edge> merge(alg::Carrier<Edge> edges, const PubKey& pk) {
     std::vector<Edge> out;
     out.reserve(edges.len());
 
-    for (size_t lid = 0; lid < L; ++lid) {
-        for (int k = 0; k < B; ++k) {
-            size_t idx = lid * B + k;
-
-            if (acc_p[idx].active && nz(acc_p[idx].w, acc_p[idx].s)) {
-                out.push_back({
-                    static_cast<uint32_t>(lid),
-                    static_cast<uint16_t>(k),
-                    SGN_P,
-                    std::move(acc_p[idx].w),
-                    std::move(acc_p[idx].s)
-                });
-            }
-            if (acc_m[idx].active && nz(acc_m[idx].w, acc_m[idx].s)) {
-                out.push_back({
-                    static_cast<uint32_t>(lid),
-                    static_cast<uint16_t>(k),
-                    SGN_M,
-                    std::move(acc_m[idx].w),
-                    std::move(acc_m[idx].s)
-                });
-            }
+    for (size_t first = 0; first < edges.len();) {
+        auto& sum = edges[first];
+        size_t next = first + 1;
+        while (next < edges.len() && position(sum) == position(edges[next])) {
+            for (size_t j = 0; j < S; ++j)
+                sum.w[j] = fp_add(sum.w[j], edges[next].w[j]);
+            sum.s.xor_with(edges[next].s);
+            ++next;
         }
+        if (nz(sum.w, sum.s)) out.push_back(std::move(sum));
+        first = next;
     }
 
     return alg::Carrier<Edge>{ std::move(out) };

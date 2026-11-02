@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 #include <string>
 
@@ -262,4 +265,4 @@ static const std::string wordlist[2048] = {
     "yellow", "you", "young", "youth", "zebra", "zero", "zone", "zoo"
 };
 
-} // namespace bip39
+}

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 const CircleAssetChunks = (() => {
   const format = 'octra.circle.asset.chunks.v1'
   const manifestType = 'application/vnd.octra.circle.chunks+json'

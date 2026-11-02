@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <cstdint>
@@ -19,6 +22,12 @@ struct Fp {
     uint64_t lo;
     uint64_t hi;
 };
+
+inline bool fp_is_reduced(const Fp& value) {
+    return
+        (value.hi & ~MASK63) == 0 &&
+        (value.lo != UINT64_MAX || value.hi != MASK63);
+}
 
 inline bool fp_to_i64(const Fp& value, int64_t& out) {
     u128 p = (u128(1) << 127) - 1;

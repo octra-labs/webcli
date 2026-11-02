@@ -1,29 +1,5 @@
-/*
-    This file is part of Octra Wallet (webcli).
-
-    Octra Wallet is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 2 of the License, or
-    (at your option) any later version.
-
-    Octra Wallet is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with Octra Wallet.  If not, see <http://www.gnu.org/licenses/>.
-
-    This program is released under the GPL with the additional exemption
-    that compiling, linking, and/or using OpenSSL is allowed.
-    You are free to remove this exemption from derived works.
-
-    Copyright 2025-2026 Octra Labs
-              2025-2026 David A.
-              2025-2026 Alex T.
-              2025-2026 Vadim S.
-              2025-2026 Julia L.
-*/
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
 
 #pragma once
 #include <string>
@@ -38,6 +14,17 @@ class TxCache {
     leveldb::DB* db_ = nullptr;
     std::string path_;
     mutable std::shared_mutex mtx_;
+
+    static nlohmann::json public_row(const nlohmann::json& tx) {
+        const auto op = tx.value("op_type", "");
+        if (op != "stealth" && op != "claim") return tx;
+        auto result = nlohmann::json::object();
+        for (const char* key : {"hash", "from", "to_", "amount_raw", "op_type",
+            "status", "timestamp", "epoch", "block_height"}) {
+            if (tx.contains(key)) result[key] = tx[key];
+        }
+        return result;
+    }
 
     bool open_u(const std::string& path) {
         path_ = path;
@@ -133,7 +120,7 @@ public:
         leveldb::WriteBatch batch;
         if (!previous_key.empty() && previous_key != index_key)
             batch.Delete(previous_key);
-        batch.Put("tx:" + hash, tx.dump());
+        batch.Put("tx:" + hash, public_row(tx).dump());
         batch.Put(index_key, hash);
         batch.Put(owner_key, index_key);
         db_->Write(leveldb::WriteOptions(), &batch);
@@ -146,7 +133,7 @@ public:
         for (auto& tx : txs) {
             std::string hash = tx.value("hash", "");
             if (hash.empty() || addr.empty()) continue;
-            batch.Put("tx:" + hash, tx.dump());
+            batch.Put("tx:" + hash, public_row(tx).dump());
             double ts = tx.value("timestamp", 0.0);
             char idx[192];
             snprintf(idx, sizeof(idx), "idx:%s:%020.6f:%s", addr.c_str(), 9999999999.0 - ts, hash.c_str());
@@ -175,7 +162,7 @@ public:
             auto hash = it->value().ToString();
             std::string val;
             if (db_->Get(leveldb::ReadOptions(), "tx:" + hash, &val).ok()) {
-                try { result.push_back(nlohmann::json::parse(val)); } catch (...) {}
+                try { result.push_back(public_row(nlohmann::json::parse(val))); } catch (...) {}
             }
             pos++;
             if (limit > 0 && (pos - offset) >= limit) break;

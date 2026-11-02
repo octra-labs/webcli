@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <cstdint>
@@ -42,7 +45,9 @@ class Transcript {
     }
 
 public:
-    explicit Transcript(const char* domain_separator) {
+    const ScalarOps ops;
+
+    explicit Transcript(const char* domain_separator, ScalarRule rule = ScalarRule::Prior) : ops(rule) {
 
         Sha256 h;
         h.init();
@@ -89,7 +94,7 @@ public:
             for (int j = 0; j < 8; j++)
                 w[i] |= (uint64_t)state_[i * 8 + j] << (j * 8);
         }
-        Scalar result = sc_reduce512(w);
+        Scalar result = ops.reduce(w);
 
         mix("post_challenge", nullptr, 0, 'A');
         return result;

@@ -1,29 +1,5 @@
-/*
-    This file is part of Octra Wallet (webcli).
-
-    Octra Wallet is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 2 of the License, or
-    (at your option) any later version.
-
-    Octra Wallet is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with Octra Wallet.  If not, see <http://www.gnu.org/licenses/>.
-
-    This program is released under the GPL with the additional exemption
-    that compiling, linking, and/or using OpenSSL is allowed.
-    You are free to remove this exemption from derived works.
-
-    Copyright 2025-2026 Octra Labs
-              2025-2026 David A.
-              2025-2026 Alex T.
-              2025-2026 Vadim S.
-              2025-2026 Julia L.
-*/
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
 
 #pragma once
 #include <string>
@@ -43,6 +19,8 @@
 #include <set>
 #include "crypto_utils.hpp"
 #include "lib/json.hpp"
+#include "lib/wallet_file.hpp"
+#include "lib/pin_guard.hpp"
 
 extern "C" {
 #include "lib/tweetnacl.h"
@@ -60,8 +38,8 @@ struct Wallet {
     std::string rpc_url;
     std::string explorer_url = "https://octrascan.io";
     std::string bridge_signer_url;
-    uint8_t sk[64];
-    uint8_t pk[32];
+    uint8_t sk[64]{};
+    uint8_t pk[32]{};
     std::string pub_b64;
     std::string master_seed_b64;
     std::string mnemonic;
@@ -70,11 +48,56 @@ struct Wallet {
 
     bool has_master_seed() const { return !master_seed_b64.empty(); }
 
-    ~Wallet() {
+    void clear_secrets() {
         secure_zero(sk, 64);
         secure_zero(pk, 32);
+        for (auto* text : {&priv_b64, &master_seed_b64, &mnemonic}) {
+            if (!text->empty()) secure_zero(text->data(), text->size());
+            text->clear();
+        }
+    }
+
+    ~Wallet() { clear_secrets(); }
+};
+
+template<class Value> struct WalletWipe {
+    Value& value;
+    ~WalletWipe() {
+        if (!value.empty()) secure_zero(value.data(), value.size());
     }
 };
+
+inline bool wallet_pin_matches(const std::string& expected, const std::string& supplied) {
+    return !expected.empty() && expected.size() == supplied.size()
+        && CRYPTO_memcmp(expected.data(), supplied.data(), expected.size()) == 0;
+}
+
+inline void wallet_key(Wallet& wallet, const std::string& text, bool check_address) {
+    std::string clean;
+    WalletWipe<std::string> wipe_clean{clean};
+    for (const auto ch : text) {
+        if (ch != '\n' && ch != '\r' && ch != ' ' && ch != '\t') clean += ch;
+    }
+    if (clean.size() != 44 && clean.size() != 88)
+        throw std::runtime_error("invalid private key encoding");
+    auto raw = base64_decode(clean);
+    WalletWipe<std::vector<uint8_t>> wipe_raw{raw};
+    if (raw.size() != 32 && raw.size() != 64)
+        throw std::runtime_error("invalid private key length");
+    auto encoded = base64_encode(raw.data(), raw.size());
+    WalletWipe<std::string> wipe_encoded{encoded};
+    if (encoded != clean) throw std::runtime_error("invalid private key encoding");
+    keypair_from_seed(raw.data(), wallet.sk, wallet.pk);
+    if (raw.size() == 64 && CRYPTO_memcmp(raw.data() + 32, wallet.pk, 32) != 0)
+        throw std::runtime_error("private key public suffix mismatch");
+    const auto address = derive_address_from_pubkey(wallet.pk);
+    if (check_address && wallet.addr != address)
+        throw std::runtime_error("wallet address mismatch");
+    wallet.addr = address;
+    if (!wallet.priv_b64.empty()) secure_zero(wallet.priv_b64.data(), wallet.priv_b64.size());
+    wallet.priv_b64 = base64_encode(wallet.sk, 32);
+    wallet.pub_b64 = base64_encode(wallet.pk, 32);
+}
 
 struct ManifestEntry {
     std::string name;
@@ -143,8 +166,16 @@ inline void save_manifest(const std::vector<ManifestEntry>& entries) {
         if (!e.master_seed_hash.empty()) j["seed_hash"] = e.master_seed_hash;
         arr.push_back(j);
     }
-    std::ofstream f(MANIFEST_FILE);
-    if (f) f << arr.dump(2);
+    const auto text = arr.dump(2);
+    write_wallet_file(MANIFEST_FILE, reinterpret_cast<const uint8_t*>(text.data()),
+        text.size(), WalletWrite::replace);
+}
+
+inline std::string new_wallet_path(const std::string& address) {
+    for (const auto& entry : load_manifest()) {
+        if (entry.addr == address) throw std::runtime_error("wallet already exists; explicit locked recovery required");
+    }
+    return wallet_path_for(address);
 }
 
 inline void manifest_upsert(const ManifestEntry& entry) {
@@ -216,8 +247,7 @@ inline bool has_legacy_wallet() {
 }
 
 inline void save_wallet_encrypted(const std::string& path,
-                                   const Wallet& w,
-                                   const std::string& pin) {
+    const Wallet& w, const std::string& pin, WalletWrite mode = WalletWrite::create) {
     ensure_data_dir();
     nlohmann::json j;
     j["priv"] = w.priv_b64;
@@ -233,16 +263,11 @@ inline void save_wallet_encrypted(const std::string& path,
             j["mnemonic"] = w.mnemonic;
     }
     std::string plaintext = j.dump();
+    WalletWipe<std::string> wipe_plaintext{plaintext};
     auto enc = wallet_encrypt(
         reinterpret_cast<const uint8_t*>(plaintext.data()),
         plaintext.size(), pin);
-    secure_zero(&plaintext[0], plaintext.size());
-    {
-        std::ofstream f(path, std::ios::binary);
-        if (!f) throw std::runtime_error("cannot write wallet file");
-        f.write(reinterpret_cast<const char*>(enc.data()), enc.size());
-    }
-    chmod(path.c_str(), 0600);
+    write_wallet_file(path, enc.data(), enc.size(), mode);
 }
 
 inline Wallet load_wallet_encrypted(const std::string& path,
@@ -252,13 +277,16 @@ inline Wallet load_wallet_encrypted(const std::string& path,
     std::vector<uint8_t> data(
         (std::istreambuf_iterator<char>(f)),
         std::istreambuf_iterator<char>());
+    if (f.bad()) throw std::runtime_error("cannot read wallet file");
     f.close();
+    if (data.size() < 60) throw std::runtime_error("invalid wallet file");
 
     auto plain = wallet_decrypt(data.data(), data.size(), pin);
-    if (plain.empty()) throw std::runtime_error("wrong pin");
+    if (plain.empty()) throw PinRefused();
 
     std::string json_str(plain.begin(), plain.end());
     secure_zero(plain.data(), plain.size());
+    WalletWipe<std::string> wipe_json{json_str};
 
     nlohmann::json j = nlohmann::json::parse(json_str);
     secure_zero(&json_str[0], json_str.size());
@@ -266,7 +294,7 @@ inline Wallet load_wallet_encrypted(const std::string& path,
     Wallet w;
     w.priv_b64 = j.at("priv").get<std::string>();
     w.addr = j.at("addr").get<std::string>();
-    w.rpc_url = j.value("rpc", "https://octra.network/rpc");
+    w.rpc_url = j.value("rpc", "https://devnet.octrascan.io/rpc");
     if (w.rpc_url == "http://46.101.86.250:8080" || w.rpc_url == "http://46.101.86.250:8080/")
         w.rpc_url = "https://octra.network/rpc";
     if (w.rpc_url == "http://165.227.225.79:8080" || w.rpc_url == "http://165.227.225.79:8080/")
@@ -278,16 +306,7 @@ inline Wallet load_wallet_encrypted(const std::string& path,
     w.hd_index = j.value("hd_index", 0);
     w.hd_version = j.value("hd_version", 1);
 
-    auto raw = base64_decode(w.priv_b64);
-    if (raw.size() >= 64) {
-        memcpy(w.sk, raw.data(), 64);
-        memcpy(w.pk, w.sk + 32, 32);
-    } else if (raw.size() >= 32) {
-        keypair_from_seed(raw.data(), w.sk, w.pk);
-    } else {
-        throw std::runtime_error("invalid private key");
-    }
-    w.pub_b64 = base64_encode(w.pk, 32);
+    wallet_key(w, w.priv_b64, true);
     chmod(path.c_str(), 0600);
     try_mlock(w.sk, 64);
     try_mlock(w.pk, 32);
@@ -336,7 +355,9 @@ inline void manifest_migrate_legacy(const std::string& master_seed_b64,
 inline std::pair<Wallet, std::string> create_wallet(const std::string& path,
                                                       const std::string& pin) {
     std::string mnemonic = generate_mnemonic_12();
+    WalletWipe<std::string> wipe_mnemonic{mnemonic};
     auto seed = mnemonic_to_seed(mnemonic);
+    WalletWipe<std::array<uint8_t, 64>> wipe_seed{seed};
 
     auto hd_seed = derive_hd_seed(seed.data(), 0, 2);
 
@@ -348,7 +369,7 @@ inline std::pair<Wallet, std::string> create_wallet(const std::string& path,
         throw std::runtime_error("derived address is invalid");
     w.priv_b64 = base64_encode(w.sk, 32);
     w.pub_b64 = base64_encode(w.pk, 32);
-    w.rpc_url = "https://octra.network/rpc";
+    w.rpc_url = "https://devnet.octrascan.io/rpc";
     w.master_seed_b64 = base64_encode(seed.data(), 64);
     w.mnemonic = mnemonic;
     w.hd_index = 0;
@@ -371,16 +392,7 @@ inline Wallet load_wallet_legacy(const std::string& path) {
     w.rpc_url = j.value("rpc", "http://165.227.225.79:8080");
     if (w.rpc_url == "http://165.227.225.79:8080" || w.rpc_url == "http://165.227.225.79:8080/")
         w.rpc_url = "https://devnet.octrascan.io/rpc";
-    auto raw = base64_decode(w.priv_b64);
-    if (raw.size() >= 64) {
-        memcpy(w.sk, raw.data(), 64);
-        memcpy(w.pk, w.sk + 32, 32);
-    } else if (raw.size() >= 32) {
-        keypair_from_seed(raw.data(), w.sk, w.pk);
-    } else {
-        throw std::runtime_error("invalid private key");
-    }
-    w.pub_b64 = base64_encode(w.pk, 32);
+    wallet_key(w, w.priv_b64, true);
     try_mlock(w.sk, 64);
     try_mlock(w.pk, 32);
     return w;
@@ -405,14 +417,14 @@ inline std::string addr_from_mnemonic(const std::string& mnemonic, int hd_versio
     return addr;
 }
 
-inline Wallet import_wallet_mnemonic(const std::string& path,
-                                      const std::string& mnemonic,
-                                      const std::string& pin,
-                                      int hd_version = 1) {
+inline Wallet wallet_from_mnemonic(const std::string& mnemonic, int hd_version = 1,
+    int hd_index = 0) {
     if (!validate_mnemonic(mnemonic))
         throw std::runtime_error("invalid seed phrase");
+    if (hd_index < 0) throw std::runtime_error("invalid account index");
     auto seed = mnemonic_to_seed(mnemonic);
-    auto hd_seed = derive_hd_seed(seed.data(), 0, hd_version);
+    WalletWipe<std::array<uint8_t, 64>> wipe_seed{seed};
+    auto hd_seed = derive_hd_seed(seed.data(), static_cast<uint32_t>(hd_index), hd_version);
     Wallet w;
     keypair_from_seed(hd_seed.data(), w.sk, w.pk);
     secure_zero(hd_seed.data(), 32);
@@ -421,46 +433,40 @@ inline Wallet import_wallet_mnemonic(const std::string& path,
         throw std::runtime_error("derived address is invalid");
     w.priv_b64 = base64_encode(w.sk, 32);
     w.pub_b64 = base64_encode(w.pk, 32);
-    w.rpc_url = "https://octra.network/rpc";
+    w.rpc_url = "https://devnet.octrascan.io/rpc";
     w.master_seed_b64 = base64_encode(seed.data(), 64);
     w.mnemonic = mnemonic;
-    w.hd_index = 0;
+    w.hd_index = hd_index;
     w.hd_version = hd_version;
     secure_zero(seed.data(), 64);
-    save_wallet_encrypted(path, w, pin);
     try_mlock(w.sk, 64);
     try_mlock(w.pk, 32);
     return w;
 }
 
-inline Wallet import_wallet(const std::string& path,
-                             const std::string& priv_b64_raw,
-                             const std::string& pin) {
-    std::string clean;
-    for (char c : priv_b64_raw) {
-        if (c != '\n' && c != '\r' && c != ' ' && c != '\t')
-            clean += c;
-    }
-    auto raw = base64_decode(clean);
+inline Wallet wallet_from_key(const std::string& text) {
     Wallet w;
-    if (raw.size() >= 64) {
-        memcpy(w.sk, raw.data(), 64);
-        memcpy(w.pk, w.sk + 32, 32);
-    } else if (raw.size() >= 32) {
-        keypair_from_seed(raw.data(), w.sk, w.pk);
-    } else {
-        throw std::runtime_error("invalid private key length");
-    }
-    w.addr = derive_address(w.pk);
+    wallet_key(w, text, false);
     if (w.addr.size() != 47 || w.addr.substr(0, 3) != "oct")
         throw std::runtime_error("derived address is invalid");
-    w.priv_b64 = base64_encode(w.sk, 32);
-    w.pub_b64 = base64_encode(w.pk, 32);
-    w.rpc_url = "https://octra.network/rpc";
-    save_wallet_encrypted(path, w, pin);
+    w.rpc_url = "https://devnet.octrascan.io/rpc";
     try_mlock(w.sk, 64);
     try_mlock(w.pk, 32);
     return w;
+}
+
+inline Wallet import_wallet_mnemonic(const std::string& path,
+    const std::string& mnemonic, const std::string& pin, int hd_version = 1) {
+    auto wallet = wallet_from_mnemonic(mnemonic, hd_version);
+    save_wallet_encrypted(path, wallet, pin);
+    return wallet;
+}
+
+inline Wallet import_wallet(const std::string& path, const std::string& text,
+    const std::string& pin) {
+    auto wallet = wallet_from_key(text);
+    save_wallet_encrypted(path, wallet, pin);
+    return wallet;
 }
 
 inline void save_settings(const std::string& path, Wallet& w,
@@ -470,12 +476,12 @@ inline void save_settings(const std::string& path, Wallet& w,
         w.rpc_url = "https://octra.network/rpc";
     else
         w.rpc_url = new_rpc;
-    save_wallet_encrypted(path, w, pin);
+    save_wallet_encrypted(path, w, pin, WalletWrite::replace);
 }
 
 inline void change_pin(const std::string& path, Wallet& w,
                         const std::string& new_pin) {
-    save_wallet_encrypted(path, w, new_pin);
+    save_wallet_encrypted(path, w, new_pin, WalletWrite::replace);
 }
 
 
@@ -488,6 +494,7 @@ inline Wallet derive_hd_account(const std::string& master_seed_b64,
     auto master_raw = base64_decode(master_seed_b64);
     if (master_raw.size() != 64)
         throw std::runtime_error("invalid master seed");
+    WalletWipe<std::vector<uint8_t>> wipe_master{master_raw};
 
     auto hd_seed = derive_hd_seed(master_raw.data(), index, hd_version);
 
@@ -507,7 +514,7 @@ inline Wallet derive_hd_account(const std::string& master_seed_b64,
     w.hd_index = (int)index;
     w.hd_version = hd_version;
 
-    std::string path = wallet_path_for(w.addr);
+    std::string path = new_wallet_path(w.addr);
     save_wallet_encrypted(path, w, pin);
     try_mlock(w.sk, 64);
     try_mlock(w.pk, 32);

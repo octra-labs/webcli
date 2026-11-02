@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include "pvac/core/config.hpp"
@@ -17,6 +20,7 @@
 #include "pvac/ops/encrypt.hpp"
 #include "pvac/ops/decrypt.hpp"
 #include "pvac/ops/arithmetic.hpp"
+#include "pvac/ops/tape_verify.hpp"
 #include "pvac/ops/recrypt.hpp"
 #include "pvac/ops/commit.hpp"
 #include "pvac/ops/verify_zero.hpp"

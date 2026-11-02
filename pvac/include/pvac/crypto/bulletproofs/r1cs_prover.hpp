@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <cstdint>
 #include <vector>
 #include <tuple>
+#include <utility>
 #include <cassert>
 #include <stdexcept>
 #include "transcript.hpp"
@@ -22,13 +26,28 @@ class R1CSProver {
     std::vector<CommittedVar> committed_;
     std::vector<Gate> gates_;
     std::vector<Constraint> constraints_;
+    bool values_ = true;
+    size_t gate_total_ = 0;
+    size_t commit_total_ = 0;
+
+    R1CSProver(ScalarRule rule, bool values) : values_(values), ops(rule) {}
 
 public:
-    R1CSProver() = default;
+    const ScalarOps ops;
+
+    explicit R1CSProver(ScalarRule rule = ScalarRule::Prior) : ops(rule) {}
+
+    static R1CSProver verification(ScalarRule rule = ScalarRule::Prior) {
+        return R1CSProver(rule, false);
+    }
 
     Variable commit(const Scalar& value, const Scalar& blinding) {
-        size_t j = committed_.size();
-        committed_.push_back({value, blinding});
+        size_t j = num_committed();
+        if (values_) {
+            committed_.push_back({value, blinding});
+        } else {
+            ++commit_total_;
+        }
         return Variable::committed(j);
     }
 
@@ -36,8 +55,12 @@ public:
         const Scalar& a_L_val,
         const Scalar& a_R_val
     ) {
-        size_t i = gates_.size();
-        gates_.push_back({a_L_val, a_R_val, sc_mul(a_L_val, a_R_val)});
+        size_t i = num_gates();
+        if (values_) {
+            gates_.push_back({a_L_val, a_R_val, ops.mul(a_L_val, a_R_val)});
+        } else {
+            ++gate_total_;
+        }
         return {Variable::mult_left(i), Variable::mult_right(i), Variable::mult_out(i)};
     }
 
@@ -45,10 +68,14 @@ public:
         const LinearCombination& lc_left,
         const LinearCombination& lc_right
     ) {
-        size_t i = gates_.size();
-        Scalar aL = eval_lc(lc_left);
-        Scalar aR = eval_lc(lc_right);
-        gates_.push_back({aL, aR, sc_mul(aL, aR)});
+        size_t i = num_gates();
+        if (values_) {
+            Scalar aL = eval_lc(lc_left);
+            Scalar aR = eval_lc(lc_right);
+            gates_.push_back({aL, aR, ops.mul(aL, aR)});
+        } else {
+            ++gate_total_;
+        }
 
         LinearCombination cl = lc_left;
         cl -= LinearCombination(Variable::mult_left(i));
@@ -65,9 +92,9 @@ public:
         constraints_.push_back({lc});
     }
 
-    size_t num_gates() const { return gates_.size(); }
+    size_t num_gates() const { return values_ ? gates_.size() : gate_total_; }
     size_t num_constraints() const { return constraints_.size(); }
-    size_t num_committed() const { return committed_.size(); }
+    size_t num_committed() const { return values_ ? committed_.size() : commit_total_; }
     size_t constraint_terms() const {
         size_t count = 0;
         for (const auto& constraint : constraints_) {
@@ -77,12 +104,18 @@ public:
         }
         return count;
     }
-    std::vector<Constraint> get_constraints() const { return constraints_; }
+    std::vector<Constraint> get_constraints() const & { return constraints_; }
+
+    std::vector<Constraint> get_constraints() && { return std::move(constraints_); }
 
     R1CSProof prove(
         Transcript& transcript,
         R1CSLimitProfile profile = R1CSLimitProfile::Default
     ) {
+        if (!values_)
+            throw std::runtime_error("pvac: proof witness is missing");
+        if (transcript.ops.rule != ops.rule)
+            throw std::runtime_error("pvac: scalar rule mismatch");
         R1CSProof proof;
         const size_t n = gates_.size();
         const size_t m = committed_.size();
@@ -114,9 +147,9 @@ public:
         }
 
         std::vector<Scalar> sL(N), sR(N);
-        for (size_t i = 0; i < N; i++) { sL[i] = sc_random(); sR[i] = sc_random(); }
+        for (size_t i = 0; i < N; i++) { sL[i] = ops.random(); sR[i] = ops.random(); }
 
-        Scalar alpha = sc_random(), beta = sc_random(), rho = sc_random();
+        Scalar alpha = ops.random(), beta = ops.random(), rho = ops.random();
 
         const auto& gen = generators();
         gen.precompute(N);
@@ -140,39 +173,39 @@ public:
         z_aggregate(wL, wR, wO, wV, wc, z, N, m);
 
         std::vector<Scalar> y_n(N), y_inv_n(N);
-        Scalar y_inv = sc_inv(y);
+        Scalar y_inv = ops.inv(y);
         y_n[0] = Scalar{{1,0,0,0}};
         y_inv_n[0] = Scalar{{1,0,0,0}};
         for (size_t i = 1; i < N; i++) {
-            y_n[i] = sc_mul(y_n[i-1], y);
-            y_inv_n[i] = sc_mul(y_inv_n[i-1], y_inv);
+            y_n[i] = ops.mul(y_n[i-1], y);
+            y_inv_n[i] = ops.mul(y_inv_n[i-1], y_inv);
         }
 
         std::vector<Scalar> l1(N), l2(N), l3(N);
         std::vector<Scalar> r0(N), r1(N), r3(N);
 
         for (size_t i = 0; i < N; i++) {
-            l1[i] = sc_add(aL[i], sc_mul(y_inv_n[i], wR[i]));
+            l1[i] = sc_add(aL[i], ops.mul(y_inv_n[i], wR[i]));
             l2[i] = aO[i];
             l3[i] = sL[i];
 
             r0[i] = sc_sub(wO[i], y_n[i]);
-            r1[i] = sc_add(sc_mul(y_n[i], aR[i]), wL[i]);
-            r3[i] = sc_mul(y_n[i], sR[i]);
+            r1[i] = sc_add(ops.mul(y_n[i], aR[i]), wL[i]);
+            r3[i] = ops.mul(y_n[i], sR[i]);
         }
 
-        Scalar t1 = inner_product(l1, r0);
+        Scalar t1 = inner_product(l1, r0, ops);
 
-        Scalar t3 = sc_add(inner_product(l2, r1), inner_product(l3, r0));
-        Scalar t4 = sc_add(inner_product(l1, r3), inner_product(l3, r1));
-        Scalar t5 = inner_product(l2, r3);
-        Scalar t6 = inner_product(l3, r3);
+        Scalar t3 = sc_add(inner_product(l2, r1, ops), inner_product(l3, r0, ops));
+        Scalar t4 = sc_add(inner_product(l1, r3, ops), inner_product(l3, r1, ops));
+        Scalar t5 = inner_product(l2, r3, ops);
+        Scalar t6 = inner_product(l3, r3, ops);
 
-        Scalar tau1 = sc_random();
-        Scalar tau3 = sc_random();
-        Scalar tau4 = sc_random();
-        Scalar tau5 = sc_random();
-        Scalar tau6 = sc_random();
+        Scalar tau1 = ops.random();
+        Scalar tau3 = ops.random();
+        Scalar tau4 = ops.random();
+        Scalar tau5 = ops.random();
+        Scalar tau6 = ops.random();
 
         proof.T_1 = pedersen_commit(t1, tau1);
         proof.T_3 = pedersen_commit(t3, tau3);
@@ -188,44 +221,44 @@ public:
 
         Scalar xc = transcript.challenge_scalar("x");
 
-        Scalar x2 = sc_mul(xc, xc);
-        Scalar x3 = sc_mul(x2, xc);
-        Scalar x4 = sc_mul(x3, xc);
-        Scalar x5 = sc_mul(x4, xc);
-        Scalar x6 = sc_mul(x5, xc);
+        Scalar x2 = ops.mul(xc, xc);
+        Scalar x3 = ops.mul(x2, xc);
+        Scalar x4 = ops.mul(x3, xc);
+        Scalar x5 = ops.mul(x4, xc);
+        Scalar x6 = ops.mul(x5, xc);
 
         std::vector<Scalar> l_eval(N), r_eval(N);
         for (size_t i = 0; i < N; i++) {
             l_eval[i] = sc_add(sc_add(
-                sc_mul(l1[i], xc),
-                sc_mul(l2[i], x2)),
-                sc_mul(l3[i], x3));
+                ops.mul(l1[i], xc),
+                ops.mul(l2[i], x2)),
+                ops.mul(l3[i], x3));
 
             r_eval[i] = sc_add(sc_add(
                 r0[i],
-                sc_mul(r1[i], xc)),
-                sc_mul(r3[i], x3));
+                ops.mul(r1[i], xc)),
+                ops.mul(r3[i], x3));
         }
 
-        Scalar t_hat = inner_product(l_eval, r_eval);
+        Scalar t_hat = inner_product(l_eval, r_eval, ops);
         proof.t_x = t_hat;
 
-        Scalar tau_x = sc_mul(tau1, xc);
+        Scalar tau_x = ops.mul(tau1, xc);
 
         Scalar wv_blind = sc_zero();
         for (size_t j = 0; j < m; j++)
-            wv_blind = sc_add(wv_blind, sc_mul(wV[j], committed_[j].blinding));
-        tau_x = sc_sub(tau_x, sc_mul(wv_blind, x2));
-        tau_x = sc_add(tau_x, sc_mul(tau3, x3));
-        tau_x = sc_add(tau_x, sc_mul(tau4, x4));
-        tau_x = sc_add(tau_x, sc_mul(tau5, x5));
-        tau_x = sc_add(tau_x, sc_mul(tau6, x6));
+            wv_blind = sc_add(wv_blind, ops.mul(wV[j], committed_[j].blinding));
+        tau_x = sc_sub(tau_x, ops.mul(wv_blind, x2));
+        tau_x = sc_add(tau_x, ops.mul(tau3, x3));
+        tau_x = sc_add(tau_x, ops.mul(tau4, x4));
+        tau_x = sc_add(tau_x, ops.mul(tau5, x5));
+        tau_x = sc_add(tau_x, ops.mul(tau6, x6));
         proof.t_x_blinding = tau_x;
 
         proof.e_blinding = sc_add(sc_add(
-            sc_mul(xc, alpha),
-            sc_mul(x2, beta)),
-            sc_mul(x3, rho));
+            ops.mul(xc, alpha),
+            ops.mul(x2, beta)),
+            ops.mul(x3, rho));
 
         transcript.append_scalar("t_x", proof.t_x);
         transcript.append_scalar("t_x_blinding", proof.t_x_blinding);
@@ -252,13 +285,13 @@ private:
         for (const auto& [var, coeff] : lc.terms) {
             Scalar v;
             switch (var.type) {
-                case VarType::ONE:       v = Scalar{{1,0,0,0}}; break;
+                case VarType::ONE: v = Scalar{{1,0,0,0}}; break;
                 case VarType::COMMITTED: v = committed_[var.index].value; break;
                 case VarType::MULT_LEFT: v = gates_[var.index].a_L; break;
                 case VarType::MULT_RIGHT:v = gates_[var.index].a_R; break;
-                case VarType::MULT_OUT:  v = gates_[var.index].a_O; break;
+                case VarType::MULT_OUT: v = gates_[var.index].a_O; break;
             }
-            r = sc_add(r, sc_mul(coeff, v));
+            r = sc_add(r, ops.mul(coeff, v));
         }
         return r;
     }
@@ -271,16 +304,16 @@ private:
         Scalar zp = Scalar{{1,0,0,0}};
         for (const auto& c : constraints_) {
             for (const auto& [var, coeff] : c.lc.terms) {
-                Scalar zc = sc_mul(zp, coeff);
+                Scalar zc = ops.mul(zp, coeff);
                 switch (var.type) {
-                    case VarType::MULT_LEFT:  if (var.index<N) wL[var.index]=sc_add(wL[var.index],zc); break;
+                    case VarType::MULT_LEFT: if (var.index<N) wL[var.index]=sc_add(wL[var.index],zc); break;
                     case VarType::MULT_RIGHT: if (var.index<N) wR[var.index]=sc_add(wR[var.index],zc); break;
-                    case VarType::MULT_OUT:   if (var.index<N) wO[var.index]=sc_add(wO[var.index],zc); break;
-                    case VarType::COMMITTED:  if (var.index<m) wV[var.index]=sc_add(wV[var.index],zc); break;
-                    case VarType::ONE:        wc = sc_add(wc, zc); break;
+                    case VarType::MULT_OUT: if (var.index<N) wO[var.index]=sc_add(wO[var.index],zc); break;
+                    case VarType::COMMITTED: if (var.index<m) wV[var.index]=sc_add(wV[var.index],zc); break;
+                    case VarType::ONE: wc = sc_add(wc, zc); break;
                 }
             }
-            zp = sc_mul(zp, z);
+            zp = ops.mul(zp, z);
         }
     }
 
@@ -294,7 +327,7 @@ private:
         for (size_t i=0;i<N;i++) { sc.push_back(a[i]); pt.push_back(gen.G(i)); }
         for (size_t i=0;i<N;i++) { sc.push_back(b[i]); pt.push_back(gen.H(i)); }
         sc.push_back(blind); pt.push_back(pedersen_B_blinding());
-        return multi_scalar_mul(sc, pt);
+        return prover_msm(sc, pt);
     }
 
     RistrettoPoint msm_G_blind(
@@ -305,7 +338,7 @@ private:
         sc.reserve(N+1); pt.reserve(N+1);
         for (size_t i=0;i<N;i++) { sc.push_back(a[i]); pt.push_back(gen.G(i)); }
         sc.push_back(blind); pt.push_back(pedersen_B_blinding());
-        return multi_scalar_mul(sc, pt);
+        return prover_msm(sc, pt);
     }
 };
 

@@ -1,29 +1,5 @@
-/*
-    This file is part of Octra Wallet (webcli).
-
-    Octra Wallet is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 2 of the License, or
-    (at your option) any later version.
-
-    Octra Wallet is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with Octra Wallet.  If not, see <http://www.gnu.org/licenses/>.
-
-    This program is released under the GPL with the additional exemption
-    that compiling, linking, and/or using OpenSSL is allowed.
-    You are free to remove this exemption from derived works.
-
-    Copyright 2025-2026 Octra Labs
-              2025-2026 David A.
-              2025-2026 Alex T.
-              2025-2026 Vadim S.
-              2025-2026 Julia L.
-*/
+/* SPDX-License-Identifier: BSD-3-Clause */
+/* Copyright (c) 2023-2026 Octra Labs <dev@octra.org> */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -260,7 +236,10 @@ table {
   padding: 5px 6px;
 }
 
-.desktop-table .col-amount { width: 90px; }
+.desktop-table .col-amount { width: 140px; }
+.desktop-table td.amount { white-space: normal; }
+.amount-value { display: block; overflow-wrap: anywhere; }
+.amount-label { display: block; font-size: 10px; overflow-wrap: anywhere; }
 .desktop-table .col-status { width: 80px; }
 .desktop-table .col-time { width: 130px; }
 
@@ -418,6 +397,41 @@ td {
   padding: 10px;
   margin: 10px 0;
   font-size: 11px;
+}
+
+#dash-txs > .error-box,
+#history-list > .error-box {
+  margin-left: 10px;
+  margin-right: 10px;
+}
+
+#modal-pin-terms:not(:empty) {
+  margin-bottom: 16px;
+}
+
+.tx-message-expand > summary {
+  cursor: pointer;
+  padding: 10px;
+}
+
+.tx-message-preview {
+  display: block;
+  max-height: 6em;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  text-transform: none;
+  margin-bottom: 8px;
+}
+
+.tx-message-close,
+.tx-message-expand[open] .tx-message-preview,
+.tx-message-expand[open] .tx-message-open {
+  display: none;
+}
+
+.tx-message-expand[open] .tx-message-close {
+  display: inline;
 }
 
 .loading {
@@ -887,6 +901,17 @@ td {
 
 #modal-btns .action-btn {
   flex: 1;
+}
+
+#modal-pin .action-row {
+  align-items: stretch;
+}
+
+#pin-recover-btn {
+  display: block;
+  width: fit-content;
+  margin: 12px auto 0;
+  color: #516E9A;
 }
 
 #modal-result,
@@ -1614,6 +1639,29 @@ td {
 .modal-title {
   font-size: 13px; font-weight: bold; color: #3B567F;
   margin-bottom: 12px; letter-spacing: 0.5px;
+}
+.modal-overlay > .modal-box {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: min(400px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  box-sizing: border-box;
+}
+.modal-overlay > .modal-box > .modal-title,
+.modal-overlay > .modal-box > .input-field,
+.modal-overlay > .modal-box > .modal-buttons {
+  flex-shrink: 0;
+}
+.modal-params {
+  overflow: auto;
+  max-height: 30dvh;
+  min-height: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: monospace;
+  font-size: 12px;
+  margin-bottom: 12px;
 }
 .modal-message {
   font-size: 12px; color: #5A6A7D; margin-bottom: 12px; line-height: 1.5;

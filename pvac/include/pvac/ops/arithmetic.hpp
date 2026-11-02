@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <cstdint>
@@ -7,6 +10,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <utility>
+#include <limits>
 
 #include "../core/types.hpp"
 #include "encrypt.hpp"
@@ -40,7 +44,18 @@ inline auto gsum_accumulator = [](const Fp& acc, const Fp& term, uint8_t ch) -> 
     return ch == SGN_P ? fp_add(acc, term) : fp_sub(acc, term);
 };
 
+inline bool index_count_ok(size_t n, int B) {
+    return n == 0 || (B > 0 && n <= static_cast<size_t>(B)
+        && n <= size_t{1} + std::numeric_limits<uint16_t>::max());
+}
+
+inline void check_index_count(size_t n, int B) {
+    if (!index_count_ok(n, B))
+        throw std::runtime_error("pvac: index count exceeds domain");
+}
+
 inline void sample_unique_indices(uint16_t* dst, size_t n, int B) {
+    check_index_count(n, B);
     for (size_t i = 0; i < n; ++i) {
         uint16_t x;
         do {
@@ -51,6 +66,7 @@ inline void sample_unique_indices(uint16_t* dst, size_t n, int B) {
 }
 
 inline void sample_unique_indices(uint16_t* dst, size_t n, int B, SeedableRng& rng) {
+    check_index_count(n, B);
     for (size_t i = 0; i < n; ++i) {
         uint16_t x;
         do {
@@ -66,8 +82,9 @@ inline Edge make_repack_edge(const PubKey& pk, const Layer& L, uint32_t lid,
 }
 
 inline Edge make_repack_edge(const PubKey& pk, const Layer& L, uint32_t lid,
-                             uint16_t idx, uint8_t ch, std::vector<Fp> w, SeedableRng& rng) {
-    return {lid, idx, ch, std::move(w), sigma_from_H(pk, L.seed.ztag, L.seed.nonce, idx, ch, rng.u64())};
+                             uint16_t idx, uint8_t ch, std::vector<Fp> w, SeedableRng& rng,
+                             size_t draw_factor = 0) {
+    return {lid, idx, ch, std::move(w), sigma_from_H(pk, L.seed.ztag, L.seed.nonce, idx, ch, rng.u64(), draw_factor)};
 }
 
 inline auto emit_repack_edges(const PubKey& pk, uint32_t lid, const Layer& L,
@@ -106,7 +123,8 @@ inline auto emit_repack_edges(const PubKey& pk, uint32_t lid, const Layer& L,
 }
 
 inline auto emit_repack_edges(const PubKey& pk, uint32_t lid, const Layer& L,
-                              const std::vector<Fp>& target, size_t s, SeedableRng& rng) -> std::vector<Edge> {
+                              const std::vector<Fp>& target, size_t s, SeedableRng& rng,
+                              size_t draw_factor = 0) -> std::vector<Edge> {
     if (s == 0) return {};
     size_t S = target.size();
 
@@ -128,7 +146,7 @@ inline auto emit_repack_edges(const PubKey& pk, uint32_t lid, const Layer& L,
         for (auto& x : w) x = rng.fp_nonzero();
         auto t = field::Op::mul(w, pk.powg_B[idx]);
         sum = ch == SGN_P ? field::Op::add(sum, t) : field::Op::sub(sum, t);
-        edges.push_back(make_repack_edge(pk, L, lid, idx, ch, std::move(w), rng));
+        edges.push_back(make_repack_edge(pk, L, lid, idx, ch, std::move(w), rng, draw_factor));
     }
 
     auto [last_idx, last_ch] = specs.back();
@@ -136,7 +154,7 @@ inline auto emit_repack_edges(const PubKey& pk, uint32_t lid, const Layer& L,
     Fp ginv = pk.powg_B[(pk.prm.B - last_idx) % pk.prm.B];
     auto final_w = field::Op::mul(last_ch == SGN_M ? field::Op::neg(diff) : diff, ginv);
 
-    edges.push_back(make_repack_edge(pk, L, lid, last_idx, last_ch, std::move(final_w), rng));
+    edges.push_back(make_repack_edge(pk, L, lid, last_idx, last_ch, std::move(final_w), rng, draw_factor));
     return edges;
 }
 
@@ -186,7 +204,8 @@ inline void append_scaled_edges(std::vector<Edge>& dest, const std::vector<Edge>
 template<typename LayerGen, typename TargetGen>
 inline Cipher build_product_cipher_seeded(const PubKey& pk, const Cipher& A, const Cipher* B,
                                           LayerGen&& layer_gen, TargetGen&& target_gen,
-                                          size_t num_prods, size_t S, const char* tag, SeedableRng& rng) {
+                                          size_t num_prods, size_t S, const char* tag, SeedableRng& rng,
+                                          size_t draw_factor = 0) {
     Cipher C;
     C.slots = A.slots;
     C.c0 = field::Op::zeros(A.slots);
@@ -216,7 +235,7 @@ inline Cipher build_product_cipher_seeded(const PubKey& pk, const Cipher& A, con
         C.L.push_back(L);
 
         auto target = target_gen(gA, gB, la, lb_raw);
-        auto edges = emit_repack_edges(pk, lid, C.L[lid], target, S, rng);
+        auto edges = emit_repack_edges(pk, lid, C.L[lid], target, S, rng, draw_factor);
         std::move(edges.begin(), edges.end(), std::back_inserter(C.E));
     });
 
@@ -313,9 +332,11 @@ inline Cipher ct_sub(const PubKey& pk, const Cipher& A, const Cipher& B) {
     return ct_add(pk, A, ct_neg(pk, B));
 }
 
-inline Cipher ct_mul(const PubKey& pk, const Cipher& A, const Cipher& B, size_t S = 8) {
-    auto a0 = A.c0;
-    auto b0 = B.c0;
+inline Cipher ct_mul(const PubKey& pk, const Cipher& A, const Cipher& B, size_t S = 8, bool math = false) {
+    if (A.slots != B.slots)
+        throw std::runtime_error("pvac: ct_mul: slot count mismatch between operands");
+    auto a0 = math && A.c0.empty() ? field::Op::zeros(A.slots) : A.c0;
+    auto b0 = math && B.c0.empty() ? field::Op::zeros(B.slots) : B.c0;
 
     Cipher A_g = A;
     Cipher B_g = B;
@@ -346,8 +367,8 @@ inline Cipher ct_mul(const PubKey& pk, const Cipher& A, const Cipher& B, size_t 
     return C;
 }
 
-inline Cipher ct_square(const PubKey& pk, const Cipher& A, size_t S = 8) {
-    auto a0 = A.c0;
+inline Cipher ct_square(const PubKey& pk, const Cipher& A, size_t S = 8, bool math = false) {
+    auto a0 = math && A.c0.empty() ? field::Op::zeros(A.slots) : A.c0;
 
     Cipher A_g = A;
     A_g.c0 = field::Op::zeros(A.slots);
@@ -376,10 +397,12 @@ inline Cipher ct_square(const PubKey& pk, const Cipher& A, size_t S = 8) {
     return C;
 }
 
-inline Cipher ct_mul_seeded(const PubKey& pk, const Cipher& A, const Cipher& B, const uint8_t seed[32], size_t S = 8) {
+inline Cipher ct_mul_seeded(const PubKey& pk, const Cipher& A, const Cipher& B, const uint8_t seed[32], size_t S = 8, bool math = false, size_t draw_factor = 0) {
+    if (A.slots != B.slots)
+        throw std::runtime_error("pvac: ct_mul: slot count mismatch between operands");
     SeedableRng rng = make_seeded_rng(seed);
-    auto a0 = A.c0;
-    auto b0 = B.c0;
+    auto a0 = math && A.c0.empty() ? field::Op::zeros(A.slots) : A.c0;
+    auto b0 = math && B.c0.empty() ? field::Op::zeros(B.slots) : B.c0;
 
     Cipher A_g = A;
     Cipher B_g = B;
@@ -399,7 +422,7 @@ inline Cipher ct_mul_seeded(const PubKey& pk, const Cipher& A, const Cipher& B, 
         [](const auto& gA, const auto& gB, uint32_t la, uint32_t lb) {
             return field::Op::mul(gA[la], gB[lb]);
         },
-        static_cast<size_t>(LA) * LB, S ? S : 1, "mul", rng);
+        static_cast<size_t>(LA) * LB, S ? S : 1, "mul", rng, draw_factor);
 
     detail::append_scaled_edges(C.E, B_g.E, a0, off);
     detail::append_scaled_edges(C.E, A_g.E, b0, 0);
@@ -410,9 +433,9 @@ inline Cipher ct_mul_seeded(const PubKey& pk, const Cipher& A, const Cipher& B, 
     return C;
 }
 
-inline Cipher ct_square_seeded(const PubKey& pk, const Cipher& A, const uint8_t seed[32], size_t S = 8) {
+inline Cipher ct_square_seeded(const PubKey& pk, const Cipher& A, const uint8_t seed[32], size_t S = 8, bool math = false) {
     SeedableRng rng = make_seeded_rng(seed);
-    auto a0 = A.c0;
+    auto a0 = math && A.c0.empty() ? field::Op::zeros(A.slots) : A.c0;
 
     Cipher A_g = A;
     A_g.c0 = field::Op::zeros(A.slots);
@@ -456,28 +479,28 @@ inline Cipher ct_mul_const(const PubKey& pk, const Cipher& A, int64_t k) {
     return ct_scale(pk, A, detail::fp_from_i64(k));
 }
 
-inline Cipher ct_add_const(const PubKey&, const Cipher& A, uint64_t k) {
+inline Cipher ct_add_const(const PubKey&, const Cipher& A, const Fp& v, bool math = false) {
     Cipher C = A;
-    Fp v = fp_from_u64(k);
+    if (math && C.c0.empty()) C.c0 = field::Op::zeros(C.slots);
     for (size_t j = 0; j < C.c0.size(); ++j)
         C.c0[j] = fp_add(C.c0[j], v);
     return C;
 }
 
-inline Cipher ct_add_const(const PubKey&, const Cipher& A, int64_t k) {
-    Cipher C = A;
-    Fp v = detail::fp_from_i64(k);
-    for (size_t j = 0; j < C.c0.size(); ++j)
-        C.c0[j] = fp_add(C.c0[j], v);
-    return C;
+inline Cipher ct_add_const(const PubKey& pk, const Cipher& A, uint64_t k, bool math = false) {
+    return ct_add_const(pk, A, fp_from_u64(k), math);
 }
 
-inline Cipher ct_sub_const(const PubKey& pk, const Cipher& A, uint64_t k) {
-    return ct_add_const(pk, A, -static_cast<int64_t>(k));
+inline Cipher ct_add_const(const PubKey& pk, const Cipher& A, int64_t k, bool math = false) {
+    return ct_add_const(pk, A, detail::fp_from_i64(k), math);
 }
 
-inline Cipher ct_sub_const(const PubKey& pk, const Cipher& A, int64_t k) {
-    return ct_add_const(pk, A, -k);
+inline Cipher ct_sub_const(const PubKey& pk, const Cipher& A, uint64_t k, bool math = false) {
+    return ct_add_const(pk, A, fp_neg(fp_from_u64(k)), math);
+}
+
+inline Cipher ct_sub_const(const PubKey& pk, const Cipher& A, int64_t k, bool math = false) {
+    return ct_add_const(pk, A, fp_neg(detail::fp_from_i64(k)), math);
 }
 
 }

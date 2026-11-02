@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <cstdint>
@@ -25,6 +28,9 @@ static constexpr uint8_t TAG_AGG_RANGE_PROOF = 5;
 static constexpr uint8_t TAG_ZERO_PROOF = 6;
 static constexpr uint8_t TAG_BOUND_RANGE_PROOF = 7;
 static constexpr uint64_t MAX_BITVEC_BITS = 1ULL << 20;
+static constexpr uint64_t MAX_CIPHER_SLOTS = 1ULL << 16;
+static constexpr uint64_t MAX_PUBLIC_CIPHER_SLOTS = 8;
+static constexpr uint64_t MAX_PUBLIC_CIPHER_CELLS = 1ULL << 12;
 
 struct Writer {
     std::vector<uint8_t> buf;
@@ -94,13 +100,17 @@ struct Writer {
 };
 
 struct Reader {
+    inline static const uint8_t empty = 0;
     const uint8_t* p;
     const uint8_t* end;
     bool failed;
     char error[128];
 
     Reader(const uint8_t* data, size_t len)
-        : p(data), end(data + len), failed(false) { error[0] = 0; }
+        : p(data ? data : &empty), end(p + (data ? len : 0)), failed(false) {
+        error[0] = 0;
+        if (!data && len) fail("pvac_ser: missing input");
+    }
 
     void fail(const char* msg) {
         if (!failed) {
@@ -111,7 +121,7 @@ struct Reader {
 
     void need(size_t n) {
         if (failed) return;
-        if (p + n > end) fail("pvac_ser: truncated");
+        if (n > static_cast<size_t>(end - p)) fail("pvac_ser: truncated");
     }
 
     uint8_t u8() { need(1); if (failed) return 0; return *p++; }
@@ -409,6 +419,7 @@ inline pvac::Layer read_layer(Reader& r, uint8_t ver = VERSION_V2, size_t slots 
             L.PC[i] = r.rist_point();
     }
 
+    if (r.failed) return L;
     if (ver >= VERSION_V4)
         mark_public_base_layer(L, slots);
 
@@ -424,13 +435,14 @@ inline void write_edge(Writer& w, const pvac::Edge& e) {
     w.bitvec(e.s);
 }
 
-inline pvac::Edge read_edge(Reader& r) {
+inline pvac::Edge read_edge(Reader& r, size_t slots = 0) {
     pvac::Edge e;
     e.layer_id = r.u32();
     e.idx = r.u16();
     e.ch = r.u8();
     size_t nw = r.u64();
     r.check_count(nw, 16);
+    if (slots && nw != slots) r.fail("pvac_ser: edge weight/slots size mismatch");
     if (r.failed) return e;
     e.w.resize(nw);
     for (size_t i = 0; i < nw; ++i) e.w[i] = r.fp();
@@ -456,6 +468,20 @@ inline std::vector<uint8_t> serialize_cipher_public(const pvac::Cipher& C) {
     return serialize_cipher(C);
 }
 
+inline size_t read_cipher_slots(Reader& r, uint8_t ver) {
+    const uint64_t slots = r.u64();
+    if (!r.failed && (slots == 0 || slots > MAX_CIPHER_SLOTS
+        || (ver >= VERSION_V4 && slots > MAX_PUBLIC_CIPHER_SLOTS)))
+        r.fail("pvac_ser: cipher slot limit");
+    return r.failed ? 0 : static_cast<size_t>(slots);
+}
+
+inline void check_public_cells(Reader& r, uint8_t ver, size_t slots, size_t layers) {
+    if (!r.failed && ver >= VERSION_V4
+        && (slots == 0 || layers > MAX_PUBLIC_CIPHER_CELLS / slots))
+        r.fail("pvac_ser: cipher cell limit");
+}
+
 inline bool deserialize_cipher_checked(
     const uint8_t* data,
     size_t len,
@@ -465,16 +491,19 @@ inline bool deserialize_cipher_checked(
     uint8_t ver = r.header(TAG_CIPHER);
     cipher = pvac::Cipher();
     if (!r.failed) {
-        cipher.slots = r.u64();
+        cipher.slots = read_cipher_slots(r, ver);
         size_t nL = r.u64();
         r.check_count(nL, 8);
+        check_public_cells(r, ver, cipher.slots, nL);
         if (!r.failed) {
-            cipher.L.resize(nL);
-            for (size_t i = 0; i < nL; ++i)
-                cipher.L[i] = read_layer(r, ver, cipher.slots);
+            for (size_t i = 0; i < nL && !r.failed; ++i) {
+                auto layer = read_layer(r, ver, cipher.slots);
+                if (!r.failed) cipher.L.push_back(std::move(layer));
+            }
         }
         size_t nc = r.u64();
         r.check_count(nc, 16);
+        if (nc != 0 && nc != cipher.slots) r.fail("pvac_ser: c0/slots size mismatch");
         if (!r.failed) {
             cipher.c0.resize(nc);
             for (size_t i = 0; i < nc; ++i) cipher.c0[i] = r.fp();
@@ -482,8 +511,10 @@ inline bool deserialize_cipher_checked(
         size_t nE = r.u64();
         r.check_count(nE, 8);
         if (!r.failed) {
-            cipher.E.resize(nE);
-            for (size_t i = 0; i < nE; ++i) cipher.E[i] = read_edge(r);
+            for (size_t i = 0; i < nE && !r.failed; ++i) {
+                auto edge = read_edge(r, cipher.slots);
+                if (!r.failed) cipher.E.push_back(std::move(edge));
+            }
         }
     }
     if (r.failed) {
@@ -546,28 +577,48 @@ inline bool deserialize_pubkey_raw_checked(
     const uint8_t* data,
     size_t len,
     pvac::PubKey& pk,
-    std::string& error) {
+    std::string& error,
+    const pvac::Params* expected = nullptr) {
     Reader r(data, len);
     uint8_t ver = r.header(TAG_PUBKEY);
     pk = pvac::PubKey();
     if (!r.failed) {
         pk.prm = read_params(r);
+        if (expected) {
+            Writer actual;
+            Writer required;
+            write_params(actual, pk.prm);
+            write_params(required, *expected);
+            if (actual.buf != required.buf) {
+                error = "pvac_ser: public key parameter profile differs";
+                pk = pvac::PubKey();
+                return false;
+            }
+        }
         pk.canon_tag = r.u64();
 
         size_t nH = r.u64();
+        if (!r.failed && (pk.prm.m_bits <= 0 || pk.prm.n_bits <= 0 || pk.prm.B <= 0
+            || nH != static_cast<size_t>(pk.prm.n_bits))) r.fail("pvac_ser: public key dimensions differ");
         r.check_count(nH, 8);
         if (!r.failed) {
-            pk.H.resize(nH);
-            for (size_t i = 0; i < nH; ++i) pk.H[i] = r.bitvec();
+            for (size_t i = 0; i < nH && !r.failed; ++i) {
+                auto bits = r.bitvec();
+                if (!r.failed && bits.nbits != static_cast<uint64_t>(pk.prm.m_bits))
+                    r.fail("pvac_ser: H bitvec length mismatch");
+                if (!r.failed) pk.H.push_back(std::move(bits));
+            }
         }
 
         size_t np = r.u64();
+        if (!r.failed && np != static_cast<size_t>(pk.prm.m_bits)) r.fail("pvac_ser: UBK size mismatch");
         r.check_count(np, 4);
         if (!r.failed) {
             pk.ubk.perm.resize(np);
             for (size_t i = 0; i < np; ++i) pk.ubk.perm[i] = r.i32();
         }
         size_t ni = r.u64();
+        if (!r.failed && ni != static_cast<size_t>(pk.prm.m_bits)) r.fail("pvac_ser: UBK size mismatch");
         r.check_count(ni, 4);
         if (!r.failed) {
             pk.ubk.inv.resize(ni);
@@ -578,6 +629,7 @@ inline bool deserialize_pubkey_raw_checked(
         pk.omega_B = r.fp();
 
         size_t ng = r.u64();
+        if (!r.failed && ng != static_cast<size_t>(pk.prm.B)) r.fail("pvac_ser: powg_B size mismatch");
         r.check_count(ng, 16);
         if (!r.failed) {
             pk.powg_B.resize(ng);
@@ -620,14 +672,15 @@ inline bool deserialize_pubkey_checked(
     const uint8_t* data,
     size_t len,
     pvac::PubKey& pk,
-    std::string& error) {
+    std::string& error,
+    const pvac::Params* expected = nullptr) {
     if (pvac::compress::is_packed(data, len)) {
         std::vector<uint8_t> raw;
         if (!pvac::compress::unpack_checked(data, len, raw, error))
             return false;
-        return deserialize_pubkey_raw_checked(raw.data(), raw.size(), pk, error);
+        return deserialize_pubkey_raw_checked(raw.data(), raw.size(), pk, error, expected);
     }
-    return deserialize_pubkey_raw_checked(data, len, pk, error);
+    return deserialize_pubkey_raw_checked(data, len, pk, error, expected);
 }
 
 inline pvac::PubKey deserialize_pubkey(const uint8_t* data, size_t len) {
@@ -755,7 +808,9 @@ inline pvac::ZeroProof read_zero_proof_raw(Reader& r) {
     pvac::ZeroProof zp;
     zp.proof = read_r1cs_proof_raw(r);
 
-    zp.is_bound = (r.u8() != 0);
+    const auto flag = r.u8();
+    if (flag > 1) r.fail("pvac_ser: invalid zero proof flag");
+    zp.is_bound = flag == 1;
     return zp;
 }
 
@@ -788,9 +843,10 @@ inline void write_cipher_raw(Writer& w, const pvac::Cipher& C) {
 
 inline pvac::Cipher read_cipher_raw(Reader& r, uint8_t ver = VERSION_V2) {
     pvac::Cipher C;
-    C.slots = r.u64();
+    C.slots = read_cipher_slots(r, ver);
     size_t nL = r.u64();
     r.check_count(nL, 8);
+    check_public_cells(r, ver, C.slots, nL);
     if (!r.failed) {
         C.L.resize(nL);
         for (size_t i = 0; i < nL; ++i) C.L[i] = read_layer(r, ver, C.slots);

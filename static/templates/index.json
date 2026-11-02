@@ -11,10 +11,6 @@
     "name": "Vault",
     "files": ["main.aml"]
   },
-  "amm": {
-    "name": "Swap AMM",
-    "files": ["main.aml"]
-  },
   "escrow": {
     "name": "Escrow",
     "files": ["main.aml"]

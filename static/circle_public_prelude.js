@@ -1,6 +1,5 @@
-// cmix (Circle IN) Fri 7 Aug 2026 need to check 
-// brunch (lambda0xe)
-
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
 
 (() => {
   'use strict'

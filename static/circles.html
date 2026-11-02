@@ -1,15 +1,15 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<!-- Copyright (c) 2023-2026 Octra Labs <dev@octra.org> -->
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<script src="/api_access.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octra circles</title>
 <link rel="stylesheet" href="style.css?v=13">
 <style>
-.circle-shell {
-  display: block;
-}
-
 .circle-stack {
   display: grid;
   gap: 0;
@@ -462,7 +462,7 @@ tr:hover td { background: #F6F7F9; }
         </div>
       </div>
 
-      <details class="circle-collapse">
+      <details class="circle-collapse" id="circle-info" hidden>
         <summary class="section-title circle-summary">
           <span class="circle-summary-line">
             <span>circle info</span>
@@ -475,7 +475,7 @@ tr:hover td { background: #F6F7F9; }
         </div>
       </details>
 
-      <div class="circle-preview-card">
+      <div class="circle-preview-card" id="circle-preview" hidden>
         <div class="section-title">
           <span class="circle-summary-line">
             <span>resource preview</span>
@@ -519,6 +519,7 @@ tr:hover td { background: #F6F7F9; }
   </div>
 </div>
 
+<script src="amount_units.js"></script>
 <script src="circle_bridge_policy.js?v=9"></script>
 <script src="circle_asset_chunks.js?v=1"></script>
 <script src="circles.js?v=9"></script>

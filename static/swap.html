@@ -1,6 +1,11 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<!-- Copyright (c) 2023-2026 Octra Labs <dev@octra.org> -->
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<script src="/api_access.js"></script>
+<script src="/amount_units.js"></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>OCT swap | devnet demo</title>
@@ -87,7 +92,7 @@ tr:hover td { background: #F6F7F9; }
   <div id="unlock-view" class="unlock-screen" style="display:none">
     <h1 style="margin-bottom:8px;font-size:16px">OCT swap</h1>
     <p>unlock your wallet to continue</p>
-    <input type="password" id="pin-input" maxlength="6" placeholder="------" inputmode="numeric" autocomplete="off">
+    <input type="password" id="pin-input" placeholder="PIN" autocomplete="off">
     <button data-action="doUnlock">unlock</button>
     <div id="unlock-err" class="status-msg"></div>
   </div>
@@ -154,6 +159,7 @@ tr:hover td { background: #F6F7F9; }
     </div>
   </div>
 </div>
-<script src="swap.js?v=3"></script>
+<script src="pin.js?v=1"></script>
+<script src="swap.js?v=4"></script>
 </body>
 </html>

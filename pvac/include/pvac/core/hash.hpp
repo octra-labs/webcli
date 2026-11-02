@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <cstdint>
@@ -246,15 +249,15 @@ struct Shake256 {
     };
 
     static constexpr int ROT[5][5] = {
-        {  0, 36,  3, 41, 18 },
-        {  1, 44, 10, 45,  2 },
-        { 62,  6, 43, 15, 61 },
+        { 0, 36, 3, 41, 18 },
+        { 1, 44, 10, 45, 2 },
+        { 62, 6, 43, 15, 61 },
         { 28, 55, 25, 21, 56 },
-        { 27, 20, 39,  8, 14 }
+        { 27, 20, 39, 8, 14 }
     };
 
     static uint64_t rotl(uint64_t x, int r) {
-        return (x << r) | (x >> (64 - r));
+        return r == 0 ? x : (x << r) | (x >> (64 - r));
     }
 
     void keccakf() {

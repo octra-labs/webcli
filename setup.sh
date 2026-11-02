@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 set -e
 
 MODE="full"
@@ -171,5 +174,7 @@ echo ""
 echo "start the wallet:"
 echo "./octra_wallet"
 echo ""
-echo "then open http://127.0.0.1:8420 in your browser"
+echo "program_cli = ./webcli --help"
+echo ""
+echo "the wallet opens your browser; otherwise use its printed Open wallet link"
 echo ""

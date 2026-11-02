@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
+
 #pragma once
 
 #include <stdint.h>
@@ -13,6 +16,20 @@ typedef void* pvac_seckey;
 typedef void* pvac_cipher;
 typedef void* pvac_zero_proof;
 typedef void* pvac_range_proof;
+
+typedef enum {
+    PVAC_HISTORY = 3,
+    PVAC_AMOUNT = 0,
+    PVAC_REFRESH = 1,
+    PVAC_RANGE = 2
+} pvac_proof_kind;
+
+pvac_zero_proof pvac_prove_amount(pvac_pubkey pk, pvac_seckey sk,
+    pvac_cipher ct, uint64_t amount, const uint8_t blinding[32],
+    pvac_proof_kind kind, int wide);
+int pvac_verify_amount(pvac_pubkey pk, pvac_cipher ct,
+    pvac_zero_proof proof, const uint8_t commitment[32],
+    pvac_proof_kind kind, int wide);
 
 typedef struct {
     size_t slots;
@@ -48,6 +65,7 @@ typedef struct {
 } pvac_cipher_edge_view;
 
 pvac_params pvac_default_params(void);
+int pvac_copy_keys(pvac_pubkey pk, pvac_seckey sk, pvac_pubkey* public_copy, pvac_seckey* secret_copy);
 void pvac_keygen_from_seed(pvac_params prm, const uint8_t seed[32],
                            pvac_pubkey* pk_out, pvac_seckey* sk_out);
 pvac_cipher pvac_enc_value_seeded(pvac_pubkey pk, pvac_seckey sk,
@@ -61,9 +79,8 @@ int pvac_dec_value_legacy_i64(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
                               int64_t* value_out);
 void pvac_dec_value_fp(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
                        uint64_t* lo_out, uint64_t* hi_out);
-pvac_cipher pvac_enc_value_fp_seeded(pvac_pubkey pk, pvac_seckey sk,
-                                     uint64_t lo, uint64_t hi,
-                                     const uint8_t seed[32]);
+int pvac_dec_fp_checked(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
+                        uint64_t* lo_out, uint64_t* hi_out);
 pvac_cipher pvac_ct_add(pvac_pubkey pk, pvac_cipher a, pvac_cipher b);
 pvac_cipher pvac_ct_sub(pvac_pubkey pk, pvac_cipher a, pvac_cipher b);
 pvac_cipher pvac_ct_mul_seeded(pvac_pubkey pk, pvac_cipher a, pvac_cipher b, const uint8_t seed[32]);
@@ -84,16 +101,22 @@ int pvac_cipher_inspect_public(pvac_cipher ct,
                                pvac_cipher_edge_view* edges,
                                size_t edge_cap,
                                size_t sigma_sample_cap);
-int pvac_pubkey_is_key_bound_extension(pvac_pubkey legacy, pvac_pubkey bound);
+int pvac_pubkey_is_key_bound_extension(pvac_pubkey legacy, pvac_pubkey extended);
 int pvac_pubkey_is_legacy_v1_profile(pvac_pubkey legacy, pvac_pubkey current);
 int pvac_pubkey_is_proof_profile(pvac_pubkey a, pvac_pubkey b);
 int pvac_pubkey_matches_secret_profile(
-    pvac_pubkey candidate,
+    pvac_pubkey proposed,
+    pvac_pubkey current,
+    pvac_seckey sk);
+int pvac_pubkey_matches_stored_secret(
+    pvac_pubkey stored,
     pvac_pubkey current,
     pvac_seckey sk);
 
 pvac_zero_proof pvac_make_zero_proof(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct);
 int pvac_verify_zero(pvac_pubkey pk, pvac_cipher ct, pvac_zero_proof proof);
+pvac_zero_proof pvac_prove_zero(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct, int wide);
+int pvac_check_zero(pvac_pubkey pk, pvac_cipher ct, pvac_zero_proof proof, int wide);
 
 pvac_zero_proof pvac_make_zero_proof_bound(pvac_pubkey pk, pvac_seckey sk, pvac_cipher ct,
                                             uint64_t amount, const uint8_t blinding[32]);
@@ -117,6 +140,15 @@ int pvac_verify_bound_range_commitment(
     pvac_cipher ct,
     pvac_zero_proof proof,
     const uint8_t amount_commitment[32]);
+
+pvac_zero_proof pvac_make_history_proof(pvac_pubkey pk, pvac_seckey sk,
+    pvac_cipher ct, uint64_t amount, const uint8_t blinding[32]);
+int pvac_verify_history_proof(pvac_pubkey pk, pvac_cipher ct,
+    pvac_zero_proof proof, const uint8_t commitment[32]);
+pvac_zero_proof pvac_make_current_range(pvac_pubkey pk, pvac_seckey sk,
+    pvac_cipher ct, uint64_t amount, const uint8_t blinding[32]);
+int pvac_verify_current_range(pvac_pubkey pk, pvac_cipher ct,
+    pvac_zero_proof proof, const uint8_t commitment[32]);
 
 void pvac_pedersen_commit(uint64_t amount, const uint8_t blinding[32], uint8_t out[32]);
 int pvac_pedersen_commit_v2(uint64_t amount, const uint8_t blinding[32],

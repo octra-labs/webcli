@@ -1,34 +1,15 @@
-/*
-    This file is part of Octra Wallet (webcli).
-
-    Octra Wallet is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 2 of the License, or
-    (at your option) any later version.
-
-    Octra Wallet is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with Octra Wallet.  If not, see <http://www.gnu.org/licenses/>.
-
-    This program is released under the GPL with the additional exemption
-    that compiling, linking, and/or using OpenSSL is allowed.
-    You are free to remove this exemption from derived works.
-
-    Copyright 2025-2026 Octra Labs
-              2025-2026 David A.
-              2025-2026 Alex T.
-              2025-2026 Vadim S.
-              2025-2026 Julia L.
-*/
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2023-2026 Octra Labs <dev@octra.org>
 
 #pragma once
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
+#include <iomanip>
+#include <locale>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <openssl/evp.h>
@@ -42,6 +23,11 @@ extern "C" {
 
 namespace octra {
 
+class TxInputError : public std::invalid_argument {
+public:
+    using std::invalid_argument::invalid_argument;
+};
+
 struct Transaction {
     std::string from, to_, amount;
     int nonce;
@@ -53,8 +39,21 @@ struct Transaction {
 };
 
 inline std::string format_timestamp(double ts) {
-    nlohmann::json j = ts;
-    return j.dump();
+    if (!std::isfinite(ts)) throw TxInputError("transaction time is not finite");
+    const auto format = [ts](int digits) {
+        std::ostringstream out;
+        out.imbue(std::locale::classic());
+        out << std::setprecision(digits) << ts;
+        return out.str();
+    };
+    std::string text = format(16);
+    std::istringstream input(text);
+    input.imbue(std::locale::classic());
+    double decoded = 0;
+    input >> decoded;
+    if (!input || decoded != ts) text = format(17);
+    if (text.find_first_of(".eE") == std::string::npos) text += ".0";
+    return text;
 }
 
 inline std::string json_escape(const std::string& s) {
@@ -69,18 +68,32 @@ inline std::string json_escape(const std::string& s) {
             case '\n': r += "\\n";  break;
             case '\r': r += "\\r";  break;
             case '\t': r += "\\t";  break;
-            default:   r += c;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f) {
+                    const char* hex = "0123456789abcdef";
+                    const auto value = static_cast<unsigned char>(c);
+                    r += "\\u00";
+                    r += hex[value >> 4];
+                    r += hex[value & 15];
+                } else r += c;
         }
     }
     return r;
 }
 
-inline std::string canonical_json(const Transaction& tx) {
+inline std::string decimal_text(const std::string& value) {
+    if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos)
+        throw TxInputError("transaction amount and fee must use decimal whole units");
+    const auto first = value.find_first_not_of('0');
+    return first == std::string::npos ? "0" : value.substr(first);
+}
+
+inline std::string signing_json(const Transaction& tx) {
     std::string s = "{\"from\":\"" + json_escape(tx.from) + "\""
         ",\"to_\":\"" + json_escape(tx.to_) + "\""
-        ",\"amount\":\"" + json_escape(tx.amount) + "\""
+        ",\"amount\":\"" + decimal_text(tx.amount) + "\""
         ",\"nonce\":" + std::to_string(tx.nonce) +
-        ",\"ou\":\"" + json_escape(tx.ou) + "\""
+        ",\"ou\":\"" + decimal_text(tx.ou) + "\""
         ",\"timestamp\":" + format_timestamp(tx.timestamp) +
         ",\"op_type\":\"" + json_escape(tx.op_type.empty() ? "standard" : tx.op_type) + "\"";
     if (!tx.encrypted_data.empty())
@@ -100,13 +113,30 @@ inline std::string ed25519_sign_detached(const uint8_t* msg, size_t len,
 }
 
 inline void sign_transaction(Transaction& tx, const uint8_t sk[64]) {
-    std::string msg = canonical_json(tx);
+    std::string msg = signing_json(tx);
     tx.signature = ed25519_sign_detached(
         reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), sk);
 }
 
+inline std::string hash_json(const Transaction& tx) {
+    const auto optional = [](const std::string& value) {
+        return value.empty() ? std::string("null") : "\"" + json_escape(value) + "\"";
+    };
+    return "{\"from\":\"" + json_escape(tx.from) + "\""
+        ",\"to_\":\"" + json_escape(tx.to_) + "\""
+        ",\"amount\":\"" + decimal_text(tx.amount) + "\""
+        ",\"nonce\":" + std::to_string(tx.nonce) +
+        ",\"ou\":\"" + decimal_text(tx.ou) + "\""
+        ",\"timestamp\":" + format_timestamp(tx.timestamp) +
+        ",\"signature\":\"" + json_escape(tx.signature) + "\""
+        ",\"op_type\":\"" + json_escape(tx.op_type.empty() ? "standard" : tx.op_type) + "\""
+        ",\"public_key\":" + optional(tx.public_key) +
+        ",\"message\":" + optional(tx.message) +
+        ",\"encrypted_data\":" + optional(tx.encrypted_data) + "}";
+}
+
 inline std::string tx_hash(const Transaction& tx) {
-    std::string msg = canonical_json(tx);
+    const std::string msg = hash_json(tx);
     auto h = sha256(reinterpret_cast<const uint8_t*>(msg.data()), msg.size());
     return hex_encode(h.data(), 32);
 }
@@ -115,12 +145,12 @@ inline nlohmann::json build_tx_json(const Transaction& tx) {
     nlohmann::json j;
     j["from"] = tx.from;
     j["to_"] = tx.to_;
-    j["amount"] = tx.amount;
+    j["amount"] = decimal_text(tx.amount);
     j["nonce"] = tx.nonce;
-    j["ou"] = tx.ou;
+    j["ou"] = decimal_text(tx.ou);
     j["timestamp"] = tx.timestamp;
     j["signature"] = tx.signature;
-    j["public_key"] = tx.public_key;
+    if (!tx.public_key.empty()) j["public_key"] = tx.public_key;
     if (!tx.op_type.empty()) j["op_type"] = tx.op_type;
     if (!tx.encrypted_data.empty()) j["encrypted_data"] = tx.encrypted_data;
     if (!tx.message.empty()) j["message"] = tx.message;
