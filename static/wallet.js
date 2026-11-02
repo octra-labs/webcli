@@ -1258,13 +1258,13 @@ async function switchNetwork(key) {
     if (walletOperationInProgress())
       throw new Error('wait for the current wallet operation or claim confirmation to finish');
     var pin = await modalPrompt('switch to ' + key,
-      'enter pin to switch network. funds stay on their current network'
+      'enter PIN to switch network. funds stay on their current network'
       + '\nthis and other idle tabs reload. unsaved form state is lost'
       + '\nbridge and swap keep their own network contracts and relayer/scanner settings',
       { pin: true, btnText: 'switch' });
     if (!pin) return;
     if (walletOperationInProgress())
-      throw new Error('wallet operation or claim confirmation started while waiting for pin');
+      throw new Error('wallet operation or claim confirmation started while waiting for PIN');
     _walletSwitching = true;
     switching = true;
     await api('POST', '/settings', {
@@ -4331,7 +4331,7 @@ async function doSwitchAccount(addr) {
   var pin = await modalPrompt('switch account', 'enter PIN', { pin: true, btnText: 'switch' });
   if (!pin) return;
   if (walletOperationInProgress()) {
-    showResult('wallet-mgmt-result', false, 'wallet operation started while waiting for pin. account was not switched');
+    showResult('wallet-mgmt-result', false, 'wallet operation started while waiting for PIN. account was not switched');
     return;
   }
   clearResult('wallet-mgmt-result');
@@ -4446,12 +4446,12 @@ async function doSaveSettings() {
     var wallet = await api('GET', '/wallet');
     if (walletOperationInProgress()) throw new Error('wait for the current wallet operation or claim confirmation to finish');
     var pin = await modalPrompt('confirm settings change',
-      'enter pin to change network endpoints'
+      'enter PIN to change network endpoints'
       + '\nother idle tabs reload after a change. unsaved form state in those tabs is lost'
       + '\nbridge and swap keep their own network contracts and relayer/scanner settings',
       { pin: true, btnText: 'save' });
     if (!pin) { showResult('settings-result', false, 'settings change cancelled'); return; }
-    if (walletOperationInProgress()) throw new Error('wallet operation or claim confirmation started while waiting for pin');
+    if (walletOperationInProgress()) throw new Error('wallet operation or claim confirmation started while waiting for PIN');
     var settingsChanged = rpc !== wallet.rpc_url
       || (explorer || wallet.explorer_url || '') !== (wallet.explorer_url || '')
       || bridgeSigner !== (wallet.bridge_signer_url || '');
