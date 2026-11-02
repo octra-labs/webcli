@@ -292,6 +292,24 @@ class TxJournal {
         return nullptr;
     }
 
+    Json claim_output(const std::string& output) const {
+        need(text_ok(output, 128), "journal output invalid");
+        Json found = nullptr;
+        int found_rank = -1;
+        const auto send = sending();
+        for (const auto& row : scan()) {
+            if (row.value("op_type", "") != "claim" || row.value("output_id", "") != output) continue;
+            const auto status = row.value("status", "");
+            const int rank = status == "confirmed" ? 4 : status == "pending" ? 3
+                : status == "unknown" ? 2 : status == "dropped" ? 1 : -1;
+            if (rank > found_rank) {
+                found = visible(row, send);
+                found_rank = rank;
+            }
+        }
+        return found;
+    }
+
     Json scan() const {
         auto rows = Json::array();
         std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(reads()));
@@ -571,6 +589,13 @@ public:
             result["reused"] = true;
             return result;
         }
+        if (row.value("op_type", "") == "claim" && row.contains("output_id")) {
+            auto prior = claim_output(row["output_id"].get_ref<const std::string&>());
+            if (!prior.is_null()) {
+                prior["reused"] = true;
+                return prior;
+            }
+        }
         need(tx.from == addr_ && tx.nonce > 0 && !tx.signature.empty()
             && !tx.public_key.empty() && (tx.op_type == "stealth" || tx.op_type == "claim")
             && row["op_type"] == tx.op_type && row["hash"] == octra::tx_hash(tx),
@@ -599,6 +624,12 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
         session(token);
         return request(id, key);
+    }
+
+    Json find_claim_output(uint64_t token, const std::string& output) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        session(token);
+        return claim_output(output);
     }
 
     Json resend(uint64_t token, const std::string& hash) {

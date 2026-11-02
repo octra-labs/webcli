@@ -1241,8 +1241,11 @@ struct BalanceInfo {
     bool ok = false;
 };
 
-static BalanceInfo get_nonce_balance_for(const std::string& addr, octra::RpcClient& rpc = g_rpc) {
+static BalanceInfo get_nonce_balance_for(const std::string& addr, octra::RpcClient& rpc = g_rpc,
+                                       bool allow_unknown = false) {
     const auto r = rpc.get_balance(addr);
+    if (allow_unknown && !r.ok && r.replied && r.code == 100 && r.error == "sender not found")
+        return BalanceInfo{};
     if (!r.ok || !r.result.is_object() || !r.result.contains("nonce"))
         throw octra::RpcStateError("cannot read account nonce");
     BalanceInfo info;
@@ -2047,6 +2050,27 @@ static json private_cached(const std::string& addr, uint64_t generation,
         } catch (const std::invalid_argument& error) {
             throw octra::TxInputError(error.what());
         }
+    }
+    if (row.is_null()) return nullptr;
+    if (tx_status_is_pending_like(row)) {
+        json rows = json::array({row});
+        refresh_own_rows(addr, generation, rows);
+        row = rows[0];
+    }
+    auto reply = saved_reply(row);
+    reply["reused"] = true;
+    return reply;
+}
+
+static json private_claim_output_cached(const std::string& addr, uint64_t generation,
+    const std::string& output) {
+    const auto token = own_history_open(addr, generation, true);
+    json row;
+    {
+        std::lock_guard<std::mutex> lock(g_mtx);
+        if (!g_wallet_loaded || g_wallet.addr != addr || g_wallet_generation != generation
+            || g_own_token != token) throw octra::RpcStateError("wallet changed before claim output lookup");
+        row = g_own_history.find_claim_output(token, output);
     }
     if (row.is_null()) return nullptr;
     if (tx_status_is_pending_like(row)) {
@@ -4782,7 +4806,7 @@ int main(int argc, char** argv) {
             std::launch::async,
             [read]() {
                 octra::RpcClient rpc(read.url);
-                return get_nonce_balance_for(read.addr, rpc);
+                return get_nonce_balance_for(read.addr, rpc, true);
             });
         auto staging_future = std::async(std::launch::async, [read]() { return wallet_staging(&read); });
         std::optional<EncBalResult> eb;
@@ -6388,7 +6412,8 @@ int main(int argc, char** argv) {
         json previous = json::object();
         for (const auto id : ids) {
             const auto output = std::to_string(id);
-            const auto saved = private_cached(g_wallet.addr, generation, claim_id(output), claim_key(output));
+            auto saved = private_cached(g_wallet.addr, generation, claim_id(output), claim_key(output));
+            if (saved.is_null()) saved = private_claim_output_cached(g_wallet.addr, generation, output);
             if (!saved.is_null()) previous[output] = saved;
         }
         if (!ids.empty() && previous.size() == ids.size()) {
@@ -6537,7 +6562,7 @@ int main(int argc, char** argv) {
                 } else {
                     const auto hash = sr2.value("tx_hash", "");
                     if (hash.empty()) throw octra::RpcStateError("submission returned no transaction hash");
-                    nonce = tx.nonce;
+                    if (!sr2.value("reused", false)) nonce = tx.nonce;
                     sr2["id"] = out_id;
                     sr2["ok"] = true;
                     results.push_back(sr2);

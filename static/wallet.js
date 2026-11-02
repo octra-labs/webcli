@@ -108,6 +108,9 @@ var _encPresent = false;
 var _encKnown = false;
 var _unclaimedCount = 0;
 var _pendingClaimIds = {};
+var _confirmedClaimIds = {};
+var _claimInFlight = false;
+var _networkReloadPending = false;
 var _pendingClaimTxs = {};
 let _pendingClaimPoll = null;
 let _stealthScanInFlight = null;
@@ -151,8 +154,7 @@ const setConnectionStatus = state => {
   if (!status) return;
   status.lockFailure = false;
   status.title = '';
-  const suffix = _rpcHost ? ' | ' + networkLabel(_rpcHost) : '';
-  status.textContent = state + suffix;
+  status.textContent = state;
   status.className = state === 'online'
     ? 'right online'
     : state === 'offline'
@@ -567,6 +569,15 @@ function setPrivateOpBusy(active) {
     renderEncryptRoom(null);
   }
   if ($('st-wallet-work')) $('st-wallet-work').textContent = active ? 'wallet operation in progress' : '';
+  updateClaimControls();
+}
+
+function hasPendingClaims() {
+  return Object.keys(_pendingClaimIds).length > 0;
+}
+
+function walletOperationInProgress() {
+  return _walletSwitching || _privateOpInFlight || _pvacUpgradeInFlight || _claimInFlight || hasPendingClaims();
 }
 
 var _ideProject = null;
@@ -1210,11 +1221,73 @@ async function doVerifyProject() {
   }
 }
 
-function networkLabel(host) {
-  if (host === 'octra.network') return 'main net';
-  if (host === 'devnet.octrascan.io' || host === '165.227.225.79') return 'dev net';
-  if (host === 'localhost' || host === '127.0.0.1') return 'local';
-  return host;
+const NETWORKS = {
+  mainnet: { rpc: 'https://octra.network/rpc', explorer: 'https://octrascan.io' },
+  devnet: { rpc: 'https://devnet.octrascan.io/rpc', explorer: 'https://devnet.octrascan.io' }
+};
+
+function updateNetworkPicker(rpc) {
+  var selected = Object.keys(NETWORKS).find(function(key) {
+    return rpc.replace(/\/+$/, '') === NETWORKS[key].rpc;
+  });
+  $('hdr-network-label').textContent = selected || 'custom';
+  $('hdr-network').title = rpc;
+  document.querySelectorAll('.network-menu button').forEach(function(button) {
+    button.setAttribute('aria-checked', String(button.getAttribute('data-arg') === selected));
+  });
+  $('hdr-network-picker').style.display = '';
+}
+
+function notifyNetworkChanged() {
+  try { localStorage.setItem('octra-network-change', String(Date.now())); } catch (_) {}
+}
+
+async function switchNetwork(key) {
+  var picker = $('hdr-network-picker');
+  var target = NETWORKS[key];
+  var result = $('network-result');
+  var switching = false;
+  $('network-dropdown').open = false;
+  if (!target || picker.inert) return;
+  result.hidden = true;
+  picker.inert = true;
+  try {
+    var wallet = await api('GET', '/wallet');
+    updateNetworkPicker(wallet.rpc_url);
+    if (wallet.rpc_url.replace(/\/+$/, '') === target.rpc) return;
+    if (walletOperationInProgress())
+      throw new Error('wait for the current wallet operation or claim confirmation to finish');
+    var pin = await modalPrompt('switch to ' + key,
+      'enter PIN to switch network. funds stay on their current network'
+      + '\nthis and other idle tabs reload. unsaved form state is lost'
+      + '\nbridge and swap keep their own network contracts and relayer/scanner settings',
+      { pin: true, btnText: 'switch' });
+    if (!pin) return;
+    if (walletOperationInProgress())
+      throw new Error('wallet operation or claim confirmation started while waiting for PIN');
+    _walletSwitching = true;
+    switching = true;
+    await api('POST', '/settings', {
+      rpc_url: target.rpc,
+      explorer_url: target.explorer,
+      bridge_signer_url: wallet.bridge_signer_url || '',
+      expected_wallet: wallet.address,
+      expected_generation: wallet.generation,
+      pin: pin
+    });
+    resetApiKey(true);
+    clearAllAddressRuntime();
+    dropAllPersistedRuntime();
+    setConnectionStatus('connecting...');
+    notifyNetworkChanged();
+    window.location.reload();
+  } catch (e) {
+    result.textContent = e.message;
+    result.hidden = false;
+  } finally {
+    if (switching) _walletSwitching = false;
+    picker.inert = false;
+  }
 }
 
 function $(id) { return document.getElementById(id); }
@@ -1257,7 +1330,11 @@ async function bgStealthScan() {
     const outputs = res.outputs || [];
     let unclaimed = 0;
     for (let i = 0; i < outputs.length; i++) {
-      if (outputs[i].claimed) { delete _pendingClaimIds[String(outputs[i].id)]; continue; }
+      if (outputs[i].claimed || _confirmedClaimIds[String(outputs[i].id)]) {
+        delete _pendingClaimIds[String(outputs[i].id)];
+        delete _pendingClaimTxs[String(outputs[i].id)];
+        continue;
+      }
       if (outputs[i].claimable === false) continue;
       if (!_pendingClaimIds[String(outputs[i].id)]) unclaimed++;
     }
@@ -1303,6 +1380,8 @@ function applyBalanceData(bal) {
     ? 'legacy encrypted balance' : 'private balance unreadable';
   var pubText = accountUnknown ? '-' : fmtOct(pub);
   var nonceText = accountUnknown ? '-' : (next.nonce || '0');
+  if ($('st-account-status')) $('st-account-status').textContent = accountUnknown
+    ? 'account not yet on this network' : '';
   if ($('st-balance')) $('st-balance').textContent = pubText;
   if ($('st-enc-balance')) $('st-enc-balance').textContent = encText;
   if ($('st-enc-balance')) $('st-enc-balance').title = next.encrypted_balance_error || '';
@@ -1324,6 +1403,7 @@ function resetDashboardView() {
   _pvacUpgradeStatus = null;
   _pvacStatusRead += 1;
   renderEncryptRoom(null);
+  if ($('st-account-status')) $('st-account-status').textContent = '';
   if ($('st-balance')) $('st-balance').textContent = '-';
   if ($('st-enc-balance')) $('st-enc-balance').textContent = '-';
   if ($('ct-struct-link')) $('ct-struct-link').hidden = true;
@@ -1343,7 +1423,7 @@ function resetDashboardView() {
 }
 
 async function fetchBalance(force) {
-  if (_walletSwitching) return currentBalanceData();
+  if (!_walletAddr || _walletSwitching) return currentBalanceData();
   var addr = _walletAddr;
   var state = ensureAddressRuntime(_walletAddr);
   if (state && state.balanceInflight) return state.balanceInflight;
@@ -2759,6 +2839,35 @@ async function doStealthSend() {
   }
 }
 
+function pendingClaimRefreshHtml() {
+  if (!hasPendingClaims()) return '';
+  return '<div class="claim-row"><button class="action-btn" data-action="refreshPendingClaims">refresh claim status</button></div>';
+}
+
+function updateClaimControls() {
+  var pending = hasPendingClaims();
+  var checking = !!_pendingClaimPoll;
+  var busy = _claimInFlight || _privateOpInFlight || pending;
+  document.querySelectorAll('[data-action="claimSelected"]').forEach(function(button) {
+    button.disabled = busy;
+    button.textContent = _claimInFlight ? 'claim in progress...' : pending ? 'claim pending...' : 'claim selected';
+    button.setAttribute('aria-busy', String(busy));
+  });
+  document.querySelectorAll('[data-action="refreshPendingClaims"]').forEach(function(button) {
+    button.disabled = _claimInFlight || _privateOpInFlight || checking;
+    button.textContent = checking ? 'checking claim status...' : 'refresh claim status';
+    button.setAttribute('aria-busy', String(checking));
+  });
+  document.querySelectorAll('.stealth-chk').forEach(function(check) {
+    check.disabled = busy;
+  });
+}
+
+function refreshPendingClaims() {
+  if (_claimInFlight || _privateOpInFlight || !hasPendingClaims()) return;
+  return pollPendingClaims();
+}
+
 async function doStealthScan() {
   $('stealth-outputs').innerHTML = '<div class="loading">scanning...</div>';
   const addr = _walletAddr;
@@ -2767,7 +2876,9 @@ async function doStealthScan() {
     if (_walletSwitching || addr !== _walletAddr) return;
     const outputs = res.outputs || [];
     if (outputs.length === 0) {
-      $('stealth-outputs').innerHTML = '<div class="staging-empty">no stealth outputs found</div>';
+      updateStealthBadge(0);
+      $('stealth-outputs').innerHTML = '<div class="staging-empty">no stealth outputs found</div>' + pendingClaimRefreshHtml();
+      updateClaimControls();
       return;
     }
     var h = '<table class="desktop-table stealth-table"><tr><th></th><th>id</th><th>amount</th><th>status</th></tr>';
@@ -2775,14 +2886,15 @@ async function doStealthScan() {
     for (var i = 0; i < outputs.length; i++) {
       var o = outputs[i];
       var amt = o.amount_raw ? fmtOctCompact(o.amount_raw) : '?';
-      var isPending = !o.claimed && _pendingClaimIds[String(o.id)];
+      var claimed = o.claimed || _confirmedClaimIds[String(o.id)];
+      var isPending = !claimed && _pendingClaimIds[String(o.id)];
       var claimable = o.claimable !== false;
-      var st = o.claimed
+      var st = claimed
         ? '<span class="gray">claimed</span>'
         : (isPending
           ? '<span class="gray">claiming\u2026</span>'
           : (claimable ? '<span class="green">unclaimed</span>' : '<span class="gray">' + escapeHtml(stealthClaimStatusLabel(o.claim_status)) + '</span>'));
-      var chk = (o.claimed || isPending || !claimable) ? '' : '<input type="checkbox" class="stealth-chk" data-id="' + o.id + '">';
+      var chk = (claimed || isPending || !claimable) ? '' : '<input type="checkbox" class="stealth-chk" data-id="' + o.id + '">';
       h += '<tr>';
       h += '<td>' + chk + '</td>';
       h += '<td class="mono">' + (o.id || '') + '</td>';
@@ -2791,7 +2903,7 @@ async function doStealthScan() {
       h += '</tr>';
       cards += '<div class="tx-card">';
 
-      if (!o.claimed) cards += '<div class="card-row"><span class="card-label">select</span><span class="card-val">' + chk + '</span></div>';
+      if (!claimed) cards += '<div class="card-row"><span class="card-label">select</span><span class="card-val">' + chk + '</span></div>';
       cards += '<div class="card-row"><span class="card-label">id</span><span class="card-val mono">' + (o.id || '') + '</span></div>';
       cards += '<div class="card-row"><span class="card-label">amount</span><span class="card-val mono amount green">' + amt + '</span></div>';
       cards += '<div class="card-row"><span class="card-label">status</span><span class="card-val">' + st + '</span></div>';
@@ -2803,7 +2915,11 @@ async function doStealthScan() {
     h += cards;
     var unclaimed = 0;
     for (var i = 0; i < outputs.length; i++) {
-      if (outputs[i].claimed) { delete _pendingClaimIds[String(outputs[i].id)]; continue; }
+      if (outputs[i].claimed || _confirmedClaimIds[String(outputs[i].id)]) {
+        delete _pendingClaimIds[String(outputs[i].id)];
+        delete _pendingClaimTxs[String(outputs[i].id)];
+        continue;
+      }
       if (outputs[i].claimable === false) continue;
       if (!_pendingClaimIds[String(outputs[i].id)]) unclaimed++;
     }
@@ -2811,13 +2927,17 @@ async function doStealthScan() {
     if (unclaimed > 0) {
       h += '<div class="claim-row"><button class="action-btn" data-action="claimSelected">claim selected</button></div>';
     }
+    h += pendingClaimRefreshHtml();
     $('stealth-outputs').innerHTML = h;
+    updateClaimControls();
   } catch (e) {
-    $('stealth-outputs').innerHTML = '<div class="error-box">' + escapeHtml(e.message) + '</div>';
+    $('stealth-outputs').innerHTML = '<div class="error-box">' + escapeHtml(e.message) + '</div>' + pendingClaimRefreshHtml();
+    updateClaimControls();
   }
 }
 
 function claimSelected() {
+  if (_claimInFlight || _privateOpInFlight || Object.keys(_pendingClaimIds).length) return;
   var checks = document.querySelectorAll('.stealth-chk:checked');
   var ids = [];
   for (var i = 0; i < checks.length; i++) ids.push(checks[i].getAttribute('data-id'));
@@ -2826,7 +2946,12 @@ function claimSelected() {
 }
 
 async function doStealthClaim(ids) {
-  if (_privateOpInFlight) return;
+  if (_claimInFlight || _privateOpInFlight || Object.keys(_pendingClaimIds).length) return;
+  ids = Array.from(new Set(ids.map(String))).filter(function(id) {
+    return !_confirmedClaimIds[id];
+  });
+  if (!ids.length) return;
+  _claimInFlight = true;
   clearStealthLog();
   logStealth('claiming ' + ids.length + ' output(s)', 'log-info');
   logStealth('waiting for PIN', 'log-info');
@@ -2865,24 +2990,25 @@ async function doStealthClaim(ids) {
         }
       }
     }
-    doStealthScan();
-    loadDashboard();
-    pollPendingClaims();
+    await doStealthScan();
+    await loadDashboard();
+    await pollPendingClaims();
   } catch (e) {
     logStealth('error: ' + e.message, 'log-err');
   } finally {
+    _claimInFlight = false;
     setPrivateOpBusy(false);
   }
 }
 
 function pollPendingClaims() {
-  if (Object.keys(_pendingClaimIds).length === 0) return;
+  if (!hasPendingClaims()) return;
   if (_pendingClaimPoll) return _pendingClaimPoll;
   const addr = _walletAddr;
   _pendingClaimPoll = (async function() {
     for (let attempt = 0; attempt < heavyTxConfirmationPolls; attempt++) {
       if (_walletSwitching || addr !== _walletAddr) break;
-      if (Object.keys(_pendingClaimIds).length === 0) break;
+      if (!hasPendingClaims()) break;
       const txIds = Object.keys(_pendingClaimTxs);
       for (let i = 0; i < txIds.length; i++) {
         const id = txIds[i];
@@ -2891,12 +3017,15 @@ function pollPendingClaims() {
         try {
           const tx = await api('GET', '/tx?hash=' + encodeURIComponent(hash));
           const st = tx.status || 'pending';
-          if (['rejected', 'dropped', 'unaccepted', 'replaced', 'discarded'].includes(st)) {
+          if (st === 'dropped') {
+            logStealth(id + ': dropped locally. outcome unresolved. refresh claim status later', 'log-err');
+          } else if (['rejected', 'unaccepted', 'replaced', 'discarded'].includes(st)) {
             const reason = tx.submit_error || tx.reject_reason || tx.reject_type || st;
             logStealth(id + ': ' + st + ' - ' + reason, 'log-err');
             delete _pendingClaimIds[id];
             delete _pendingClaimTxs[id];
           } else if (st === 'confirmed') {
+            _confirmedClaimIds[id] = true;
             logStealth(id + ': confirmed', 'log-ok');
             delete _pendingClaimIds[id];
             delete _pendingClaimTxs[id];
@@ -2905,13 +3034,15 @@ function pollPendingClaims() {
       }
       await doStealthScan();
       await loadDashboard();
-      if (Object.keys(_pendingClaimIds).length > 0) {
+      if (hasPendingClaims()) {
         await new Promise(function(resolve) { setTimeout(resolve, heavyTxConfirmationIntervalMs); });
       }
     }
   })().finally(function() {
     _pendingClaimPoll = null;
+    updateClaimControls();
   });
+  updateClaimControls();
   return _pendingClaimPoll;
 }
 
@@ -4192,9 +4323,17 @@ function modalPrompt(title, label, opts) {
 }
 
 async function doSwitchAccount(addr) {
+  if (walletOperationInProgress()) {
+    showResult('wallet-mgmt-result', false, 'wait for the current wallet operation or claim confirmation to finish');
+    return;
+  }
   resetApiKey(true);
   var pin = await modalPrompt('switch account', 'enter PIN', { pin: true, btnText: 'switch' });
   if (!pin) return;
+  if (walletOperationInProgress()) {
+    showResult('wallet-mgmt-result', false, 'wallet operation started while waiting for PIN. account was not switched');
+    return;
+  }
   clearResult('wallet-mgmt-result');
   _walletSwitching = true;
   try {
@@ -4206,6 +4345,7 @@ async function doSwitchAccount(addr) {
     var so = $('stealth-outputs'); if (so) so.innerHTML = '';
     _pendingClaimIds = {};
     _pendingClaimTxs = {};
+    _confirmedClaimIds = {};
     _cachedBal = null;
     _encryptedBalanceRaw = 0;
     _encPresent = false;
@@ -4298,12 +4438,35 @@ async function doSaveSettings() {
   var explorer = $('settings-explorer').value.trim();
   var bridgeSigner = $('settings-bridge-signer').value.trim();
   if (!rpc) { showResult('settings-result', false, 'rpc url required'); return; }
+  if (walletOperationInProgress()) {
+    showResult('settings-result', false, 'wait for the current wallet operation or claim confirmation to finish');
+    return;
+  }
   try {
-    var pin = await modalPrompt('confirm settings change', 'enter PIN to change network endpoints', { pin: true, btnText: 'save' });
+    var wallet = await api('GET', '/wallet');
+    if (walletOperationInProgress()) throw new Error('wait for the current wallet operation or claim confirmation to finish');
+    var pin = await modalPrompt('confirm settings change',
+      'enter PIN to change network endpoints'
+      + '\nother idle tabs reload after a change. unsaved form state in those tabs is lost'
+      + '\nbridge and swap keep their own network contracts and relayer/scanner settings',
+      { pin: true, btnText: 'save' });
     if (!pin) { showResult('settings-result', false, 'settings change cancelled'); return; }
-    var resp = await api('POST', '/settings', { rpc_url: rpc, explorer_url: explorer, bridge_signer_url: bridgeSigner, pin: pin });
+    if (walletOperationInProgress()) throw new Error('wallet operation or claim confirmation started while waiting for PIN');
+    var settingsChanged = rpc !== wallet.rpc_url
+      || (explorer || wallet.explorer_url || '') !== (wallet.explorer_url || '')
+      || bridgeSigner !== (wallet.bridge_signer_url || '');
+    var resp = await api('POST', '/settings', {
+      rpc_url: rpc,
+      explorer_url: explorer,
+      bridge_signer_url: bridgeSigner,
+      expected_wallet: wallet.address,
+      expected_generation: wallet.generation,
+      pin: pin
+    });
     if (explorer) _explorerUrl = explorer.replace(/\/+$/, '');
     try { _rpcHost = new URL(rpc).hostname; } catch(e) { _rpcHost = rpc; }
+    updateNetworkPicker(rpc);
+    if (settingsChanged) notifyNetworkChanged();
     if (resp && resp.cache_cleared) {
       clearAllAddressRuntime();
       dropAllPersistedRuntime();
@@ -4316,6 +4479,9 @@ async function doSaveSettings() {
       _encPresent = false;
       _encKnown = false;
       _unclaimedCount = 0;
+      _confirmedClaimIds = {};
+      _pendingClaimIds = {};
+      _pendingClaimTxs = {};
       _tokenSymbols = {};
       _tokenDecimals = {};
       fetchBalance();
@@ -4683,6 +4849,7 @@ async function loadWalletInfo() {
     }
     if (w.explorer_url) _explorerUrl = w.explorer_url.replace(/\/+$/, '');
     if (w.rpc_url) try { _rpcHost = new URL(w.rpc_url).hostname; } catch(e) { _rpcHost = w.rpc_url; }
+    updateNetworkPicker(w.rpc_url);
     _hasMasterSeed = !!w.has_master_seed;
     $('hdr-addr').innerHTML = '<span class="mono">' + _walletAddr + '</span>';
     $('hdr-logout').style.display = '';
@@ -4699,6 +4866,12 @@ async function loadWalletInfo() {
 }
 
 async function doLogout() {
+  if (walletOperationInProgress()) {
+    $('hdr-status').textContent = 'operation in progress';
+    $('hdr-status').title = 'wait for the current wallet operation or claim confirmation to finish before locking';
+    $('hdr-status').className = 'right error';
+    return;
+  }
   resetApiKey(true);
   if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
   $('hdr-status').lockFailure = false;
@@ -4731,6 +4904,9 @@ async function doLogout() {
     if (element) element.textContent = '';
   }
   _walletAddr = '';
+  _confirmedClaimIds = {};
+  _pendingClaimIds = {};
+  _pendingClaimTxs = {};
   _cachedBal = null;
   _encryptedBalanceRaw = 0;
   _encPresent = false;
@@ -4744,6 +4920,8 @@ async function doLogout() {
   $('hdr-dev').style.display = 'none';
   $('hdr-circles').style.display = 'none';
   $('hdr-apps').style.display = 'none';
+  $('hdr-network-picker').style.display = 'none';
+  $('network-result').hidden = true;
   $('hdr-addr').textContent = 'locked';
   $('hdr-status').textContent = 'locked';
   $('hdr-status').className = 'right';
@@ -4756,6 +4934,10 @@ function startRefreshTimer() {
   bgStealthScan();
   fetchStaging();
   _refreshTimer = setInterval(function() {
+    if (_networkReloadPending) {
+      if (!walletOperationInProgress()) window.location.reload();
+      return;
+    }
     if (_walletSwitching) return;
     fetchStaging();
     if (_privateOpInFlight) return;
@@ -4881,9 +5063,9 @@ function wireDelegation() {
     closeTokenTransfer, onLangChange, editorUpdateWithLiveCompile, doCompile,
     loadTemplate, doPreviewDeploy, doDeploy, doContractCall, doContractView,
     doFheEncrypt, doFheDecrypt, doContractInfo, doContractReceipt, doVerifyContract,
-    doSaveSettings, doChangePin, showApiKey, copyApiKey, resetApiKey, goBack, switchView, switchImportTab, switchBottomTab,
+    switchNetwork, doSaveSettings, doChangePin, showApiKey, copyApiKey, resetApiKey, goBack, switchView, switchImportTab, switchBottomTab,
     ideCloseProject, ideExportZip, ideNewFile, ideOpenFile, ideCloseTab, ideNewProject,
-    ideLoadProject, ideDeleteProject, showTx, retrySavedTx, discardSavedTx, claimSelected, openTokenTransfer,
+    ideLoadProject, ideDeleteProject, showTx, retrySavedTx, discardSavedTx, claimSelected, refreshPendingClaims, openTokenTransfer,
     loadMoreHistory, loadHistorySource, revealPrivateKeys, doSwitchAccount, doChangePinForWallet,
     doDeriveAccount, showImportAnother, showImportOptions,
     navTo: function(a) { if (typeof a === 'string' && a.length && /^\/?[a-z0-9_/-]*(?:\.html)?$/.test(a) && !a.startsWith('//')) window.location.href = a; },
@@ -4903,6 +5085,37 @@ function wireDelegation() {
     fn(el.getAttribute('data-arg'), el, e);
   }
   document.addEventListener('click', function(e) { run(e, 'data-action'); });
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('#hdr-network-picker')) $('network-dropdown').open = false;
+  });
+  document.addEventListener('keydown', function(e) {
+    var dropdown = $('network-dropdown');
+    if (!dropdown.contains(e.target)) return;
+    var buttons = Array.from(dropdown.querySelectorAll('button'));
+    if (e.key === 'Escape') {
+      dropdown.open = false;
+      $('hdr-network').focus();
+    } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+      e.preventDefault();
+      dropdown.open = true;
+      var index = buttons.indexOf(document.activeElement);
+      var next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
+        : e.key === 'ArrowDown' ? (index + 1) % buttons.length
+        : (index < 0 ? buttons.length - 1 : (index + buttons.length - 1) % buttons.length);
+      buttons[next].focus();
+    }
+  });
+  document.addEventListener('focusin', function(e) {
+    if (!e.target.closest('#hdr-network-picker')) $('network-dropdown').open = false;
+  });
+  window.addEventListener('storage', function(e) {
+    if (e.key !== 'octra-network-change') return;
+    if (walletOperationInProgress()) {
+      _networkReloadPending = true;
+      return;
+    }
+    window.location.reload();
+  });
   document.addEventListener('change', function(e) { run(e, 'data-change'); });
   document.addEventListener('input', function(e) { run(e, 'data-input'); });
   document.addEventListener('contextmenu', function(e) { run(e, 'data-context'); });
