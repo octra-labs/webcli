@@ -132,6 +132,15 @@ public:
         entries_.push_back({key, random_key(), address, generation, now + std::chrono::hours(8)});
         return key;
     }
+    void endpoint_change(const std::string& address, uint64_t old_generation, uint64_t new_generation) {
+        if (old_generation == new_generation) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto now = now_();
+        for (auto& value : entries_) {
+            if (value.address == address && value.generation == old_generation && value.expires > now)
+                value.generation = new_generation;
+        }
+    }
     void renew(const httplib::Request& request, httplib::Response& response,
         const std::string& address, uint64_t generation) {
         if (!privileged(request)) response.set_header("X-Webcli-Session", issue(address, generation));

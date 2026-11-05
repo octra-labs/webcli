@@ -9,7 +9,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octra_wallet</title>
-<link rel="stylesheet" href="style.css?v=network-2">
+<link rel="stylesheet" href="style.css?v=14">
 </head>
 <body>
 
@@ -114,7 +114,7 @@
           <button type="button" role="menuitemradio" aria-checked="false" data-action="switchNetwork" data-arg="devnet">devnet</button>
         </div>
       </details>
-      <div id="network-result" class="network-result" role="status" hidden></div>
+      <div id="network-result" class="network-result" role="status" hidden><span id="network-result-text"></span><button type="button" class="network-result-dismiss" data-action="dismissNetworkNotice" aria-label="dismiss network error">close</button></div>
     </div>
     <button class="right logout-btn" id="hdr-circles" data-action="navTo" data-arg="circles.html" style="display:none">circles</button>
     <button class="right logout-btn" id="hdr-apps" data-action="switchView" data-arg="apps" style="display:none">apps</button>
@@ -528,7 +528,7 @@
     </div>
     <div class="section-title">api key</div>
     <div class="form-area">
-      <p>for local tools and automation, you can use an API key (keep it private), protected operations require a PIN in any case. this key expires when the session is closed, including locking, RPC changes, etc.</p>
+      <p>for local tools and automation, you can use an API key (keep it private), protected operations require a PIN in any case. this key expires after 8 hours. locking or changing wallets invalidates it. switching networks keeps existing keys valid.</p>
       <div class="form-row" id="api-key-row" style="display:none">
         <label for="api-key-value">api key</label>
         <input type="text" id="api-key-value" readonly autocomplete="off" spellcheck="false">
@@ -588,7 +588,7 @@
 <div class="footer">octra_wallet | 2026 | ver. - 0.06.01-alpha</div>
 
 </div>
-<script src="wallet.js?v=network-4"></script>
+<script src="wallet.js?v=47"></script>
 </body>
 
 </html>

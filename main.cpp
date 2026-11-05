@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <limits>
 #include <array>
+#include <tuple>
 #include <cerrno>
 #include <cctype>
 #include <utility>
@@ -202,6 +203,34 @@ struct AtomicFlagGuard {
     ~AtomicFlagGuard() { flag.store(false); }
     AtomicFlagGuard(const AtomicFlagGuard&) = delete;
     AtomicFlagGuard& operator=(const AtomicFlagGuard&) = delete;
+};
+
+struct ClaimOperationGuard {
+    using Key = std::tuple<std::string, uint64_t, std::string, std::string>;
+    inline static std::mutex mutex;
+    inline static std::set<Key> active;
+    std::vector<Key> keys;
+
+    ~ClaimOperationGuard() {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto& key : keys) active.erase(key);
+    }
+    ClaimOperationGuard() = default;
+    ClaimOperationGuard(const ClaimOperationGuard&) = delete;
+    ClaimOperationGuard& operator=(const ClaimOperationGuard&) = delete;
+
+    bool acquire(const std::string& addr, uint64_t generation, const std::string& rpc,
+        const std::vector<uint64_t>& ids) {
+        std::vector<Key> requested;
+        for (const auto id : ids) requested.emplace_back(addr, generation, rpc, std::to_string(id));
+        std::sort(requested.begin(), requested.end());
+        requested.erase(std::unique(requested.begin(), requested.end()), requested.end());
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto& key : requested) if (active.count(key)) return false;
+        active.insert(requested.begin(), requested.end());
+        keys = std::move(requested);
+        return true;
+    }
 };
 
 struct ScopedSecret64 {
@@ -727,13 +756,36 @@ static bool needs_replacement(const json& row, const octra::RpcResult& reply, in
         || (reply.ok && reply.result.is_object() && reply.result.value("status", "") == "dropped");
 }
 
+static bool claim_lookup_missing(const json& row, const octra::RpcResult& reply) {
+    return !row.is_null() && row.value("op_type", "") == "claim" && row.contains("output_id")
+        && (row.value("status", "") == "pending" || row.value("status", "") == "confirmed")
+        && reply.replied && !reply.ok && reply.code == 112;
+}
+
+static bool claim_output_unspent(octra::RpcClient& rpc, const json& row) {
+    try {
+        const auto id = octra::claim_id(row.at("output_id"));
+        const auto reply = rpc.get_stealth_outputs_by_id(json::array({id}), 5);
+        if (!reply.ok) return false;
+        const auto outputs = octra::claim_outputs({id}, reply.result);
+        const auto& output = outputs.at(0);
+        return output.contains("claimed") && output["claimed"].is_number_integer()
+            && output["claimed"] == 0;
+    } catch (const std::exception&) { return false; }
+}
+
 static void observe_own_tx(uint64_t token, const std::string& hash,
-    const octra::RpcResult& reply, int nonce, const json& replacements) {
+    const octra::RpcResult& reply, int nonce, const json& replacements, bool unspent_claim = false) {
     const auto row = g_own_history.find(token, hash);
-    if (row.is_null() || !tx_lookup_needed(row)) return;
+    if (row.is_null()) return;
+    if (unspent_claim && row.value("status", "") == "confirmed")
+        throw octra::RpcStateError("confirmed claim conflicts with current output state");
+    if (!tx_lookup_needed(row)) return;
     const auto status = reply.ok && reply.result.is_object() ? reply.result.value("status", "") : "";
     if (status == "pending" || status == "confirmed" || status == "rejected" || status == "dropped")
         g_own_history.update(token, hash, reply.result);
+    else if (unspent_claim && claim_lookup_missing(row, reply))
+        g_own_history.claim_unknown(token, hash, row.at("output_id").get<std::string>());
     if (needs_replacement(row, reply, nonce)) {
         for (const auto& tx : replacements) {
             if (!TxJournal::confirms_replacement(tx, row.value("from", ""), g_own_chain,
@@ -833,7 +885,8 @@ static json wallet_staging(const WalletRead* identity = nullptr) {
     return octra::staging_status(reply.result, addr, own);
 }
 
-static void refresh_own_rows(const std::string& addr, uint64_t generation, json& rows) {
+static void refresh_own_rows(const std::string& addr, uint64_t generation, json& rows,
+    bool confirmed_claims = false) {
     const auto token = own_history_open(addr, generation);
     std::string url;
     {
@@ -847,7 +900,8 @@ static void refresh_own_rows(const std::string& addr, uint64_t generation, json&
     std::vector<json> params;
     std::vector<size_t> positions;
     for (size_t i = 0; i < rows.size(); ++i) {
-        if (!tx_lookup_needed(rows[i])) continue;
+        if (!tx_lookup_needed(rows[i]) && !(confirmed_claims
+            && rows[i].value("op_type", "") == "claim" && rows[i].value("status", "") == "confirmed")) continue;
         methods.push_back("octra_transaction");
         params.push_back(json::array({rows[i].at("hash")}));
         positions.push_back(i);
@@ -856,6 +910,10 @@ static void refresh_own_rows(const std::string& addr, uint64_t generation, json&
     octra::RpcClient rpc(url);
     const int nonce = confirmed_nonce(rpc, addr);
     const auto replies = rpc.call_batch(methods, params, 5);
+    std::vector<bool> unspent_claims(replies.size(), false);
+    for (size_t i = 0; i < replies.size() && i < positions.size(); ++i)
+        if (claim_lookup_missing(rows[positions[i]], replies[i]))
+            unspent_claims[i] = claim_output_unspent(rpc, rows[positions[i]]);
     json replacements = json::array();
     for (size_t i = 0; i < replies.size() && i < positions.size(); ++i) {
         if (!needs_replacement(rows[positions[i]], replies[i], nonce)) continue;
@@ -869,7 +927,7 @@ static void refresh_own_rows(const std::string& addr, uint64_t generation, json&
     for (size_t i = 0; i < replies.size() && i < positions.size(); ++i) {
         const auto& reply = replies[i];
         const auto hash = rows[positions[i]].at("hash").get<std::string>();
-        observe_own_tx(token, hash, reply, nonce, replacements);
+        observe_own_tx(token, hash, reply, nonce, replacements, unspent_claims[i]);
         rows[positions[i]] = g_own_history.find(token, hash);
     }
 }
@@ -2052,9 +2110,10 @@ static json private_cached(const std::string& addr, uint64_t generation,
         }
     }
     if (row.is_null()) return nullptr;
-    if (tx_status_is_pending_like(row)) {
+    if (tx_status_is_pending_like(row)
+        || (row.value("op_type", "") == "claim" && row.value("status", "") == "confirmed")) {
         json rows = json::array({row});
-        refresh_own_rows(addr, generation, rows);
+        refresh_own_rows(addr, generation, rows, row.value("op_type", "") == "claim");
         row = rows[0];
     }
     auto reply = saved_reply(row);
@@ -2065,6 +2124,15 @@ static json private_cached(const std::string& addr, uint64_t generation,
 static json private_claim_output_cached(const std::string& addr, uint64_t generation,
     const std::string& output) {
     const auto token = own_history_open(addr, generation, true);
+    json rows;
+    {
+        std::lock_guard<std::mutex> lock(g_mtx);
+        if (!g_wallet_loaded || g_wallet.addr != addr || g_wallet_generation != generation
+            || g_own_token != token) throw octra::RpcStateError("wallet changed before claim output lookup");
+        rows = g_own_history.find_claim_outputs(token, output);
+    }
+    if (rows.empty()) return nullptr;
+    refresh_own_rows(addr, generation, rows, true);
     json row;
     {
         std::lock_guard<std::mutex> lock(g_mtx);
@@ -2072,14 +2140,9 @@ static json private_claim_output_cached(const std::string& addr, uint64_t genera
             || g_own_token != token) throw octra::RpcStateError("wallet changed before claim output lookup");
         row = g_own_history.find_claim_output(token, output);
     }
-    if (row.is_null()) return nullptr;
-    if (tx_status_is_pending_like(row)) {
-        json rows = json::array({row});
-        refresh_own_rows(addr, generation, rows);
-        row = rows[0];
-    }
     auto reply = saved_reply(row);
-    reply["reused"] = true;
+    const auto status = row.value("status", "");
+    if (status == "pending" || status == "confirmed") reply["reused"] = true;
     return reply;
 }
 
@@ -2096,6 +2159,16 @@ static json submit_private_tx(const octra::Transaction& tx, uint64_t generation,
     if (!waiting.is_null()) {
         json rows = json::array({waiting});
         refresh_own_rows(tx.from, generation, rows);
+    }
+    if (tx.op_type == "claim" && !output.empty()) {
+        auto saved = private_claim_output_cached(tx.from, generation, output);
+        if (!saved.is_null() && saved.value("reused", false)) return saved;
+        const auto read = wallet_read();
+        if (read.addr != tx.from || read.generation != generation)
+            throw octra::RpcStateError("wallet changed before claim submission");
+        octra::RpcClient rpc(read.url);
+        if (!claim_output_unspent(rpc, {{"output_id", output}}))
+            throw octra::RpcStateError("claim output is spent or unavailable");
     }
     std::string url;
     {
@@ -6403,6 +6476,12 @@ int main(int argc, char** argv) {
         const auto request_fee = parse_ou(body, "3000");
         if (std::stoull(request_fee) < 3000)
             throw octra::TxInputError("claim fee must be at least 3000 OU");
+        ClaimOperationGuard claim_operation;
+        if (!claim_operation.acquire(g_wallet.addr, generation, g_wallet.rpc_url, ids)) {
+            res.status = 409;
+            res.set_content(err_json("claim output operation already active").dump(), "application/json");
+            return;
+        }
         const auto claim_id = [&](const std::string& output) {
             return request_id.empty() ? std::string() : octra::sha256_hex(request_id + "/" + output);
         };
@@ -6410,11 +6489,15 @@ int main(int argc, char** argv) {
             return octra::sha256_hex(json::array({"claim", output, request_fee}).dump());
         };
         json previous = json::object();
+        json recovery = json::object();
         for (const auto id : ids) {
             const auto output = std::to_string(id);
             auto saved = private_cached(g_wallet.addr, generation, claim_id(output), claim_key(output));
             if (saved.is_null()) saved = private_claim_output_cached(g_wallet.addr, generation, output);
-            if (!saved.is_null()) previous[output] = saved;
+            if (!saved.is_null() && saved.value("reused", false)) previous[output] = saved;
+            else if (!saved.is_null() && (saved.value("status", "") == "unknown"
+                || saved.value("status", "") == "dropped")
+                && saved.value("retryable", false)) recovery[output] = saved;
         }
         if (!ids.empty() && previous.size() == ids.size()) {
             json results = json::array();
@@ -6472,7 +6555,13 @@ int main(int argc, char** argv) {
         json results = json::array();
         bool submission_failed = false;
 
-        for (const auto& out : outputs) {
+        json ordered_outputs = json::array();
+        for (const auto& out : outputs)
+            if (recovery.contains(std::to_string(octra::claim_id(out["id"])))) ordered_outputs.push_back(out);
+        for (const auto& out : outputs)
+            if (!recovery.contains(std::to_string(octra::claim_id(out["id"])))) ordered_outputs.push_back(out);
+
+        for (const auto& out : ordered_outputs) {
             const auto out_id = std::to_string(octra::claim_id(out["id"]));
             if (previous.contains(out_id)) {
                 auto saved = previous[out_id];
@@ -6498,6 +6587,34 @@ int main(int argc, char** argv) {
             }
             bool submit_attempted = false;
             try {
+                if (recovery.contains(out_id)) {
+                    submit_attempted = true;
+                    const auto token = own_history_open(g_wallet.addr, generation, true);
+                    int retry_nonce = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(g_mtx);
+                        const auto saved = g_own_history.resend(token, recovery[out_id]["tx_hash"]);
+                        retry_nonce = octra::rpc_nonce(saved.at("nonce"));
+                        if (saved.value("ou", "") != request_fee)
+                            throw octra::TxInputError("saved claim fee differs. retry the saved transaction from history");
+                    }
+                    auto sr2 = send_saved_tx(recovery[out_id]["tx_hash"], g_wallet.addr,
+                        generation, token, g_wallet.rpc_url);
+                    if (sr2.contains("error")) {
+                        submission_failed = true;
+                        results.push_back({{"id", out_id}, {"ok", false}, {"error", sr2["error"]}});
+                        continue;
+                    }
+                    const auto hash = sr2.value("tx_hash", "");
+                    if (hash.empty()) throw octra::RpcStateError("submission returned no transaction hash");
+                    sr2["reused"] = true;
+                    sr2["id"] = out_id;
+                    sr2["ok"] = true;
+                    results.push_back(sr2);
+                    if (sr2.value("status", "unknown") == "pending") nonce = std::max(nonce, retry_nonce);
+                    else submission_failed = true;
+                    continue;
+                }
                 const int math = read_proof_policy(g_wallet.addr);
                 auto eph_raw = octra::base64_decode(out.at("eph_pub").get<std::string>());
                 if (eph_raw.size() != 32) throw std::runtime_error("bad eph_pub");
@@ -6664,6 +6781,7 @@ int main(int argc, char** argv) {
         octra::RpcClient rpc(url);
         const int nonce = own.is_null() ? -1 : confirmed_nonce(rpc, addr);
         auto r = rpc.get_transaction(hash);
+        const bool unspent_claim = claim_lookup_missing(own, r) && claim_output_unspent(rpc, own);
         const auto replacements = needs_replacement(own, r, nonce)
             ? replacement_rows(rpc, addr, own) : json::array();
         if (!own.is_null()) {
@@ -6674,7 +6792,7 @@ int main(int argc, char** argv) {
                 res.set_content(err_json("history wallet changed").dump(), "application/json");
                 return;
             }
-            observe_own_tx(token, hash, r, nonce, replacements);
+            observe_own_tx(token, hash, r, nonce, replacements, unspent_claim);
             own = g_own_history.find(token, hash);
             res.set_content(own.dump(), "application/json");
             return;
@@ -10892,6 +11010,11 @@ int main(int argc, char** argv) {
             res.set_content(err_json("invalid json").dump(), "application/json");
             return;
         }
+        if (access.scoped(req) && (!body.contains("expected_wallet") || !body.contains("expected_generation"))) {
+            res.status = 400;
+            res.set_content(err_json("expected_wallet and expected_generation required").dump(), "application/json");
+            return;
+        }
         if (!wallet_pin_ok(body, res)) return;
         std::string new_rpc = body.value("rpc_url", "");
         std::string new_explorer = body.value("explorer_url", "");
@@ -10928,8 +11051,8 @@ int main(int argc, char** argv) {
             clear_fee_cache();
             if (old_rpc != g_wallet.rpc_url) {
                 close_own_history();
+                access.endpoint_change(g_wallet.addr, g_wallet_generation, g_wallet_generation + 1);
                 ++g_wallet_generation;
-                access.renew(req, res, g_wallet.addr, g_wallet_generation);
                 clear_enc_bal_cache();
                 g_pvac_remote_pubkey_b64.clear();
                 g_pvac_confirmed = false;
@@ -10952,6 +11075,7 @@ int main(int argc, char** argv) {
         j["rpc_url"] = g_wallet.rpc_url;
         j["explorer_url"] = g_wallet.explorer_url;
         j["bridge_signer_url"] = g_wallet.bridge_signer_url;
+        j["generation"] = std::to_string(g_wallet_generation);
         j["cache_cleared"] = cache_cleared;
         res.set_content(j.dump(), "application/json");
     });
