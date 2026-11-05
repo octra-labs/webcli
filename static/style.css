@@ -1098,7 +1098,8 @@ td {
 }
 
 #modal-pin input,
-#modal-pin-setup input {
+#modal-pin-setup input,
+.modal-input.circle-pin-input {
   text-align: center;
   letter-spacing: 8px;
   font-size: 16px;
@@ -1649,6 +1650,8 @@ td {
   box-sizing: border-box;
 }
 .modal-overlay > .modal-box > .modal-title,
+.modal-overlay > .modal-box > .modal-input-label,
+.modal-overlay > .modal-box > .modal-input-help,
 .modal-overlay > .modal-box > .input-field,
 .modal-overlay > .modal-box > .modal-buttons {
   flex-shrink: 0;
@@ -1675,6 +1678,16 @@ td {
   outline: none; margin-bottom: 14px; box-sizing: border-box;
 }
 .modal-input:focus { border-color: #3B567F; }
+.modal-input.circle-pin-input {
+  line-height: 150%; color: #000; background: #fff;
+}
+.modal-input.circle-pin-input::placeholder { color: #8C9DB6; }
+.modal-input-label {
+  display: block; font-size: 12px; font-weight: bold; color: #3B567F;
+}
+.modal-input-help {
+  font-size: 12px; color: #5A6A7D; line-height: 1.5; margin: 6px 0 12px;
+}
 .modal-buttons {
   display: flex; gap: 8px;
 }
@@ -1689,6 +1702,7 @@ td {
   background: #3B567F; color: #fff; border-color: #3B567F;
 }
 .modal-btn-primary:hover { background: #2C4060; }
+.modal-btn:disabled { opacity: 0.5; cursor: default; }
 .acct-btn { background: #E5E9EF; }
 .acct-btn:hover { background: #D0D7E2; }
 .account-card:hover { background: #2A3F5F; color: #fff; }
