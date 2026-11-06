@@ -808,7 +808,26 @@ static uint64_t own_history_open(const std::string& addr, uint64_t generation, b
         url = g_wallet.rpc_url;
     }
     octra::RpcClient rpc(url);
-    const auto runtime = rpc.call("octra_runtimeVersion", json::array(), 5);
+    const auto check = [&] {
+        std::lock_guard<std::mutex> lock(g_mtx);
+        if (!g_wallet_loaded || g_wallet.addr != addr || g_wallet_generation != generation
+            || g_wallet.rpc_url != url) throw octra::RpcStateError("history wallet changed");
+    };
+    octra::RpcResult runtime{false, {}, ""};
+    for (int attempt = 0; attempt < (online ? 3 : 1); ++attempt) {
+        check();
+        runtime = rpc.call("octra_runtimeVersion", json::array(), 5);
+        check();
+        const bool temporary = !runtime.ok && !runtime.replied
+            && (runtime.error == "connection failed" || runtime.error == "RPC request timed out"
+                || runtime.error == "RPC request failed" || runtime.http_status == 408
+                || runtime.http_status == 429 || runtime.http_status == 500
+                || runtime.http_status == 502 || runtime.http_status == 503 || runtime.http_status == 504);
+        if (!online || !temporary || attempt == 2) break;
+        fprintf(stderr, "event = history_network status = retry attempt = %d error = %s\n",
+            attempt + 1, runtime.error.c_str());
+        std::this_thread::sleep_for(std::chrono::milliseconds(200 * (attempt + 1)));
+    }
     std::string chain;
     if (runtime.ok && runtime.result.is_object()
         && runtime.result.contains("chain_id") && runtime.result["chain_id"].is_string())
