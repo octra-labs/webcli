@@ -1406,7 +1406,7 @@ function applyBalanceData(bal) {
   }
   const encState = next.encrypted_balance_state;
   const encText = _encKnown ? fmtOct(enc)
-    : encState === 'unavailable' ? 'private balance temporarily unavailable'
+    : encState === 'unavailable' ? 'loading...'
     : !_encPresent ? '-' : encState === 'legacy_upgrade_required'
     ? 'legacy encrypted balance' : 'private balance unreadable';
   var pubText = accountUnknown ? '-' : fmtOct(pub);
@@ -2382,7 +2382,7 @@ async function doKeySwitch() {
   }
   const balanceText = st.encrypted_balance_known
     ? fmtOct(st.encrypted_balance_raw || '0')
-    : (st.mode === 'unavailable' || st.retry_mode === 'unavailable' ? 'private balance temporarily unavailable'
+    : (st.mode === 'unavailable' || st.retry_mode === 'unavailable' ? 'loading...'
       : st.cipher_present ? 'encrypted balance unreadable' : '0 oct');
   h += detailRow('encrypted balance', balanceText, true);
   if (st.required_public_fee_raw) {

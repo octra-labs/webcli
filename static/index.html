@@ -184,11 +184,13 @@
       <span class="bal-label">public balance:</span> <span id="enc-pub-bal" class="mono">-</span>
       <span class="bal-sep">|</span>
       <span class="bal-label">encrypted balance:</span> <span id="enc-enc-bal" class="mono">-</span>
+      <span class="bal-sep">|</span>
+      <span class="bal-label" id="enc-room">encrypt before refresh: checking</span>
     </div>
+    <div class="balance-strip" id="spend-room" hidden></div>
     <div class="form-split">
       <div class="form-panel">
         <div class="form-panel-title">encrypt</div>
-        <div class="balance-strip" id="enc-room">encrypt before refresh: checking</div>
         <div class="form-row">
           <label>amount to encrypt (oct)</label>
           <input type="text" id="enc-amount" placeholder="0.000000">
@@ -204,7 +206,6 @@
       </div>
       <div class="form-panel">
         <div class="form-panel-title">decrypt</div>
-        <div class="balance-strip" id="spend-room" hidden></div>
         <div class="form-row">
           <label>amount to decrypt (oct)</label>
           <input type="text" id="dec-amount" placeholder="0.000000">
@@ -588,7 +589,7 @@
 <div class="footer">octra_wallet | 2026 | ver. - 0.06.01-alpha</div>
 
 </div>
-<script src="wallet.js?v=47"></script>
+<script src="wallet.js?v=48"></script>
 </body>
 
 </html>
