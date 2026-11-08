@@ -6,6 +6,10 @@ a full-fledged web client based on a local server for working with the octra net
 
 you can send txs, encrypt and decrypt balances, conduct stealth txs, and much more
 
+use the network menu in the header to switch between mainnet and devnet. online status is shown separately.
+
+separate wallet processes or machines using the same key do not coordinate claims. only the node checks whether an output has already been spent.
+
 ## requirements
 
 - c++17 compiler (GCC/Clang)

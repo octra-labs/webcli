@@ -9,7 +9,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octra_wallet</title>
-<link rel="stylesheet" href="style.css?v=13">
+<link rel="stylesheet" href="style.css?v=14">
 </head>
 <body>
 
@@ -105,7 +105,17 @@
     <div class="subtitle" id="hdr-addr">loading...</div>
   </div>
   <div class="hdr-right-group">
-    <div class="right" id="hdr-status">connecting...</div>
+    <div class="right" id="hdr-status" role="status">connecting...</div>
+    <div class="network-picker" id="hdr-network-picker" style="display:none">
+      <details id="network-dropdown">
+        <summary class="right logout-btn" id="hdr-network" aria-label="switch network"><span id="hdr-network-label">network</span><span class="network-arrow" aria-hidden="true"></span></summary>
+        <div class="network-menu" role="menu" aria-label="networks">
+          <button type="button" role="menuitemradio" aria-checked="false" data-action="switchNetwork" data-arg="mainnet">mainnet</button>
+          <button type="button" role="menuitemradio" aria-checked="false" data-action="switchNetwork" data-arg="devnet">devnet</button>
+        </div>
+      </details>
+      <div id="network-result" class="network-result" role="status" hidden><span id="network-result-text"></span><button type="button" class="network-result-dismiss" data-action="dismissNetworkNotice" aria-label="dismiss network error">close</button></div>
+    </div>
     <button class="right logout-btn" id="hdr-circles" data-action="navTo" data-arg="circles.html" style="display:none">circles</button>
     <button class="right logout-btn" id="hdr-apps" data-action="switchView" data-arg="apps" style="display:none">apps</button>
     <button class="right logout-btn" id="hdr-dev" data-action="switchView" data-arg="dev" style="display:none">dev tools</button>
@@ -128,7 +138,7 @@
 
   <div class="view active" id="view-dashboard">
     <div class="stats-row">
-      <div class="stat-box"><div class="label">public balance</div><div class="value" id="st-balance">-</div></div>
+      <div class="stat-box"><div class="label">public balance</div><div class="value" id="st-balance">-</div><div class="label" id="st-account-status"></div></div>
       <div class="stat-box"><div class="label">encrypted balance <a class="ct-struct-link" id="ct-struct-link" href="cipher.html" target="_blank" rel="noopener" hidden>(ct struct)</a></div><div class="value" id="st-enc-balance">-</div><div class="label"><span id="st-encrypt-room">encrypt before refresh: checking</span> <a href="#" id="btn-key-switch" style="display:none" data-action="doKeySwitch" data-prevent="1">(refresh)</a></div></div>
       <div class="stat-box"><div class="label">nonce</div><div class="value" id="st-nonce">-</div></div>
       <div class="stat-box"><div class="label" title="Only your outgoing transactions waiting at the selected RPC node">staging (yours)</div><div class="value" id="st-staging">-</div><div class="label" id="st-wallet-work"></div></div>
@@ -174,11 +184,13 @@
       <span class="bal-label">public balance:</span> <span id="enc-pub-bal" class="mono">-</span>
       <span class="bal-sep">|</span>
       <span class="bal-label">encrypted balance:</span> <span id="enc-enc-bal" class="mono">-</span>
+      <span class="bal-sep">|</span>
+      <span class="bal-label" id="enc-room">encrypt before refresh: checking</span>
     </div>
+    <div class="balance-strip" id="spend-room" hidden></div>
     <div class="form-split">
       <div class="form-panel">
         <div class="form-panel-title">encrypt</div>
-        <div class="balance-strip" id="enc-room">encrypt before refresh: checking</div>
         <div class="form-row">
           <label>amount to encrypt (oct)</label>
           <input type="text" id="enc-amount" placeholder="0.000000">
@@ -194,7 +206,6 @@
       </div>
       <div class="form-panel">
         <div class="form-panel-title">decrypt</div>
-        <div class="balance-strip" id="spend-room" hidden></div>
         <div class="form-row">
           <label>amount to decrypt (oct)</label>
           <input type="text" id="dec-amount" placeholder="0.000000">
@@ -518,7 +529,7 @@
     </div>
     <div class="section-title">api key</div>
     <div class="form-area">
-      <p>for local tools and automation, you can use an API key (keep it private), protected operations require a PIN in any case. this key expires when the session is closed, including locking, RPC changes, etc.</p>
+      <p>for local tools and automation, you can use an API key (keep it private), protected operations require a PIN in any case. this key expires after 8 hours. locking or changing wallets invalidates it. switching networks keeps existing keys valid.</p>
       <div class="form-row" id="api-key-row" style="display:none">
         <label for="api-key-value">api key</label>
         <input type="text" id="api-key-value" readonly autocomplete="off" spellcheck="false">
@@ -575,10 +586,10 @@
 
 </div>
 
-<div class="footer">octra_wallet | 2026 | alpha ver. - 0.04.10</div>
+<div class="footer">octra_wallet | 2026 | ver. - 0.06.01-alpha</div>
 
 </div>
-<script src="wallet.js?v=46"></script>
+<script src="wallet.js?v=48"></script>
 </body>
 
 </html>

@@ -108,6 +108,10 @@ var _encPresent = false;
 var _encKnown = false;
 var _unclaimedCount = 0;
 var _pendingClaimIds = {};
+var _unresolvedClaimIds = {};
+var _confirmedClaimIds = {};
+var _claimInFlight = false;
+var _networkReloadPending = false;
 var _pendingClaimTxs = {};
 let _pendingClaimPoll = null;
 let _stealthScanInFlight = null;
@@ -126,6 +130,7 @@ let _compiledProgramEnvelope = null;
 let _compiledProgramMinimum = null;
 var _fees = {};
 var _rpcHost = '';
+var _walletGeneration = '';
 var _hasMasterSeed = false;
 var _addressRuntime = {};
 let _historyEpoch = 0;
@@ -151,8 +156,7 @@ const setConnectionStatus = state => {
   if (!status) return;
   status.lockFailure = false;
   status.title = '';
-  const suffix = _rpcHost ? ' | ' + networkLabel(_rpcHost) : '';
-  status.textContent = state + suffix;
+  status.textContent = state;
   status.className = state === 'online'
     ? 'right online'
     : state === 'offline'
@@ -567,6 +571,34 @@ function setPrivateOpBusy(active) {
     renderEncryptRoom(null);
   }
   if ($('st-wallet-work')) $('st-wallet-work').textContent = active ? 'wallet operation in progress' : '';
+  updateClaimControls();
+}
+
+function hasClaimObservation() {
+  return Object.keys(_pendingClaimIds).length > 0 || Object.keys(_unresolvedClaimIds).length > 0;
+}
+
+function resetClaimState() {
+  _pendingClaimIds = {};
+  _unresolvedClaimIds = {};
+  _confirmedClaimIds = {};
+  _pendingClaimTxs = {};
+  _pendingClaimPoll = null;
+  _stealthScanInFlight = null;
+}
+
+function captureClaimIdentity() {
+  return { addr: _walletAddr, rpc: _rpcHost, generation: _walletGeneration, epoch: _historyEpoch };
+}
+
+function claimIdentityCurrent(identity) {
+  return identity && _walletAddr === identity.addr && _rpcHost === identity.rpc
+    && _walletGeneration === identity.generation && _historyEpoch === identity.epoch
+    && !_networkReloadPending && !_walletSwitching;
+}
+
+function walletOperationInProgress() {
+  return _walletSwitching || _privateOpInFlight || _pvacUpgradeInFlight || _claimInFlight;
 }
 
 var _ideProject = null;
@@ -1210,11 +1242,79 @@ async function doVerifyProject() {
   }
 }
 
-function networkLabel(host) {
-  if (host === 'octra.network') return 'main net';
-  if (host === 'devnet.octrascan.io' || host === '165.227.225.79') return 'dev net';
-  if (host === 'localhost' || host === '127.0.0.1') return 'local';
-  return host;
+const NETWORKS = {
+  mainnet: { rpc: 'https://octra.network/rpc', explorer: 'https://octrascan.io' },
+  devnet: { rpc: 'https://devnet.octrascan.io/rpc', explorer: 'https://devnet.octrascan.io' }
+};
+
+function updateNetworkPicker(rpc) {
+  var selected = Object.keys(NETWORKS).find(function(key) {
+    return rpc.replace(/\/+$/, '') === NETWORKS[key].rpc;
+  });
+  $('hdr-network-label').textContent = selected || 'custom';
+  $('hdr-network').title = rpc;
+  document.querySelectorAll('.network-menu button').forEach(function(button) {
+    button.setAttribute('aria-checked', String(button.getAttribute('data-arg') === selected));
+  });
+  $('hdr-network-picker').style.display = '';
+}
+
+function notifyNetworkChanged() {
+  try { localStorage.setItem('octra-network-change', String(Date.now())); } catch (_) {}
+}
+
+function dismissNetworkNotice() {
+  $('network-result').hidden = true;
+  $('network-result-text').textContent = '';
+  $('hdr-network').focus();
+}
+
+async function switchNetwork(key) {
+  var picker = $('hdr-network-picker');
+  var target = NETWORKS[key];
+  var result = $('network-result');
+  var switching = false;
+  $('network-dropdown').open = false;
+  if (!target || picker.inert) return;
+  result.hidden = true;
+  picker.inert = true;
+  try {
+    var wallet = await api('GET', '/wallet');
+    updateNetworkPicker(wallet.rpc_url);
+    if (wallet.rpc_url.replace(/\/+$/, '') === target.rpc) return;
+    if (walletOperationInProgress())
+      throw new Error('wait for the current wallet operation to finish');
+    var pin = await modalPrompt('switch to ' + key,
+      'enter PIN to switch network. funds stay on their current network'
+      + '\nthis and other idle tabs reload. unsaved form state is lost'
+      + '\nbridge and swap keep their own network contracts and relayer/scanner settings',
+      { pin: true, btnText: 'switch' });
+    if (!pin) return;
+    if (walletOperationInProgress())
+      throw new Error('wallet operation started while waiting for PIN');
+    _walletSwitching = true;
+    switching = true;
+    await api('POST', '/settings', {
+      rpc_url: target.rpc,
+      explorer_url: target.explorer,
+      bridge_signer_url: wallet.bridge_signer_url || '',
+      expected_wallet: wallet.address,
+      expected_generation: wallet.generation,
+      pin: pin
+    });
+    resetApiKey(true);
+    clearAllAddressRuntime();
+    dropAllPersistedRuntime();
+    setConnectionStatus('connecting...');
+    notifyNetworkChanged();
+    window.location.reload();
+  } catch (e) {
+    $('network-result-text').textContent = e.message;
+    result.hidden = false;
+  } finally {
+    if (switching) _walletSwitching = false;
+    picker.inert = false;
+  }
 }
 
 function $(id) { return document.getElementById(id); }
@@ -1232,12 +1332,15 @@ function updateStealthBadge(count) {
 }
 
 async function fetchStealthScan() {
-  const addr = _walletAddr;
-  if (_stealthScanInFlight && _stealthScanInFlight.addr === addr) {
+  const identity = captureClaimIdentity();
+  if (_stealthScanInFlight && _stealthScanInFlight.identity.addr === identity.addr
+      && _stealthScanInFlight.identity.rpc === identity.rpc
+      && _stealthScanInFlight.identity.generation === identity.generation
+      && _stealthScanInFlight.identity.epoch === identity.epoch) {
     return _stealthScanInFlight.request;
   }
   const entry = {
-    addr: addr,
+    identity: identity,
     request: api('GET', '/stealth/scan')
   };
   _stealthScanInFlight = entry;
@@ -1250,14 +1353,19 @@ async function fetchStealthScan() {
 
 async function bgStealthScan() {
   if (_walletSwitching) return;
-  const addr = _walletAddr;
+  const identity = captureClaimIdentity();
   try {
     const res = await fetchStealthScan();
-    if (_walletSwitching || addr !== _walletAddr) return;
+    if (!claimIdentityCurrent(identity)) return;
     const outputs = res.outputs || [];
     let unclaimed = 0;
     for (let i = 0; i < outputs.length; i++) {
-      if (outputs[i].claimed) { delete _pendingClaimIds[String(outputs[i].id)]; continue; }
+      if (outputs[i].claimed || _confirmedClaimIds[String(outputs[i].id)]) {
+        delete _pendingClaimIds[String(outputs[i].id)];
+        delete _unresolvedClaimIds[String(outputs[i].id)];
+        delete _pendingClaimTxs[String(outputs[i].id)];
+        continue;
+      }
       if (outputs[i].claimable === false) continue;
       if (!_pendingClaimIds[String(outputs[i].id)]) unclaimed++;
     }
@@ -1298,11 +1406,13 @@ function applyBalanceData(bal) {
   }
   const encState = next.encrypted_balance_state;
   const encText = _encKnown ? fmtOct(enc)
-    : encState === 'unavailable' ? 'private balance temporarily unavailable'
+    : encState === 'unavailable' ? 'loading...'
     : !_encPresent ? '-' : encState === 'legacy_upgrade_required'
     ? 'legacy encrypted balance' : 'private balance unreadable';
   var pubText = accountUnknown ? '-' : fmtOct(pub);
   var nonceText = accountUnknown ? '-' : (next.nonce || '0');
+  if ($('st-account-status')) $('st-account-status').textContent = accountUnknown
+    ? 'account not yet on this network' : '';
   if ($('st-balance')) $('st-balance').textContent = pubText;
   if ($('st-enc-balance')) $('st-enc-balance').textContent = encText;
   if ($('st-enc-balance')) $('st-enc-balance').title = next.encrypted_balance_error || '';
@@ -1324,6 +1434,7 @@ function resetDashboardView() {
   _pvacUpgradeStatus = null;
   _pvacStatusRead += 1;
   renderEncryptRoom(null);
+  if ($('st-account-status')) $('st-account-status').textContent = '';
   if ($('st-balance')) $('st-balance').textContent = '-';
   if ($('st-enc-balance')) $('st-enc-balance').textContent = '-';
   if ($('ct-struct-link')) $('ct-struct-link').hidden = true;
@@ -1343,7 +1454,7 @@ function resetDashboardView() {
 }
 
 async function fetchBalance(force) {
-  if (_walletSwitching) return currentBalanceData();
+  if (!_walletAddr || _walletSwitching) return currentBalanceData();
   var addr = _walletAddr;
   var state = ensureAddressRuntime(_walletAddr);
   if (state && state.balanceInflight) return state.balanceInflight;
@@ -2271,7 +2382,7 @@ async function doKeySwitch() {
   }
   const balanceText = st.encrypted_balance_known
     ? fmtOct(st.encrypted_balance_raw || '0')
-    : (st.mode === 'unavailable' || st.retry_mode === 'unavailable' ? 'private balance temporarily unavailable'
+    : (st.mode === 'unavailable' || st.retry_mode === 'unavailable' ? 'loading...'
       : st.cipher_present ? 'encrypted balance unreadable' : '0 oct');
   h += detailRow('encrypted balance', balanceText, true);
   if (st.required_public_fee_raw) {
@@ -2759,30 +2870,70 @@ async function doStealthSend() {
   }
 }
 
+function pendingClaimRefreshHtml() {
+  if (!hasClaimObservation()) return '';
+  return '<div class="claim-row"><button class="action-btn" data-action="refreshPendingClaims">refresh claim status</button></div>';
+}
+
+function updateClaimControls() {
+  var checking = !!_pendingClaimPoll;
+  var busy = _claimInFlight || _privateOpInFlight;
+  document.querySelectorAll('[data-action="claimSelected"]').forEach(function(button) {
+    button.disabled = busy;
+    button.textContent = _claimInFlight ? 'claim in progress...' : 'claim selected';
+    button.setAttribute('aria-busy', String(busy));
+  });
+  document.querySelectorAll('[data-action="refreshPendingClaims"]').forEach(function(button) {
+    button.disabled = _claimInFlight || _privateOpInFlight || checking;
+    button.textContent = checking ? 'checking claim status...' : 'refresh claim status';
+    button.setAttribute('aria-busy', String(checking));
+  });
+  document.querySelectorAll('.stealth-chk').forEach(function(check) {
+    check.disabled = busy;
+  });
+}
+
+function refreshPendingClaims() {
+  if (!hasClaimObservation()) return;
+  return pollPendingClaims();
+}
+
 async function doStealthScan() {
-  $('stealth-outputs').innerHTML = '<div class="loading">scanning...</div>';
-  const addr = _walletAddr;
+  const identity = captureClaimIdentity();
+  const list = $('stealth-outputs');
+  if (!claimIdentityCurrent(list.claimIdentity))
+    list.innerHTML = '<div class="loading">scanning...</div>';
   try {
     const res = await fetchStealthScan();
-    if (_walletSwitching || addr !== _walletAddr) return;
+    if (!claimIdentityCurrent(identity)) return;
     const outputs = res.outputs || [];
     if (outputs.length === 0) {
-      $('stealth-outputs').innerHTML = '<div class="staging-empty">no stealth outputs found</div>';
+      updateStealthBadge(0);
+      list.innerHTML = '<div class="staging-empty">no stealth outputs found</div>' + pendingClaimRefreshHtml();
+      list.claimIdentity = identity;
+      updateClaimControls();
       return;
     }
     var h = '<table class="desktop-table stealth-table"><tr><th></th><th>id</th><th>amount</th><th>status</th></tr>';
     var cards = '<div class="card-list">';
     for (var i = 0; i < outputs.length; i++) {
       var o = outputs[i];
+      var id = String(o.id);
       var amt = o.amount_raw ? fmtOctCompact(o.amount_raw) : '?';
-      var isPending = !o.claimed && _pendingClaimIds[String(o.id)];
+      var claimed = o.claimed || _confirmedClaimIds[id];
+      var isPending = !claimed && _pendingClaimIds[id];
+      var unresolved = !claimed && _unresolvedClaimIds[id];
       var claimable = o.claimable !== false;
-      var st = o.claimed
+      var st = claimed
         ? '<span class="gray">claimed</span>'
         : (isPending
-          ? '<span class="gray">claiming\u2026</span>'
-          : (claimable ? '<span class="green">unclaimed</span>' : '<span class="gray">' + escapeHtml(stealthClaimStatusLabel(o.claim_status)) + '</span>'));
-      var chk = (o.claimed || isPending || !claimable) ? '' : '<input type="checkbox" class="stealth-chk" data-id="' + o.id + '">';
+          ? '<span class="gray">submitted</span>'
+          : (unresolved === 'dropped'
+            ? '<span class="gray">dropped. recovery available</span>'
+            : (unresolved === 'unknown'
+              ? '<span class="gray">status uncertain. review recovery</span>'
+              : (claimable ? '<span class="green">unclaimed</span>' : '<span class="gray">' + escapeHtml(stealthClaimStatusLabel(o.claim_status)) + '</span>'))));
+      var chk = (claimed || isPending || !claimable) ? '' : '<input type="checkbox" class="stealth-chk" data-id="' + o.id + '">';
       h += '<tr>';
       h += '<td>' + chk + '</td>';
       h += '<td class="mono">' + (o.id || '') + '</td>';
@@ -2791,7 +2942,7 @@ async function doStealthScan() {
       h += '</tr>';
       cards += '<div class="tx-card">';
 
-      if (!o.claimed) cards += '<div class="card-row"><span class="card-label">select</span><span class="card-val">' + chk + '</span></div>';
+      if (!claimed) cards += '<div class="card-row"><span class="card-label">select</span><span class="card-val">' + chk + '</span></div>';
       cards += '<div class="card-row"><span class="card-label">id</span><span class="card-val mono">' + (o.id || '') + '</span></div>';
       cards += '<div class="card-row"><span class="card-label">amount</span><span class="card-val mono amount green">' + amt + '</span></div>';
       cards += '<div class="card-row"><span class="card-label">status</span><span class="card-val">' + st + '</span></div>';
@@ -2803,21 +2954,42 @@ async function doStealthScan() {
     h += cards;
     var unclaimed = 0;
     for (var i = 0; i < outputs.length; i++) {
-      if (outputs[i].claimed) { delete _pendingClaimIds[String(outputs[i].id)]; continue; }
+      var id = String(outputs[i].id);
+      if (outputs[i].claimed || _confirmedClaimIds[id]) {
+        if (outputs[i].claimed) _confirmedClaimIds[id] = true;
+        delete _pendingClaimIds[id];
+        delete _unresolvedClaimIds[id];
+        delete _pendingClaimTxs[id];
+        continue;
+      }
       if (outputs[i].claimable === false) continue;
-      if (!_pendingClaimIds[String(outputs[i].id)]) unclaimed++;
+      if (!_pendingClaimIds[id]) unclaimed++;
     }
     updateStealthBadge(unclaimed);
     if (unclaimed > 0) {
       h += '<div class="claim-row"><button class="action-btn" data-action="claimSelected">claim selected</button></div>';
     }
-    $('stealth-outputs').innerHTML = h;
+    h += pendingClaimRefreshHtml();
+    const selected = new Set();
+    if (claimIdentityCurrent(list.claimIdentity))
+      document.querySelectorAll('.stealth-chk:checked').forEach(function(check) {
+        selected.add(check.getAttribute('data-id'));
+      });
+    list.innerHTML = h;
+    list.claimIdentity = identity;
+    document.querySelectorAll('.stealth-chk').forEach(function(check) {
+      check.checked = selected.has(check.getAttribute('data-id'));
+    });
+    updateClaimControls();
   } catch (e) {
-    $('stealth-outputs').innerHTML = '<div class="error-box">' + escapeHtml(e.message) + '</div>';
+    if (!claimIdentityCurrent(identity)) return;
+    $('stealth-outputs').innerHTML = '<div class="error-box">' + escapeHtml(e.message) + '</div>' + pendingClaimRefreshHtml();
+    updateClaimControls();
   }
 }
 
 function claimSelected() {
+  if (_claimInFlight || _privateOpInFlight) return;
   var checks = document.querySelectorAll('.stealth-chk:checked');
   var ids = [];
   for (var i = 0; i < checks.length; i++) ids.push(checks[i].getAttribute('data-id'));
@@ -2825,8 +2997,28 @@ function claimSelected() {
   doStealthClaim(ids);
 }
 
+function startClaimObservation() {
+  const identity = captureClaimIdentity();
+  Promise.resolve().then(function() {
+    if (claimIdentityCurrent(identity)) return doStealthScan();
+  }).then(function() {
+    if (claimIdentityCurrent(identity)) return pollPendingClaims();
+  }).catch(function(e) {
+    if (!claimIdentityCurrent(identity)) return;
+    logStealth('status refresh failed: ' + e.message, 'log-err');
+    updateClaimControls();
+  });
+}
+
 async function doStealthClaim(ids) {
-  if (_privateOpInFlight) return;
+  if (_claimInFlight || _privateOpInFlight) return;
+  ids = Array.from(new Set(ids.map(String))).filter(function(id) {
+    return !_confirmedClaimIds[id] && !_pendingClaimIds[id];
+  });
+  if (!ids.length) return;
+  const identity = captureClaimIdentity();
+  const recovering = ids.some(function(id) { return !!_unresolvedClaimIds[id]; });
+  _claimInFlight = true;
   clearStealthLog();
   logStealth('claiming ' + ids.length + ' output(s)', 'log-info');
   logStealth('waiting for PIN', 'log-info');
@@ -2843,8 +3035,9 @@ async function doStealthClaim(ids) {
     if (!pin) { logStealth('stealth claim cancelled', 'log-err'); return; }
     logStealth('pin accepted locally', 'log-ok');
     logStealth('building stealth claim transaction (keep wallet open)', 'log-info');
-    const request = privateRequest('claim', [...ids].map(String).sort());
+    const request = privateRequest(recovering ? 'claim-recovery' : 'claim', [...ids].map(String).sort());
     const res = await api('POST', '/stealth/claim', { ids: ids, pin: pin, ou: claimFee, request_id: request.id }, session);
+    if (!claimIdentityCurrent(identity)) return;
     invalidateCurrentAddressState();
     logStealth('claim submission results', 'log-info');
     if (res.results) {
@@ -2852,67 +3045,104 @@ async function doStealthClaim(ids) {
         privateRequests.delete(request.key);
       for (var i = 0; i < res.results.length; i++) {
         var r = res.results[i];
+        var id = String(r.id);
         if (r.ok && !['rejected', 'unaccepted', 'replaced', 'discarded'].includes(r.status)) {
-          _pendingClaimIds[String(r.id)] = true;
-          if (r.tx_hash) _pendingClaimTxs[String(r.id)] = r.tx_hash;
+          if (r.status === 'confirmed') {
+            _confirmedClaimIds[id] = true;
+            delete _pendingClaimIds[id];
+            delete _unresolvedClaimIds[id];
+            delete _pendingClaimTxs[id];
+          } else if (r.status === 'dropped' || r.status === 'unknown') {
+            _unresolvedClaimIds[id] = r.status;
+            delete _pendingClaimIds[id];
+            if (r.tx_hash) _pendingClaimTxs[id] = r.tx_hash;
+          } else {
+            _pendingClaimIds[id] = true;
+            delete _unresolvedClaimIds[id];
+            if (r.tx_hash) _pendingClaimTxs[id] = r.tx_hash;
+          }
           const status = r.status === 'pending' ? 'submitted'
-            : r.status === 'confirmed' ? 'confirmed' : 'submission not confirmed';
-          logStealth(escapeHtml(r.id) + ': ' + status + ' ' + escapeHtml(r.tx_hash || ''), 'log-info');
+            : r.status === 'confirmed' ? 'confirmed'
+            : r.status === 'dropped' ? 'dropped. recovery available'
+            : r.status === 'unknown' ? 'status uncertain. review recovery' : 'submission not confirmed';
+          logStealth(escapeHtml(id) + ': ' + status + ' ' + escapeHtml(r.tx_hash || ''), 'log-info');
           if (r.submit_error) logStealth(r.submit_error, 'log-err');
           if (r.warning) logStealth(escapeHtml(r.warning), 'log-info');
         } else {
-          logStealth(r.id + ': not submitted - ' + (r.submit_error || r.error || r.status || ''), 'log-err');
+          delete _pendingClaimIds[id];
+          delete _unresolvedClaimIds[id];
+          delete _pendingClaimTxs[id];
+          logStealth(id + ': not submitted - ' + (r.submit_error || r.error || r.status || ''), 'log-err');
         }
       }
     }
-    doStealthScan();
-    loadDashboard();
-    pollPendingClaims();
   } catch (e) {
-    logStealth('error: ' + e.message, 'log-err');
+    if (claimIdentityCurrent(identity)) logStealth('error: ' + e.message, 'log-err');
   } finally {
+    _claimInFlight = false;
     setPrivateOpBusy(false);
+    startClaimObservation();
   }
 }
 
 function pollPendingClaims() {
-  if (Object.keys(_pendingClaimIds).length === 0) return;
+  if (!hasClaimObservation()) return;
   if (_pendingClaimPoll) return _pendingClaimPoll;
-  const addr = _walletAddr;
-  _pendingClaimPoll = (async function() {
+  const identity = captureClaimIdentity();
+  let tracked;
+  tracked = (async function() {
     for (let attempt = 0; attempt < heavyTxConfirmationPolls; attempt++) {
-      if (_walletSwitching || addr !== _walletAddr) break;
-      if (Object.keys(_pendingClaimIds).length === 0) break;
+      if (!claimIdentityCurrent(identity) || !hasClaimObservation()) break;
       const txIds = Object.keys(_pendingClaimTxs);
       for (let i = 0; i < txIds.length; i++) {
+        if (!claimIdentityCurrent(identity)) break;
         const id = txIds[i];
         const hash = _pendingClaimTxs[id];
         if (!hash) continue;
         try {
           const tx = await api('GET', '/tx?hash=' + encodeURIComponent(hash));
+          if (!claimIdentityCurrent(identity)) break;
+          if (_pendingClaimTxs[id] !== hash) continue;
           const st = tx.status || 'pending';
-          if (['rejected', 'dropped', 'unaccepted', 'replaced', 'discarded'].includes(st)) {
+          if (st === 'dropped' || st === 'unknown') {
+            if (_unresolvedClaimIds[id] !== st)
+              logStealth(id + ': ' + (st === 'dropped' ? 'dropped. recovery available' : 'status uncertain. review recovery'), 'log-err');
+            _unresolvedClaimIds[id] = st;
+            delete _pendingClaimIds[id];
+          } else if (['rejected', 'unaccepted', 'replaced', 'discarded'].includes(st)) {
             const reason = tx.submit_error || tx.reject_reason || tx.reject_type || st;
             logStealth(id + ': ' + st + ' - ' + reason, 'log-err');
             delete _pendingClaimIds[id];
+            delete _unresolvedClaimIds[id];
             delete _pendingClaimTxs[id];
           } else if (st === 'confirmed') {
+            _confirmedClaimIds[id] = true;
             logStealth(id + ': confirmed', 'log-ok');
             delete _pendingClaimIds[id];
+            delete _unresolvedClaimIds[id];
             delete _pendingClaimTxs[id];
+          } else {
+            _pendingClaimIds[id] = true;
+            delete _unresolvedClaimIds[id];
           }
         } catch (e) {}
       }
+      if (!claimIdentityCurrent(identity)) break;
       await doStealthScan();
-      await loadDashboard();
-      if (Object.keys(_pendingClaimIds).length > 0) {
+      if (!claimIdentityCurrent(identity)) break;
+      if (hasClaimObservation()) {
         await new Promise(function(resolve) { setTimeout(resolve, heavyTxConfirmationIntervalMs); });
       }
     }
   })().finally(function() {
-    _pendingClaimPoll = null;
+    if (_pendingClaimPoll === tracked) {
+      _pendingClaimPoll = null;
+      if (claimIdentityCurrent(identity)) updateClaimControls();
+    }
   });
-  return _pendingClaimPoll;
+  _pendingClaimPoll = tracked;
+  updateClaimControls();
+  return tracked;
 }
 
 async function refreshContractBalance() {
@@ -4192,9 +4422,17 @@ function modalPrompt(title, label, opts) {
 }
 
 async function doSwitchAccount(addr) {
+  if (walletOperationInProgress()) {
+    showResult('wallet-mgmt-result', false, 'wait for the current wallet operation to finish');
+    return;
+  }
   resetApiKey(true);
   var pin = await modalPrompt('switch account', 'enter PIN', { pin: true, btnText: 'switch' });
   if (!pin) return;
+  if (walletOperationInProgress()) {
+    showResult('wallet-mgmt-result', false, 'wallet operation started while waiting for PIN. account was not switched');
+    return;
+  }
   clearResult('wallet-mgmt-result');
   _walletSwitching = true;
   try {
@@ -4204,8 +4442,8 @@ async function doSwitchAccount(addr) {
     ['send-result','enc-result','dec-result','fhe-result','ct-compile-result','ct-deploy-result','ct-call-result','ct-info-result','ct-verify-result','tok-transfer-result','settings-result'].forEach(function(id) { clearResult(id); });
     var sl = $('stealth-log'); if (sl) sl.remove();
     var so = $('stealth-outputs'); if (so) so.innerHTML = '';
-    _pendingClaimIds = {};
-    _pendingClaimTxs = {};
+    clearAllAddressRuntime();
+    resetClaimState();
     _cachedBal = null;
     _encryptedBalanceRaw = 0;
     _encPresent = false;
@@ -4298,14 +4536,39 @@ async function doSaveSettings() {
   var explorer = $('settings-explorer').value.trim();
   var bridgeSigner = $('settings-bridge-signer').value.trim();
   if (!rpc) { showResult('settings-result', false, 'rpc url required'); return; }
+  if (walletOperationInProgress()) {
+    showResult('settings-result', false, 'wait for the current wallet operation to finish');
+    return;
+  }
   try {
-    var pin = await modalPrompt('confirm settings change', 'enter PIN to change network endpoints', { pin: true, btnText: 'save' });
+    var wallet = await api('GET', '/wallet');
+    if (walletOperationInProgress()) throw new Error('wait for the current wallet operation to finish');
+    var pin = await modalPrompt('confirm settings change',
+      'enter PIN to change network endpoints'
+      + '\nother idle tabs reload after a change. unsaved form state in those tabs is lost'
+      + '\nbridge and swap keep their own network contracts and relayer/scanner settings',
+      { pin: true, btnText: 'save' });
     if (!pin) { showResult('settings-result', false, 'settings change cancelled'); return; }
-    var resp = await api('POST', '/settings', { rpc_url: rpc, explorer_url: explorer, bridge_signer_url: bridgeSigner, pin: pin });
+    if (walletOperationInProgress()) throw new Error('wallet operation started while waiting for PIN');
+    var settingsChanged = rpc !== wallet.rpc_url
+      || (explorer || wallet.explorer_url || '') !== (wallet.explorer_url || '')
+      || bridgeSigner !== (wallet.bridge_signer_url || '');
+    var resp = await api('POST', '/settings', {
+      rpc_url: rpc,
+      explorer_url: explorer,
+      bridge_signer_url: bridgeSigner,
+      expected_wallet: wallet.address,
+      expected_generation: wallet.generation,
+      pin: pin
+    });
     if (explorer) _explorerUrl = explorer.replace(/\/+$/, '');
     try { _rpcHost = new URL(rpc).hostname; } catch(e) { _rpcHost = rpc; }
+    updateNetworkPicker(rpc);
+    if (resp && resp.generation) _walletGeneration = String(resp.generation);
+    if (settingsChanged) notifyNetworkChanged();
     if (resp && resp.cache_cleared) {
       clearAllAddressRuntime();
+      resetClaimState();
       dropAllPersistedRuntime();
       _cachedBal = null;
       _historyOffset = 0;
@@ -4669,12 +4932,16 @@ async function modalFinishSetup() {
 }
 
 async function loadWalletInfo() {
+  const epoch = _historyEpoch;
   try {
     var w = await api('GET', '/wallet');
+    if (epoch !== _historyEpoch) return;
     var prevAddr = _walletAddr;
     _walletAddr = w.address || w.addr || '';
+    _walletGeneration = String(w.generation || '');
     ensureAddressRuntime(_walletAddr);
     if (prevAddr !== _walletAddr) {
+      resetClaimState();
       _historyOffset = 0;
       _tokens = [];
       _tokensLoaded = false;
@@ -4683,6 +4950,7 @@ async function loadWalletInfo() {
     }
     if (w.explorer_url) _explorerUrl = w.explorer_url.replace(/\/+$/, '');
     if (w.rpc_url) try { _rpcHost = new URL(w.rpc_url).hostname; } catch(e) { _rpcHost = w.rpc_url; }
+    updateNetworkPicker(w.rpc_url);
     _hasMasterSeed = !!w.has_master_seed;
     $('hdr-addr').innerHTML = '<span class="mono">' + _walletAddr + '</span>';
     $('hdr-logout').style.display = '';
@@ -4699,6 +4967,12 @@ async function loadWalletInfo() {
 }
 
 async function doLogout() {
+  if (walletOperationInProgress()) {
+    $('hdr-status').textContent = 'operation in progress';
+    $('hdr-status').title = 'wait for the current wallet operation to finish before locking';
+    $('hdr-status').className = 'right error';
+    return;
+  }
   resetApiKey(true);
   if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
   $('hdr-status').lockFailure = false;
@@ -4731,6 +5005,8 @@ async function doLogout() {
     if (element) element.textContent = '';
   }
   _walletAddr = '';
+  _walletGeneration = '';
+  resetClaimState();
   _cachedBal = null;
   _encryptedBalanceRaw = 0;
   _encPresent = false;
@@ -4744,6 +5020,8 @@ async function doLogout() {
   $('hdr-dev').style.display = 'none';
   $('hdr-circles').style.display = 'none';
   $('hdr-apps').style.display = 'none';
+  $('hdr-network-picker').style.display = 'none';
+  $('network-result').hidden = true;
   $('hdr-addr').textContent = 'locked';
   $('hdr-status').textContent = 'locked';
   $('hdr-status').className = 'right';
@@ -4756,6 +5034,10 @@ function startRefreshTimer() {
   bgStealthScan();
   fetchStaging();
   _refreshTimer = setInterval(function() {
+    if (_networkReloadPending) {
+      if (!walletOperationInProgress()) window.location.reload();
+      return;
+    }
     if (_walletSwitching) return;
     fetchStaging();
     if (_privateOpInFlight) return;
@@ -4881,9 +5163,9 @@ function wireDelegation() {
     closeTokenTransfer, onLangChange, editorUpdateWithLiveCompile, doCompile,
     loadTemplate, doPreviewDeploy, doDeploy, doContractCall, doContractView,
     doFheEncrypt, doFheDecrypt, doContractInfo, doContractReceipt, doVerifyContract,
-    doSaveSettings, doChangePin, showApiKey, copyApiKey, resetApiKey, goBack, switchView, switchImportTab, switchBottomTab,
+    switchNetwork, dismissNetworkNotice, doSaveSettings, doChangePin, showApiKey, copyApiKey, resetApiKey, goBack, switchView, switchImportTab, switchBottomTab,
     ideCloseProject, ideExportZip, ideNewFile, ideOpenFile, ideCloseTab, ideNewProject,
-    ideLoadProject, ideDeleteProject, showTx, retrySavedTx, discardSavedTx, claimSelected, openTokenTransfer,
+    ideLoadProject, ideDeleteProject, showTx, retrySavedTx, discardSavedTx, claimSelected, refreshPendingClaims, openTokenTransfer,
     loadMoreHistory, loadHistorySource, revealPrivateKeys, doSwitchAccount, doChangePinForWallet,
     doDeriveAccount, showImportAnother, showImportOptions,
     navTo: function(a) { if (typeof a === 'string' && a.length && /^\/?[a-z0-9_/-]*(?:\.html)?$/.test(a) && !a.startsWith('//')) window.location.href = a; },
@@ -4903,7 +5185,52 @@ function wireDelegation() {
     fn(el.getAttribute('data-arg'), el, e);
   }
   document.addEventListener('click', function(e) { run(e, 'data-action'); });
-  document.addEventListener('change', function(e) { run(e, 'data-change'); });
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('#hdr-network-picker')) $('network-dropdown').open = false;
+  });
+  document.addEventListener('keydown', function(e) {
+    var dropdown = $('network-dropdown');
+    if (e.key === 'Escape' && !dropdown.contains(e.target) && !$('network-result').hidden
+        && $('modal-overlay').style.display !== 'flex') {
+      e.preventDefault();
+      dismissNetworkNotice();
+      return;
+    }
+    if (!dropdown.contains(e.target)) return;
+    var buttons = Array.from(dropdown.querySelectorAll('button'));
+    if (e.key === 'Escape') {
+      dropdown.open = false;
+      $('hdr-network').focus();
+    } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+      e.preventDefault();
+      dropdown.open = true;
+      var index = buttons.indexOf(document.activeElement);
+      var next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
+        : e.key === 'ArrowDown' ? (index + 1) % buttons.length
+        : (index < 0 ? buttons.length - 1 : (index + buttons.length - 1) % buttons.length);
+      buttons[next].focus();
+    }
+  });
+  document.addEventListener('focusin', function(e) {
+    if (!e.target.closest('#hdr-network-picker')) $('network-dropdown').open = false;
+  });
+  window.addEventListener('storage', function(e) {
+    if (e.key !== 'octra-network-change') return;
+    if (walletOperationInProgress()) {
+      _networkReloadPending = true;
+      return;
+    }
+    window.location.reload();
+  });
+  document.addEventListener('change', function(e) {
+    if (e.target.classList.contains('stealth-chk')) {
+      document.querySelectorAll('.stealth-chk').forEach(function(check) {
+        if (check.getAttribute('data-id') === e.target.getAttribute('data-id'))
+          check.checked = e.target.checked;
+      });
+    }
+    run(e, 'data-change');
+  });
   document.addEventListener('input', function(e) { run(e, 'data-input'); });
   document.addEventListener('contextmenu', function(e) { run(e, 'data-context'); });
   document.addEventListener('submit', function(e) { if (e.target.closest('[data-nosubmit]')) e.preventDefault(); });

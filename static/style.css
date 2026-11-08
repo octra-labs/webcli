@@ -106,6 +106,75 @@ header .logout-btn {
 }
 header .logout-btn:hover { background: #7A8BA3; }
 
+.network-picker { position: relative; display: flex; }
+.network-picker details { display: flex; }
+header .network-picker summary { height: 100%; list-style: none; gap: 8px; }
+.network-picker summary::-webkit-details-marker { display: none; }
+.network-arrow {
+  width: 4px;
+  height: 4px;
+  border: solid currentColor;
+  border-width: 0 1px 1px 0;
+  transform: translateY(-1px) rotate(45deg);
+}
+.network-menu {
+  position: absolute;
+  top: calc(100% + 1px);
+  right: 0;
+  z-index: 10;
+  min-width: 100%;
+  border: 1px solid #C0C6D0;
+  background: #fff;
+}
+header .network-menu button {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-bottom: 1px solid #E5E9EF;
+  background: #fff;
+  color: #3B567F;
+  font-family: Tahoma, arial, sans-serif;
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  text-align: left;
+  cursor: pointer;
+}
+header .network-menu button:last-child { border-bottom: none; }
+header .network-menu button[aria-checked="true"] { background: #D0D7E2; }
+header .network-menu button:hover, header .network-menu button:focus-visible { background: #E5E9EF; }
+header .network-picker summary:focus-visible { outline: 1px solid #3B567F; outline-offset: 2px; }
+.network-picker[inert] { opacity: .65; }
+.network-result {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  width: 240px;
+  padding: 8px 10px;
+  border: 1px solid #D0D7E2;
+  background: #fff;
+  color: #3B567F;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+#network-result-text { overflow-wrap: anywhere; }
+header .network-result-dismiss {
+  float: right;
+  margin: 0 0 4px 8px;
+  padding: 0 4px;
+  border: 1px solid #C0C6D0;
+  background: #F6F7F9;
+  color: #3B567F;
+  font-family: Tahoma, arial, sans-serif;
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  cursor: pointer;
+}
+header .network-result-dismiss:focus-visible { outline: 1px solid #3B567F; outline-offset: 2px; }
+
 .nav-tabs {
   display: flex;
   flex-wrap: nowrap;
@@ -798,6 +867,11 @@ td {
 }
 
 @media (max-width: 700px) {
+  header { position: relative; }
+  .network-picker { position: static; }
+  .network-picker details { position: relative; }
+  .network-result { left: 10px; right: 10px; width: auto; }
+
   header .subtitle {
     font-size: 9px;
     max-width: 55%;

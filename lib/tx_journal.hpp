@@ -292,6 +292,31 @@ class TxJournal {
         return nullptr;
     }
 
+    Json claim_output(const std::string& output, bool submission_only) const {
+        need(text_ok(output, 128), "journal output invalid");
+        Json found = nullptr;
+        int found_rank = -1;
+        double found_timestamp = -1;
+        std::string found_hash;
+        const auto send = sending();
+        for (const auto& row : scan()) {
+            if (row.value("op_type", "") != "claim" || row.value("output_id", "") != output) continue;
+            const auto status = row.value("status", "");
+            const int rank = status == "confirmed" ? 2 : status == "pending" ? 1 : 0;
+            if (submission_only && rank == 0) continue;
+            const auto timestamp = row.value("timestamp", 0.0);
+            const auto hash = row.value("hash", "");
+            if (rank > found_rank || (rank == found_rank && (timestamp > found_timestamp
+                || (timestamp == found_timestamp && hash > found_hash)))) {
+                found = visible(row, send);
+                found_rank = rank;
+                found_timestamp = timestamp;
+                found_hash = hash;
+            }
+        }
+        return found;
+    }
+
     Json scan() const {
         auto rows = Json::array();
         std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(reads()));
@@ -571,6 +596,13 @@ public:
             result["reused"] = true;
             return result;
         }
+        if (row.value("op_type", "") == "claim" && row.contains("output_id")) {
+            auto prior = claim_output(row["output_id"].get_ref<const std::string&>(), true);
+            if (!prior.is_null()) {
+                prior["reused"] = true;
+                return prior;
+            }
+        }
         need(tx.from == addr_ && tx.nonce > 0 && !tx.signature.empty()
             && !tx.public_key.empty() && (tx.op_type == "stealth" || tx.op_type == "claim")
             && row["op_type"] == tx.op_type && row["hash"] == octra::tx_hash(tx),
@@ -599,6 +631,40 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
         session(token);
         return request(id, key);
+    }
+
+    Json find_claim_output(uint64_t token, const std::string& output) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        session(token);
+        return claim_output(output, false);
+    }
+
+    Json find_claim_outputs(uint64_t token, const std::string& output) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        session(token);
+        need(text_ok(output, 128), "journal output invalid");
+        auto rows = Json::array();
+        const auto send = sending();
+        for (const auto& row : scan())
+            if (row.value("op_type", "") == "claim" && row.value("output_id", "") == output)
+                rows.push_back(visible(row, send));
+        return rows;
+    }
+
+    bool claim_unknown(uint64_t token, const std::string& hash, const std::string& output) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        session(token);
+        const auto id = row_key(hash);
+        const auto saved = get(id);
+        if (saved.is_null() || active_ == hash) return false;
+        auto row = record(saved);
+        if (row["hash"] != hash || row.value("op_type", "") != "claim"
+            || row.value("output_id", "") != output || row["status"] != "pending") return false;
+        row["status"] = "unknown";
+        leveldb::WriteBatch batch;
+        batch.Put(id, seal(id, row));
+        write(batch);
+        return true;
     }
 
     Json resend(uint64_t token, const std::string& hash) {
