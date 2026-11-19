@@ -320,9 +320,27 @@ const circlePin = (title, message, secret = true) => queueCircleDialog(() => new
   cancelButton.className = 'modal-btn'
   confirmButton.className = 'modal-btn modal-btn-primary'
   input.type = secret ? 'password' : 'text'
-  input.autocomplete = 'off'
-  if (!secret) input.placeholder = '0'
-  input.className = 'input-field'
+  input.autocomplete = secret ? 'current-password' : 'off'
+  input.id = 'circle-prompt-input'
+  const inputLabel = document.createElement('label')
+  inputLabel.htmlFor = input.id
+  inputLabel.className = 'modal-input-label'
+  inputLabel.textContent = secret ? 'Wallet PIN' : 'Amount to attach (OCT)'
+  const inputHelp = document.createElement('p')
+  inputHelp.id = 'circle-prompt-help'
+  inputHelp.className = 'modal-input-help'
+  input.setAttribute('aria-describedby', inputHelp.id)
+  inputHelp.textContent = secret
+    ? 'Enter your wallet PIN to sign this action.'
+    : 'Type 0 for no attached OCT. The transaction fee is separate.'
+  if (secret) {
+    input.placeholder = '••••••••••••'
+    input.maxLength = 64
+  } else {
+    input.placeholder = 'Enter amount, e.g. 0'
+    input.inputMode = 'decimal'
+  }
+  input.className = secret ? 'input-field modal-input circle-pin-input' : 'input-field'
 
   titleNode.textContent = title
   const paramsStart = message.indexOf('\nparams: ')
@@ -332,6 +350,11 @@ const circlePin = (title, message, secret = true) => queueCircleDialog(() => new
   paramsNode.textContent = paramsStart < 0 ? '' : message.slice(paramsStart + 1)
   cancelButton.textContent = 'cancel'
   confirmButton.textContent = secret ? 'sign' : 'continue'
+  cancelButton.type = 'button'
+  confirmButton.type = 'button'
+  const enteredValue = () => secret ? input.value : input.value.trim()
+  confirmButton.disabled = true
+  input.addEventListener('input', () => { confirmButton.disabled = !enteredValue() })
 
   let settled = false
   const close = (value) => {
@@ -346,10 +369,14 @@ const circlePin = (title, message, secret = true) => queueCircleDialog(() => new
   cancelCirclePrompt = () => close('')
 
   cancelButton.addEventListener('click', () => close(''))
-  confirmButton.addEventListener('click', () => close(input.value))
+  confirmButton.addEventListener('click', () => {
+    if (enteredValue()) close(enteredValue())
+  })
   input.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.repeat) {
-      close(input.value)
+      event.preventDefault()
+      event.stopPropagation()
+      if (enteredValue()) close(enteredValue())
     }
   })
   overlay.addEventListener('click', (event) => {
@@ -361,7 +388,7 @@ const circlePin = (title, message, secret = true) => queueCircleDialog(() => new
   buttons.append(cancelButton, confirmButton)
   box.append(titleNode, messageNode)
   if (paramsStart >= 0) box.append(paramsNode)
-  box.append(input, buttons)
+  box.append(inputLabel, inputHelp, input, buttons)
   overlay.append(box)
   document.body.append(overlay)
   input.focus()
