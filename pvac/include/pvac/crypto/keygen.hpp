@@ -16,6 +16,7 @@
 #include "ristretto255.hpp"
 #include "matrix.hpp"
 #include "circuit_prf_profile.hpp"
+#include "bulletproofs/prover_commit.hpp"
 
 namespace pvac {
 
@@ -34,7 +35,7 @@ inline void set_circuit_prf_commit(PubKey& pk, const SecKey& sk) {
     const Fp& key = circuit_prf_key_for_profile(sk, pk.circuit_prf_profile);
     const auto& blind = circuit_prf_blind_for_profile(sk, pk.circuit_prf_profile);
     pk.circuit_prf_key_commit =
-        pedersen_commit(sc_from_fp_signed(key), scalar_from_key_blind(blind));
+        bp::secret_commit(sc_from_fp_signed(key), scalar_from_key_blind(blind));
 }
 
 inline void set_circuit_prf_profile(

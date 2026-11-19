@@ -8,13 +8,34 @@
 #include <mutex>
 #include <limits>
 #include <stdexcept>
+#include <algorithm>
+#include <thread>
 #include "../../core/hash.hpp"
+#include "../../core/lanes.hpp"
 #include "../ristretto255.hpp"
 
 namespace pvac {
 namespace bp {
 
 inline constexpr size_t BP_MAX_VECTOR_SIZE = static_cast<size_t>(1) << 20;
+
+template<class F, class Launch>
+inline void generator_run(size_t first, size_t last, F worker, Launch launch) {
+    if (last < first || last > BP_MAX_VECTOR_SIZE)
+        throw std::runtime_error("pvac: generator interval rejected");
+    if (first == last) return;
+    const size_t count = last - first;
+    const size_t parts = std::max(size_t{1}, count / 4096);
+    lane_run(parts, parts - 1, [&](size_t part) {
+        worker(first + count * part / parts, first + count * (part + 1) / parts);
+    }, launch);
+}
+
+template<class F>
+inline void generator_run(size_t first, size_t last, F worker) {
+    generator_run(first, last, worker,
+        [](auto task) { return std::thread(std::move(task)); });
+}
 
 inline RistrettoPoint hash_to_ristretto_point(const char* domain, uint64_t index) {
 
@@ -78,10 +99,12 @@ class GeneratorTable {
         auto next_H = H_;
         next_G.resize(n);
         next_H.resize(n);
-        for (size_t i = old; i < n; i++) {
-            next_G[i] = hash_to_ristretto_point("pvac.bp.gen.G", i);
-            next_H[i] = hash_to_ristretto_point("pvac.bp.gen.H", i);
-        }
+        generator_run(old, n, [&](size_t from, size_t to) {
+            for (size_t i = from; i < to; ++i) {
+                next_G[i] = hash_to_ristretto_point("pvac.bp.gen.G", i);
+                next_H[i] = hash_to_ristretto_point("pvac.bp.gen.H", i);
+            }
+        });
         G_.swap(next_G);
         H_.swap(next_H);
     }

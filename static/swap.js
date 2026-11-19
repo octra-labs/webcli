@@ -108,6 +108,7 @@ async function checkWallet() {
     var st = await api('GET', '/wallet/status');
     if (st.loaded) {
       var info = await api('GET', '/wallet');
+      pinLoaded(info);
       _walletAddr = info.address || '';
       $('unlock-view').style.display = 'none';
       $('swap-view').style.display = 'block';
@@ -432,6 +433,7 @@ $('pin-input').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') doUnlock();
 });
 
+pinWatch(() => _swapPending);
 checkWallet();
 
 (function() {

@@ -32,6 +32,17 @@ int pvac_verify_amount(pvac_pubkey pk, pvac_cipher ct,
     pvac_proof_kind kind, int wide);
 
 typedef struct {
+    pvac_pubkey pk;
+    pvac_cipher ct;
+    pvac_zero_proof proof;
+    const uint8_t* commitment;
+    pvac_proof_kind kind;
+    int wide;
+} pvac_check;
+
+int pvac_verify_each(const pvac_check* checks, size_t count, int* accepted);
+
+typedef struct {
     size_t slots;
     size_t layer_count;
     size_t edge_count;
@@ -65,6 +76,9 @@ typedef struct {
 } pvac_cipher_edge_view;
 
 pvac_params pvac_default_params(void);
+int pvac_set_lanes(size_t total);
+int pvac_ready_build(size_t points);
+size_t pvac_ready_sums(void);
 int pvac_copy_keys(pvac_pubkey pk, pvac_seckey sk, pvac_pubkey* public_copy, pvac_seckey* secret_copy);
 void pvac_keygen_from_seed(pvac_params prm, const uint8_t seed[32],
                            pvac_pubkey* pk_out, pvac_seckey* sk_out);

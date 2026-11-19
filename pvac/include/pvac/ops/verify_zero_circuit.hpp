@@ -730,7 +730,7 @@ inline ZeroProof make_zero_proof_bound_checked(
         &bind,
         force_alias_rejection);
 
-    RistrettoPoint amount_commitment = pedersen_commit(bp::sc_from_u64(amount), amount_blinding);
+    RistrettoPoint amount_commitment = bp::secret_commit(bp::sc_from_u64(amount), amount_blinding);
     bp::Transcript transcript(transcript_label, rule);
     transcript.append_u64("nL", nL);
     transcript.append_u64("S", S);
@@ -1028,7 +1028,7 @@ inline ZeroProof make_zero_proof_bound_range(
     bp::R1CSProver prover(rule);
     detail::build_key_bound_circuit(prover, pk, &sk, ct, A, bases, &cache, &rinv, &bind);
 
-    RistrettoPoint amount_commitment = pedersen_commit(bp::sc_from_u64(amount), amount_blinding);
+    RistrettoPoint amount_commitment = bp::secret_commit(bp::sc_from_u64(amount), amount_blinding);
     bp::Transcript transcript("pvac.verify_zero_bound_range.key_bound", rule);
     transcript.append_u64("nL", nL);
     transcript.append_u64("S", S);

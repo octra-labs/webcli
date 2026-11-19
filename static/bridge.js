@@ -212,6 +212,7 @@ async function connectOctra() {
     var st = await wcli('GET', '/wallet/status');
     if (!st.loaded) { showStatus('err', 'unlock your wallet in webcli first'); return; }
     var info = await wcli('GET', '/wallet');
+    pinLoaded(info);
     _octraAddr = info.address;
     $('octra-addr').textContent = _octraAddr.substring(0, 12) + '...' + _octraAddr.slice(-4);
     $('octra-addr').classList.remove('none');
@@ -1467,6 +1468,7 @@ function parseU(value, dec) {
 }
 function addCommas(s) { var p = s.split('.'); p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ','); return p.join('.'); }
 
+pinWatch(() => _bridgePending);
 connectOctra().catch(function(){});
 checkPendingClaim();
 refreshBridgeCapacity();

@@ -6,11 +6,11 @@
 #include <cstdint>
 #include <vector>
 #include <array>
-#include <thread>
 #include <algorithm>
 #include <stdexcept>
 #include <exception>
 
+#include "../core/lanes.hpp"
 #include "../core/types.hpp"
 #include "verify_zero.hpp"
 #include "verify_zero_circuit.hpp"
@@ -31,28 +31,11 @@ namespace detail {
 
 template<class F>
 inline void range_run(unsigned lanes, F worker) {
-    std::vector<std::exception_ptr> errors(lanes);
-    std::vector<std::thread> threads;
-    threads.reserve(lanes);
     const size_t chunk = (RANGE_BITS + lanes - 1) / lanes;
-    try {
-        for (unsigned lane = 0; lane < lanes; ++lane) {
-            const size_t from = lane * chunk;
-            const size_t to = std::min(from + chunk, RANGE_BITS);
-            if (from < to) {
-                threads.emplace_back([&, lane, from, to] {
-                    try { worker(from, to); }
-                    catch (...) { errors[lane] = std::current_exception(); }
-                });
-            }
-        }
-    } catch (...) {
-        for (auto& thread : threads) thread.join();
-        throw;
-    }
-    for (auto& thread : threads) thread.join();
-    for (const auto& error : errors)
-        if (error) std::rethrow_exception(error);
+    const size_t parts = (RANGE_BITS + chunk - 1) / chunk;
+    lane_run(parts, parts - 1, [&](size_t part) {
+        worker(part * chunk, std::min(part * chunk + chunk, RANGE_BITS));
+    });
 }
 
 }
@@ -98,8 +81,7 @@ inline RangeProof make_range_proof(
     rp.ct_bit.resize(RANGE_BITS);
     rp.bit_proofs.resize(RANGE_BITS);
 
-    unsigned hw = std::thread::hardware_concurrency();
-    unsigned n_threads = (hw > 1) ? std::min(hw, (unsigned)RANGE_BITS) : 1;
+    const unsigned n_threads = static_cast<unsigned>(std::min(lane_limit(), RANGE_BITS));
 
     if (n_threads <= 1) {
         for (size_t i = 0; i < RANGE_BITS; ++i) {
@@ -171,8 +153,7 @@ inline bool verify_range(
             [](const Cipher& ct) { return !ct.L.empty(); }))
         return false;
 
-    unsigned hw = std::thread::hardware_concurrency();
-    unsigned n_threads = (hw > 1) ? std::min(hw, (unsigned)RANGE_BITS) : 1;
+    const unsigned n_threads = static_cast<unsigned>(std::min(lane_limit(), RANGE_BITS));
     std::vector<uint8_t> results(RANGE_BITS, 0);
 
     if (n_threads <= 1) {
@@ -344,8 +325,7 @@ inline AggregatedRangeProof make_aggregated_range_proof(
 
     std::vector<detail::BitPrepData> bit_data(RANGE_BITS);
 
-    unsigned hw = std::thread::hardware_concurrency();
-    unsigned n_threads = (hw > 1) ? std::min(hw, (unsigned)RANGE_BITS) : 1;
+    const unsigned n_threads = static_cast<unsigned>(std::min(lane_limit(), RANGE_BITS));
 
     auto worker = [&](size_t from, size_t to) {
         for (size_t i = from; i < to; ++i) {

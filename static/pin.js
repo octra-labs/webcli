@@ -97,11 +97,30 @@ const requestPin = (title, message) => new Promise((resolve, reject) => {
   input.focus();
 });
 
+let pinWallet = null;
+
+const pinLoaded = info => {
+  pinWallet = Object.freeze({address: String(info.address || ''), generation: String(info.generation || ''),
+    network: String(info.rpc_url || '')});
+};
+
+const pinWatch = busy => window.addEventListener('storage', event => {
+  if (event.key !== 'octra-network-change') return;
+  const reload = () => busy() ? setTimeout(reload, 1000) : window.location.reload();
+  reload();
+});
+
 const pinCall = async (send, body, message) => {
   const approved = JSON.parse(JSON.stringify(body));
+  const loaded = pinWallet;
   const session = Object.freeze({...await send('GET', '/wallet/session')});
   if (!session.address || !/^[0-9]+$/.test(String(session.generation)))
     throw new Error('wallet session unavailable');
+  const wallet = await send('GET', '/wallet');
+  if (!loaded || [session.address, wallet.address].some(address => address !== loaded.address)
+      || [session.generation, wallet.generation].some(generation => String(generation) !== loaded.generation)
+      || wallet.rpc_url !== loaded.network)
+    throw new Error('wallet or network changed since this page loaded; reload the page');
   const pin = await requestPin('authorize transaction', message + '\nwallet: ' + session.address);
   if (!pin) throw new Error('transaction cancelled before signing');
   return send('POST', '/contract/call', { ...approved, pin }, session);

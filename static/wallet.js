@@ -131,6 +131,7 @@ let _compiledProgramMinimum = null;
 var _fees = {};
 var _rpcHost = '';
 var _walletGeneration = '';
+let _walletNetwork = '';
 var _hasMasterSeed = false;
 var _addressRuntime = {};
 let _historyEpoch = 0;
@@ -149,6 +150,7 @@ var TOKEN_CACHE_REFRESH_MS = 3000;
 var PERSISTED_CACHE_TTL_MS = 300000;
 let _balanceFailures = 0;
 let _balanceSuccessAt = 0;
+let _balanceShownFor = '';
 const BALANCE_OFFLINE_GRACE_MS = 45000;
 
 const setConnectionStatus = state => {
@@ -1406,7 +1408,7 @@ function applyBalanceData(bal) {
   }
   const encState = next.encrypted_balance_state;
   const encText = _encKnown ? fmtOct(enc)
-    : encState === 'unavailable' ? 'loading...'
+    : encState === 'unavailable' ? 'private balance temporarily unavailable'
     : !_encPresent ? '-' : encState === 'legacy_upgrade_required'
     ? 'legacy encrypted balance' : 'private balance unreadable';
   var pubText = accountUnknown ? '-' : fmtOct(pub);
@@ -1427,6 +1429,7 @@ function applyBalanceData(bal) {
 }
 
 function resetDashboardView() {
+  _balanceShownFor = '';
   _cachedBal = null;
   _encryptedBalanceRaw = 0;
   _encPresent = false;
@@ -1453,13 +1456,17 @@ function resetDashboardView() {
   updateStealthBadge(0);
 }
 
+const balanceIdentity = () => [_walletAddr, _walletNetwork, String(_walletGeneration)].join('|');
+
 async function fetchBalance(force) {
   if (!_walletAddr || _walletSwitching) return currentBalanceData();
   var addr = _walletAddr;
+  const identity = balanceIdentity();
   var state = ensureAddressRuntime(_walletAddr);
   if (state && state.balanceInflight) return state.balanceInflight;
   if (!force && state && state.balance && (Date.now() - state.balanceTs) < BALANCE_CACHE_TTL_MS) {
     applyBalanceData(state.balance);
+    _balanceShownFor = identity;
     return state.balance;
   }
   if (!force && state && !state.balance) {
@@ -1468,6 +1475,7 @@ async function fetchBalance(force) {
       state.balance = persisted;
       state.balanceTs = Date.now();
       applyBalanceData(persisted);
+      _balanceShownFor = identity;
     }
   }
   var request = api('GET', '/balance')
@@ -1479,13 +1487,15 @@ async function fetchBalance(force) {
         state.balanceTs = Date.now();
       }
       persistBalance(addr, next);
+      _balanceShownFor = identity;
       markBalanceOnline();
       return next;
     })
     .catch(function() {
       if (!_walletSwitching && addr === _walletAddr) {
         markBalanceFailure();
-        if (!currentBalanceData()) resetDashboardView();
+        if (_balanceShownFor !== balanceIdentity()) resetDashboardView();
+        else if ($('st-account-status')) $('st-account-status').textContent = 'refresh delayed; last values shown';
       }
       return null;
     })
@@ -1498,11 +1508,21 @@ async function fetchBalance(force) {
 
 const walletApproval = async () => {
   const address = _walletAddr;
+  const generation = String(_walletGeneration);
   const session = await api('GET', '/wallet/session');
-  if (!address || address !== _walletAddr || session.address !== address
-      || !/^[0-9]+$/.test(String(session.generation)))
+  if (!address || address !== _walletAddr || !/^[0-9]+$/.test(String(session.generation))
+      || generation !== String(_walletGeneration))
     throw new Error('wallet session changed; approve again');
-  return Object.freeze({address, generation: String(session.generation),
+  if (!_networkReloadPending && session.address === address && String(session.generation) !== generation) {
+    const network = _walletNetwork;
+    await loadWalletInfo();
+    if (_walletAddr === address && _walletNetwork === network) throw new Error('wallet session changed; approve again');
+  }
+  if (_networkReloadPending || session.address !== address || String(session.generation) !== generation) {
+    _networkReloadPending = true;
+    throw new Error('wallet session changed; page reloads');
+  }
+  return Object.freeze({address, generation,
     local_decrypt_without_pin: session.local_decrypt_without_pin === true});
 };
 
@@ -1514,6 +1534,7 @@ async function api(method, path, body, session) {
     opts.headers['X-Webcli-Generation'] = session.generation;
   }
   var timeoutMs = apiTimeoutMs(method, path);
+  opts.headers['X-Webcli-Timeout-Ms'] = String(timeoutMs);
   var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   var timeoutId = null;
   if (controller) {
@@ -1533,6 +1554,7 @@ async function api(method, path, body, session) {
     try { j = JSON.parse(text); } catch (e) { throw new Error('invalid server response'); }
     if ((j && j.error) || !res.ok) {
       const error = new Error(String(j.error || j.message || 'request failed'));
+      error.status = res.status;
       if ((res.status === 403 || res.status === 429) && Number.isInteger(j.retry_after)
           && j.retry_after > 0 && j.retry_after <= 900) error.retryAfter = j.retry_after;
       throw error;
@@ -1560,7 +1582,7 @@ function apiTimeoutMs(method, path) {
     if (path === '/pvac/upgrade' || path === '/key_switch') return 900000;
     if (path === '/encrypt' || path === '/decrypt') return 900000;
     if (path === '/stealth/send' || path === '/stealth/claim') return 900000;
-    return 30000;
+    return 120000;
   }
   if (path === '/stealth/scan') return 30000;
   if (path === '/balance') return 90000;
@@ -1913,6 +1935,7 @@ function txStatusTag(st) {
   if (st === 'unaccepted') return '<span class="rejected-tag">not accepted</span>';
   if (st === 'replaced') return '<span class="rejected-tag">nonce used</span>';
   if (st === 'discarded') return '<span class="rejected-tag">discarded</span>';
+  if (st === 'missing') return '<span class="rejected-tag">not on chain</span>';
   if (st === 'confirmed') return '<span class="confirmed-tag">confirmed</span>';
   if (st === 'pending') return '<span class="pending-text">pending</span>';
   return '<span class="pending-text">' + escapeHtml(st || 'pending') + '</span>';
@@ -2239,9 +2262,9 @@ const renderEncryptRoom = st => {
     if ($(id)) $(id).textContent = text;
   }
   if ($('spend-room')) {
-    $('spend-room').textContent = st && st.private_spend_refresh_required === true
-      ? 'decrypt / stealth: refresh required' : '';
-    $('spend-room').hidden = !st || st.private_spend_refresh_required !== true;
+    const needed = Boolean(st) && st.private_spend_refresh_required === true;
+    if ($('spend-text')) $('spend-text').textContent = needed ? 'decrypt / stealth: refresh required' : '';
+    $('spend-room').hidden = !needed;
   }
 };
 
@@ -2333,13 +2356,16 @@ async function readPvacUpgradeStatus(epoch) {
 
 async function doKeySwitch() {
   if (_pvacUpgradeInFlight) return;
+  hideAllModalPanels();
+  $('modal-sub').textContent = 'encryption key switching';
+  $('modal-result').innerHTML = '<div class="modal-detail"><div id="upgrade-log">'
+    + renderLogRow('active', 'reading encrypted balance status') + '</div></div>';
+  $('modal-overlay').style.display = 'flex';
   let session;
   try { session = await walletApproval(); } catch (error) {
     showResult('modal-result', false, error.message);
     return;
   }
-  hideAllModalPanels();
-  $('modal-sub').textContent = 'encryption key switching';
   const st = await refreshPvacUpgradeStatus();
   if (!st) {
     $('modal-result').innerHTML = '<div class="result-msg result-error" style="margin:20px 0">cannot read encryption upgrade status</div>';
@@ -2382,7 +2408,7 @@ async function doKeySwitch() {
   }
   const balanceText = st.encrypted_balance_known
     ? fmtOct(st.encrypted_balance_raw || '0')
-    : (st.mode === 'unavailable' || st.retry_mode === 'unavailable' ? 'loading...'
+    : (st.mode === 'unavailable' || st.retry_mode === 'unavailable' ? 'private balance temporarily unavailable'
       : st.cipher_present ? 'encrypted balance unreadable' : '0 oct');
   h += detailRow('encrypted balance', balanceText, true);
   if (st.required_public_fee_raw) {
@@ -2509,11 +2535,14 @@ async function doKeySwitch() {
           state = 'active';
         }
         out += renderLogRow(state === 'pending' ? 'wait' : state, escapeHtml(step.label));
+        if (txHash && step.key === 'submitted') out += renderLogRow('done', 'tx <span class="upgrade-tx">' + escapeHtml(txHash) + '</span>');
       });
-      if (txHash) out += renderLogRow('done', 'tx <span class="upgrade-tx">' + escapeHtml(txHash) + '</span>');
       out += '</div>';
       if (detailText && !detailRedundant) {
-        out += '<div class="note-box' + (failed ? ' note-error' : '') + '"><b>detail:</b> ' + escapeHtml(detailText) + '</div>';
+        const retryAsked = /; retry$/.test(detailText);
+        const shown = retryAsked ? detailText.slice(0, -'; retry'.length) : detailText;
+        const retryMark = retryAsked ? ' - ' + (failed ? '<a href="#" id="ks-retry">retry</a>' : 'retry') : '';
+        out += '<div class="note-box' + (failed ? ' note-error' : '') + '"><b>detail:</b> ' + escapeHtml(shown) + retryMark + '</div>';
       }
       if (!failed && !closed) {
         out += '<div class="upgrade-wait">building proof (keep wallet open)</div>';
@@ -2531,6 +2560,13 @@ async function doKeySwitch() {
         clearPinFields();
         $('modal-overlay').style.display = 'none';
         fetchBalance();
+      };
+      const retry = $('ks-retry');
+      if (retry) retry.onclick = event => {
+        event.preventDefault();
+        clearPinFields();
+        $('modal-overlay').style.display = 'none';
+        doKeySwitch();
       };
     };
     let pollingUpgrade = false;
@@ -2646,7 +2682,7 @@ async function doEncrypt() {
     logEncrypt('building ciphertext and cipher proof (keep wallet open)', 'log-info');
     var encBody = { amount: amount, pin: pin };
     encBody.ou = encFee;
-    const res = await api('POST', '/encrypt', encBody, session);
+    const res = await withPrivateRefresh(() => api('POST', '/encrypt', encBody, session), pin, logEncrypt, 'encrypt', session);
     const txHash = res.hash || res.tx_hash || '';
     invalidateCurrentAddressState();
     if (!await privateTxFinal(txHash, logEncrypt)) return;
@@ -2701,9 +2737,13 @@ const statusNeedsPrivateSpendRefresh = st => {
 
 async function ensurePrivateSpendCompact(pin, logFn, op = 'spend', session) {
   if (!session) session = await walletApproval();
-  const st = await api('GET', '/pvac/upgrade_status', undefined, session);
-  if (op === 'encrypt' && st && st.encrypt_refresh_required === false) return false;
+  const st = await readPrivateStatus(session, logFn, op);
+  if (op === 'encrypt' && st.encrypt_refresh_required === false) return false;
   if (!statusNeedsPrivateSpendRefresh(st)) return false;
+  return runPrivateRefresh(st, pin, logFn, op, session);
+}
+
+const runPrivateRefresh = async (st, pin, logFn, op, session) => {
   if (!st.can_submit) {
     throw new Error(st.reason || 'encrypted balance refresh is currently unavailable');
   }
@@ -2738,7 +2778,23 @@ async function ensurePrivateSpendCompact(pin, logFn, op = 'spend', session) {
   try { await fetchBalance(true); } catch(e) {}
   try { await refreshPvacUpgradeStatus(); } catch(e) {}
   return true;
-}
+};
+
+const privateStatusReads = 4;
+const privateStatusPauseMs = 2000;
+
+const readPrivateStatus = async (session, logFn, op, left = privateStatusReads) => {
+  const st = await api('GET', '/pvac/upgrade_status', undefined, session).catch(error => {
+    if (error.status !== 503) throw error;
+    return {mode: 'unavailable', reason: error.message};
+  });
+  if (st && st.mode !== 'unavailable') return st;
+  if (left <= 1)
+    throw new Error('encrypted balance status unavailable: ' + (st?.reason || 'no reply') + '; ' + op + ' was not sent');
+  logFn('encrypted balance status unavailable; reading again', 'log-info');
+  await new Promise(resolve => setTimeout(resolve, privateStatusPauseMs));
+  return readPrivateStatus(session, logFn, op, left - 1);
+};
 
 async function privateTxFinal(txHash, logFn) {
   if (!txHash) throw new Error('missing transaction hash; check history before retrying');
@@ -2753,6 +2809,25 @@ async function privateTxFinal(txHash, logFn) {
   logFn('transaction confirmed', 'log-ok');
   return true;
 }
+
+const refreshRequired = error => error?.status === 409 && /refresh required before/.test(String(error.message));
+
+const withPrivateRefresh = async (send, pin, logFn, op, session) => {
+  try {
+    return await send();
+  } catch (error) {
+    if (!refreshRequired(error)) throw error;
+    logFn('encrypted balance refresh required before ' + op, 'log-info');
+    const st = await readPrivateStatus(session, logFn, op);
+    if (!statusNeedsPrivateSpendRefresh(st))
+      throw new Error('encrypted balance refresh required before ' + op + ' but status shows none; ' + op + ' was not sent');
+    await runPrivateRefresh(st, pin, logFn, op, session);
+    return send().catch(again => {
+      throw refreshRequired(again)
+        ? new Error(again.message + '; refresh confirmed but ' + op + ' still blocked; ' + op + ' was not sent') : again;
+    });
+  }
+};
 
 async function doDecrypt() {
   if (_privateOpInFlight) return;
@@ -2780,7 +2855,7 @@ async function doDecrypt() {
     var decBody = { amount: amount, pin: pin };
     decBody.ou = decFee;
     logDecrypt('building ciphertext and cipher proofs (keep wallet open)', 'log-info');
-    const res = await api('POST', '/decrypt', decBody, session);
+    const res = await withPrivateRefresh(() => api('POST', '/decrypt', decBody, session), pin, logDecrypt, 'decrypt', session);
     invalidateCurrentAddressState();
     if (res.steps) {
       for (var i = 0; i < res.steps.length; i++) logDecrypt(escapeHtml(networkText(res.steps[i])), 'log-info');
@@ -2830,13 +2905,13 @@ async function doStealthSend() {
       + feeTerms(stFee, '0', 'stealth'), { pin: true, btnText: 'send' });
     if (!pin) { logStealth('stealth send cancelled', 'log-err'); return; }
     logStealth('pin accepted locally', 'log-ok');
-    await ensurePrivateSpendCompact(pin, logStealth, 'send', session);
+    await ensurePrivateSpendCompact(pin, logStealth, 'stealth send', session);
     var stBody = { to: to, amount: amount, pin: pin };
     stBody.ou = stFee;
     const request = privateRequest('stealth', [to, amount, stFee]);
     stBody.request_id = request.id;
     logStealth('building stealth ciphertext and cipher proofs (keep wallet open)', 'log-info');
-    const res = await api('POST', '/stealth/send', stBody, session);
+    const res = await withPrivateRefresh(() => api('POST', '/stealth/send', stBody, session), pin, logStealth, 'stealth send', session);
     invalidateCurrentAddressState();
     if (res.steps) {
       const labels = {
@@ -3104,13 +3179,15 @@ function pollPendingClaims() {
           if (!claimIdentityCurrent(identity)) break;
           if (_pendingClaimTxs[id] !== hash) continue;
           const st = tx.status || 'pending';
+          const conflict = st === 'confirmed' && Boolean(tx.conflict_at);
           if (st === 'dropped' || st === 'unknown') {
             if (_unresolvedClaimIds[id] !== st)
               logStealth(id + ': ' + (st === 'dropped' ? 'dropped. recovery available' : 'status uncertain. review recovery'), 'log-err');
             _unresolvedClaimIds[id] = st;
             delete _pendingClaimIds[id];
-          } else if (['rejected', 'unaccepted', 'replaced', 'discarded'].includes(st)) {
-            const reason = tx.submit_error || tx.reject_reason || tx.reject_type || st;
+          } else if (conflict || ['rejected', 'unaccepted', 'replaced', 'discarded', 'missing'].includes(st)) {
+            const reason = conflict ? 'claim conflicts with current output state'
+              : tx.submit_error || tx.reject_reason || tx.reject_type || st;
             logStealth(id + ': ' + st + ' - ' + reason, 'log-err');
             delete _pendingClaimIds[id];
             delete _unresolvedClaimIds[id];
@@ -4467,6 +4544,12 @@ async function doSwitchAccount(addr) {
   }
 }
 
+const changeWalletPin = async (cur, np) => {
+  const reply = await api('POST', '/wallet/change-pin', { current_pin: cur, new_pin: np,
+    expected_wallet: _walletAddr, expected_generation: _walletGeneration });
+  if (reply && reply.generation) _walletGeneration = String(reply.generation);
+};
+
 async function doChangePinForWallet(addr) {
   var cur = await modalPrompt('change PIN (step 1 of 3)', 'enter current PIN', { pin: true, btnText: 'next' });
   if (!cur) return;
@@ -4480,7 +4563,7 @@ async function doChangePinForWallet(addr) {
   if (cur === np) { showResult('wallet-mgmt-result', false, 'new PIN must be different from current'); return; }
   clearResult('wallet-mgmt-result');
   try {
-    await api('POST', '/wallet/change-pin', { current_pin: cur, new_pin: np });
+    await changeWalletPin(cur, np);
     showResult('wallet-mgmt-result', true, 'PIN changed successfully');
   } catch (e) {
     showResult('wallet-mgmt-result', false, e.message);
@@ -4567,6 +4650,7 @@ async function doSaveSettings() {
     if (resp && resp.generation) _walletGeneration = String(resp.generation);
     if (settingsChanged) notifyNetworkChanged();
     if (resp && resp.cache_cleared) {
+      resetApiKey(true);
       clearAllAddressRuntime();
       resetClaimState();
       dropAllPersistedRuntime();
@@ -4604,7 +4688,7 @@ async function doChangePin() {
   if (np !== nc) { showResult('pin-change-result', false, 'PINs do not match'); return; }
   if (cur === np) { showResult('pin-change-result', false, 'new PIN must be different'); return; }
   try {
-    await api('POST', '/wallet/change-pin', { current_pin: cur, new_pin: np });
+    await changeWalletPin(cur, np);
     showResult('pin-change-result', true, 'PIN changed successfully');
     $('pin-current').value = '';
     $('pin-new').value = '';
@@ -4939,6 +5023,7 @@ async function loadWalletInfo() {
     var prevAddr = _walletAddr;
     _walletAddr = w.address || w.addr || '';
     _walletGeneration = String(w.generation || '');
+    _walletNetwork = w.rpc_url || '';
     ensureAddressRuntime(_walletAddr);
     if (prevAddr !== _walletAddr) {
       resetClaimState();
@@ -5006,6 +5091,7 @@ async function doLogout() {
   }
   _walletAddr = '';
   _walletGeneration = '';
+  _walletNetwork = '';
   resetClaimState();
   _cachedBal = null;
   _encryptedBalanceRaw = 0;

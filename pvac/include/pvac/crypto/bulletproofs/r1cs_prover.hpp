@@ -12,6 +12,11 @@
 #include "transcript.hpp"
 #include "generators.hpp"
 #include "inner_product.hpp"
+#include "prover_commit.hpp"
+#include "prover_ipp.hpp"
+#include "prover_random.hpp"
+#include "prover_sum.hpp"
+#include "prover_table.hpp"
 #include "r1cs_limits.hpp"
 #include "r1cs_types.hpp"
 #include "../ristretto255.hpp"
@@ -131,7 +136,7 @@ public:
 
         proof.V.resize(m);
         for (size_t j = 0; j < m; j++)
-            proof.V[j] = pedersen_commit(committed_[j].value, committed_[j].blinding);
+            proof.V[j] = secret_commit(committed_[j].value, committed_[j].blinding);
 
         transcript.append_u64("n", N);
         transcript.append_u64("m", m);
@@ -147,18 +152,20 @@ public:
         }
 
         std::vector<Scalar> sL(N), sR(N);
-        for (size_t i = 0; i < N; i++) { sL[i] = ops.random(); sR[i] = ops.random(); }
+        random_pairs(sL, sR, ops);
 
         Scalar alpha = ops.random(), beta = ops.random(), rho = ops.random();
 
-        const auto& gen = generators();
-        gen.precompute(N);
-
-        proof.A_I1 = msm_GH_blind(aL, aR, alpha, N);
-
-        proof.A_O1 = msm_G_blind(aO, beta, N);
-
-        proof.S1 = msm_GH_blind(sL, sR, rho, N);
+        const auto table = prover_table().get(N);
+        const auto& blind = prover_blind();
+        const auto commits = prover_sums({
+            {{table->g.data(), aL.data(), N}, {table->h.data(), aR.data(), N}, {&blind, &alpha, 1}},
+            {{table->g.data(), aO.data(), N}, {&blind, &beta, 1}},
+            {{table->g.data(), sL.data(), N}, {table->h.data(), sR.data(), N}, {&blind, &rho, 1}}
+        });
+        proof.A_I1 = commits[0];
+        proof.A_O1 = commits[1];
+        proof.S1 = commits[2];
 
         transcript.append_point("A_I", proof.A_I1);
         transcript.append_point("A_O", proof.A_O1);
@@ -207,11 +214,11 @@ public:
         Scalar tau5 = ops.random();
         Scalar tau6 = ops.random();
 
-        proof.T_1 = pedersen_commit(t1, tau1);
-        proof.T_3 = pedersen_commit(t3, tau3);
-        proof.T_4 = pedersen_commit(t4, tau4);
-        proof.T_5 = pedersen_commit(t5, tau5);
-        proof.T_6 = pedersen_commit(t6, tau6);
+        proof.T_1 = secret_commit(t1, tau1);
+        proof.T_3 = secret_commit(t3, tau3);
+        proof.T_4 = secret_commit(t4, tau4);
+        proof.T_5 = secret_commit(t5, tau5);
+        proof.T_6 = secret_commit(t6, tau6);
 
         transcript.append_point("T_1", proof.T_1);
         transcript.append_point("T_3", proof.T_3);
@@ -267,15 +274,8 @@ public:
         Scalar w_ch = transcript.challenge_scalar("w");
         RistrettoPoint Q = rist_scalarmul(pedersen_B(), w_ch);
 
-        auto Gv = gen.G_vec(N);
-        auto Hv = gen.H_vec(N);
-
-        std::vector<RistrettoPoint> H_prime(N);
-        for (size_t i = 0; i < N; i++) {
-            H_prime[i] = rist_scalarmul(Hv[i], y_inv_n[i]);
-        }
-
-        proof.ipp = ipp_prove(transcript, Q, l_eval, r_eval, Gv, H_prime);
+        proof.ipp = ipp_fold(transcript, prover_point(Q), std::move(l_eval), std::move(r_eval),
+            table->g.data(), table->h.data(), y_inv_n);
         return proof;
     }
 
@@ -315,30 +315,6 @@ private:
             }
             zp = ops.mul(zp, z);
         }
-    }
-
-    RistrettoPoint msm_GH_blind(
-        const std::vector<Scalar>& a, const std::vector<Scalar>& b,
-        const Scalar& blind, size_t N
-    ) const {
-        const auto& gen = generators();
-        std::vector<Scalar> sc; std::vector<RistrettoPoint> pt;
-        sc.reserve(2*N+1); pt.reserve(2*N+1);
-        for (size_t i=0;i<N;i++) { sc.push_back(a[i]); pt.push_back(gen.G(i)); }
-        for (size_t i=0;i<N;i++) { sc.push_back(b[i]); pt.push_back(gen.H(i)); }
-        sc.push_back(blind); pt.push_back(pedersen_B_blinding());
-        return prover_msm(sc, pt);
-    }
-
-    RistrettoPoint msm_G_blind(
-        const std::vector<Scalar>& a, const Scalar& blind, size_t N
-    ) const {
-        const auto& gen = generators();
-        std::vector<Scalar> sc; std::vector<RistrettoPoint> pt;
-        sc.reserve(N+1); pt.reserve(N+1);
-        for (size_t i=0;i<N;i++) { sc.push_back(a[i]); pt.push_back(gen.G(i)); }
-        sc.push_back(blind); pt.push_back(pedersen_B_blinding());
-        return prover_msm(sc, pt);
     }
 };
 

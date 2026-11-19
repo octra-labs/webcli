@@ -25,6 +25,7 @@
 #include "../crypto/circuit_prf_profile.hpp"
 #include "../core/ct_safe.hpp"
 #include "../core/seedable_rng.hpp"
+#include "../crypto/bulletproofs/prover_commit.hpp"
 
 namespace pvac {
 
@@ -773,7 +774,7 @@ inline void compute_prod_layer_PC(Layer& L, const SecKey& sk,
         Fp R_inv_j = fp_inv(fp_mul(R_pa[j], R_pb[j]));
         Scalar sc_rinv = sc_from_fp_signed(R_inv_j);
         Scalar rho_j = derive_rho_prod(sk, L, j);
-        L.PC[j] = pedersen_commit(sc_rinv, rho_j);
+        L.PC[j] = bp::secret_commit(sc_rinv, rho_j);
     }
 }
 
@@ -797,8 +798,8 @@ inline void compute_layer_PC(Layer& L, const SecKey& sk, const std::vector<Fp>& 
         h.finish(rho_bytes);
         Scalar rho_j = sc_reduce256(rho_bytes);
 
-        L.R_PC[j] = pedersen_commit(sc_r, alpha_j);
-        L.PC[j] = pedersen_commit(sc_rinv, rho_j);
+        L.R_PC[j] = bp::secret_commit(sc_r, alpha_j);
+        L.PC[j] = bp::secret_commit(sc_rinv, rho_j);
     }
 }
 

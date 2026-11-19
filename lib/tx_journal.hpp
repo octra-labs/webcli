@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -36,7 +38,9 @@ class TxJournal {
     inline static std::atomic<uint64_t> serial_{0};
     std::mutex mtx_;
     leveldb::Env* env_;
+    std::function<double()> clock_;
     std::unique_ptr<leveldb::DB> db_;
+    std::unique_ptr<leveldb::DB> notes_;
     std::array<uint8_t, 32> key_{};
     std::string addr_;
     std::string chain_;
@@ -44,6 +48,7 @@ class TxJournal {
     uint64_t count_ = 0;
     std::string active_;
     static constexpr size_t send_limit = 5'004'096;
+    static constexpr double staging_lifetime = 600;
 
     static void need(bool ok, const char* error) {
         if (!ok) throw std::runtime_error(error);
@@ -67,6 +72,37 @@ class TxJournal {
     static bool digits(const std::string& text) {
         return !text.empty() && text.size() <= 20 &&
             std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; });
+    }
+
+    static bool time_ok(const Json& value) {
+        return value.is_number() && std::isfinite(value.get<double>()) && value.get<double>() >= 0;
+    }
+
+    static double wall_seconds() {
+        return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    static bool expired(const Json& note, const char* field, double now) {
+        return note.contains(field) && now - note[field].get<double>() > staging_lifetime;
+    }
+
+    static bool miss_stable(const Json& row, const Json& note, int confirmed_nonce, int pending_nonce, double now) {
+        if (!row.contains("nonce")) return expired(note, "staged_at", now);
+        const auto nonce = octra::rpc_nonce(row["nonce"]);
+        return confirmed_nonce >= nonce || (pending_nonce < nonce && expired(note, "staged_at", now));
+    }
+
+    static Json observation(const Json& input) {
+        Json note = Json::object();
+        for (const auto* field : {"staged_at", "conflict_at"}) {
+            if (!input.contains(field)) continue;
+            need(time_ok(input[field]), "journal observation time invalid");
+            note[field] = input[field];
+        }
+        if (input.contains("missing")) note["missing"] = true;
+        need(note == input && (!note.contains("missing") || note.contains("conflict_at")),
+            "journal observation invalid");
+        return note;
     }
 
     static bool natural(const Json& value) {
@@ -164,6 +200,11 @@ class TxJournal {
         return "r:" + mac(Json::array({"octra/own-tx-journal/index", hash}).dump());
     }
 
+    std::string note_key(const std::string& hash) const {
+        need(hex_ok(hash), "journal hash invalid");
+        return "o:" + mac(Json::array({"octra/own-tx-observed/index", hash}).dump());
+    }
+
     std::string aad(const std::string& id) const {
         return Json::array({"octra/own-tx-journal/aes256gcm", addr_, chain_, id}).dump();
     }
@@ -227,12 +268,32 @@ class TxJournal {
         return opts;
     }
 
-    Json get(const std::string& id, size_t limit = 4096) const {
+    Json load(leveldb::DB& db, const std::string& id, size_t limit = 4096) const {
         std::string data;
-        const auto result = db_->Get(reads(), id, &data);
+        const auto result = db.Get(reads(), id, &data);
         if (result.IsNotFound()) return nullptr;
         checked(result);
         return unseal(id, data, limit);
+    }
+
+    Json get(const std::string& id, size_t limit = 4096) const {
+        return load(*db_, id, limit);
+    }
+
+    Json note_for(const std::string& hash) const {
+        const auto note = load(*notes_, note_key(hash));
+        return note.is_null() ? Json::object() : observation(note);
+    }
+
+    Json with_note(Json row) const {
+        const auto note = note_for(row["hash"].get<std::string>());
+        for (const auto* field : {"staged_at", "conflict_at"})
+            if (note.contains(field)) row[field] = note[field];
+        if (note.contains("missing") && row["status"] == "confirmed") {
+            row["status"] = "missing";
+            row["submit_error"] = "claim not found on node and output unspent after staging lifetime";
+        }
+        return row;
     }
 
     Json sending() const {
@@ -284,7 +345,7 @@ class TxJournal {
         if (id.empty()) return nullptr;
         need(hex_ok(id) && hex_ok(key), "journal request invalid");
         for (const auto& row : scan()) {
-            if (row.value("request_id", "") != id) continue;
+            if (row.value("request_id", "") != id || row["status"] == "missing") continue;
             if (row.value("request_key", "") != key)
                 throw std::invalid_argument("journal request parameters changed");
             return visible(row, sending());
@@ -317,6 +378,15 @@ class TxJournal {
         return found;
     }
 
+    Json saved_claim(const std::string& hash, const std::string& output, const char* status) const {
+        const auto saved = get(row_key(hash));
+        if (saved.is_null()) return nullptr;
+        const auto row = record(saved);
+        if (row["hash"] != hash || row.value("op_type", "") != "claim"
+            || row.value("output_id", "") != output || row["status"] != status) return nullptr;
+        return row;
+    }
+
     Json scan() const {
         auto rows = Json::array();
         std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(reads()));
@@ -327,7 +397,7 @@ class TxJournal {
                 "journal index invalid");
             const auto row = record(unseal(id, it->value().ToString()));
             need(row_key(row["hash"].get<std::string>()) == id, "journal index mismatch");
-            rows.push_back(row);
+            rows.push_back(with_note(row));
         }
         checked(it->status());
         need(rows.size() == count_, "journal count mismatch");
@@ -335,14 +405,39 @@ class TxJournal {
         return rows;
     }
 
-    void write(leveldb::WriteBatch& batch) {
+    void write(leveldb::WriteBatch& batch, leveldb::DB& db) {
         leveldb::WriteOptions opts;
         opts.sync = true;
-        const auto result = db_->Write(opts, &batch);
+        const auto result = db.Write(opts, &batch);
         if (!result.ok()) {
             shut();
             checked(result);
         }
+    }
+
+    void write(leveldb::WriteBatch& batch) {
+        write(batch, *db_);
+    }
+
+    void put(leveldb::DB& db, const std::string& id, const Json& value) {
+        leveldb::WriteBatch batch;
+        batch.Put(id, seal(id, value));
+        write(batch, db);
+    }
+
+    void stage(const std::string& hash, Json note) {
+        note["staged_at"] = clock_();
+        put(*notes_, note_key(hash), note);
+    }
+
+    std::unique_ptr<leveldb::DB> open_db(const std::filesystem::path& path, bool create) const {
+        leveldb::Options opts;
+        opts.create_if_missing = create;
+        opts.paranoid_checks = true;
+        opts.env = env_;
+        leveldb::DB* db = nullptr;
+        checked(leveldb::DB::Open(opts, path.string(), &db));
+        return std::unique_ptr<leveldb::DB>(db);
     }
 
     Json meta(uint64_t count) const {
@@ -357,6 +452,7 @@ class TxJournal {
         token_ = 0;
         octra::secure_zero(key_.data(), key_.size());
         db_.reset();
+        notes_.reset();
         addr_.clear();
         chain_.clear();
         count_ = 0;
@@ -418,7 +514,8 @@ public:
         return known;
     }
 
-    explicit TxJournal(leveldb::Env* env = leveldb::Env::Default()) : env_(env) {}
+    explicit TxJournal(leveldb::Env* env = leveldb::Env::Default(), std::function<double()> clock = wall_seconds)
+        : env_(env), clock_(std::move(clock)) {}
     TxJournal(const TxJournal&) = delete;
     TxJournal& operator=(const TxJournal&) = delete;
     ~TxJournal() { close(); }
@@ -442,14 +539,7 @@ public:
             const auto path = std::filesystem::path(base) / octra::hex_encode(digest.data(), digest.size());
             std::filesystem::create_directories(base);
             const bool exists = std::filesystem::exists(path);
-            leveldb::Options opts;
-            opts.create_if_missing = !exists;
-            opts.paranoid_checks = true;
-            opts.env = env_;
-            leveldb::DB* db = nullptr;
-            const auto result = leveldb::DB::Open(opts, path.string(), &db);
-            db_.reset(db);
-            checked(result);
+            db_ = open_db(path, !exists);
             const auto saved = get("meta");
             if (saved.is_null()) {
                 need(!exists, "journal identity missing");
@@ -466,6 +556,11 @@ public:
                 count_ = saved[3].get<uint64_t>();
                 need(saved == meta(count_), "journal identity mismatch");
             }
+            const auto notes_digest = octra::sha256(Json::array({"octra/own-tx-observed", addr_, chain_}).dump());
+            const auto notes_path = std::filesystem::path(base) / "observed"
+                / octra::hex_encode(notes_digest.data(), notes_digest.size());
+            std::filesystem::create_directories(notes_path.parent_path());
+            notes_ = open_db(notes_path, true);
             scan();
             auto serial = serial_.load();
             do {
@@ -651,20 +746,34 @@ public:
         return rows;
     }
 
-    bool claim_unknown(uint64_t token, const std::string& hash, const std::string& output) {
+    bool claim_unknown(uint64_t token, const std::string& hash, const std::string& output,
+        int confirmed_nonce, int pending_nonce) {
         std::lock_guard<std::mutex> lock(mtx_);
         session(token);
-        const auto id = row_key(hash);
-        const auto saved = get(id);
-        if (saved.is_null() || active_ == hash) return false;
-        auto row = record(saved);
-        if (row["hash"] != hash || row.value("op_type", "") != "claim"
-            || row.value("output_id", "") != output || row["status"] != "pending") return false;
-        row["status"] = "unknown";
-        leveldb::WriteBatch batch;
-        batch.Put(id, seal(id, row));
-        write(batch);
-        return true;
+        auto row = saved_claim(hash, output, "pending");
+        if (row.is_null() || active_ == hash) return false;
+        const auto note = note_for(hash);
+        const bool stable = miss_stable(row, note, confirmed_nonce, pending_nonce, clock_());
+        if (stable) {
+            row["status"] = "unknown";
+            put(*db_, row_key(hash), row);
+        } else if (!note.contains("staged_at")) stage(hash, note);
+        return stable;
+    }
+
+    bool claim_conflict(uint64_t token, const std::string& hash, const std::string& output) {
+        const std::lock_guard<std::mutex> lock(mtx_);
+        session(token);
+        if (saved_claim(hash, output, "confirmed").is_null()) return false;
+        auto note = note_for(hash);
+        if (note.contains("missing")) return false;
+        const auto now = clock_();
+        const bool due = expired(note, "conflict_at", now);
+        if (!due && note.contains("conflict_at")) return false;
+        if (due) note["missing"] = true;
+        else note["conflict_at"] = now;
+        put(*notes_, note_key(hash), note);
+        return due;
     }
 
     Json resend(uint64_t token, const std::string& hash) {
@@ -728,6 +837,7 @@ public:
             batch.Put("send", seal("send", send, send_limit));
         }
         write(batch);
+        if (accepted && row["op_type"] == "claim") stage(hash, note_for(hash));
     }
 
     void replaced(uint64_t token, const std::string& hash, const Json& evidence) {
@@ -788,7 +898,7 @@ public:
         if (row.is_null()) return nullptr;
         const auto result = record(row);
         need(result["hash"] == hash, "journal hash mismatch");
-        return visible(result, sending());
+        return visible(with_note(result), sending());
     }
 
     Json list(uint64_t token, size_t limit = 50, size_t offset = 0) {
@@ -828,6 +938,8 @@ public:
         if (row["op_type"] == "key_switch" && lookup.contains("from"))
             need(lookup["from"] == addr_, "journal migration sender mismatch");
         need(lookup.contains("status") && status_ok(lookup["status"]), "journal lookup status invalid");
+        auto note = note_for(hash);
+        if (note.contains("missing")) return;
         if (row["status"] == "replaced" || row["status"] == "discarded") {
             if (lookup["status"] != "confirmed" || row["op_type"] != "key_switch"
                 || row.contains("replacement_hash")) return;
@@ -855,5 +967,10 @@ public:
             batch.Put("send", seal("send", observed, send_limit));
         }
         write(batch);
+        if (row["op_type"] == "claim" && row["status"] == "pending") stage(hash, note);
+        if (row["status"] == "confirmed" && note.contains("conflict_at")) {
+            note.erase("conflict_at");
+            put(*notes_, note_key(hash), note);
+        }
     }
 };

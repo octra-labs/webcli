@@ -9,11 +9,12 @@
 namespace octra {
 
 inline std::string pvac_submit_state(bool ok, bool replied, int code,
-    const nlohmann::json& reply, const std::string& hash, int http_status = 0) {
+    const nlohmann::json& reply, const std::string& hash, int http_status = 0, bool unsent = false,
+    bool repeated = false) {
     if (ok && reply.is_object() && reply.contains("tx_hash") && reply["tx_hash"] == hash)
         return "pending";
-    if (!ok && http_status == 413) return "unaccepted";
-    if (!ok && replied) {
+    if (!ok && (http_status == 413 || unsent)) return "unaccepted";
+    if (!ok && replied && !repeated) {
         for (const auto refusal : {100, 101, 102, 103, 104, 105, 108, 109, 111, 113, 114,
             115, 116, 118, -32600, -32602}) if (code == refusal) return "rejected";
         for (const auto retry : {107, 110, 117, -32005}) if (code == retry) return "unaccepted";

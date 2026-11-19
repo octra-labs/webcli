@@ -10,6 +10,7 @@
 #include "matrix.hpp"
 #include "ristretto255.hpp"
 #include "circuit_prf_profile.hpp"
+#include "bulletproofs/prover_commit.hpp"
 
 namespace pvac {
 
@@ -127,18 +128,18 @@ inline bool proof_profile_matches(const PubKey& a, const PubKey& b) {
 }
 
 inline bool secret_profile_matches(
-    const PubKey& candidate,
+    const PubKey& offered,
     const PubKey& current,
     const SecKey& sk
 ) {
-    if (!public_profile_matches(candidate, current))
+    if (!public_profile_matches(offered, current))
         return false;
-    if (!valid_circuit_prf_profile(candidate.circuit_prf_profile))
+    if (!valid_circuit_prf_profile(offered.circuit_prf_profile))
         return false;
-    const Fp& key = circuit_prf_key_for_profile(sk, candidate.circuit_prf_profile);
-    const auto& blind = circuit_prf_blind_for_profile(sk, candidate.circuit_prf_profile);
-    return candidate.circuit_prf_key_commit ==
-        pedersen_commit(sc_from_fp_signed(key), sc_reduce256(blind.data()));
+    const Fp& key = circuit_prf_key_for_profile(sk, offered.circuit_prf_profile);
+    const auto& blind = circuit_prf_blind_for_profile(sk, offered.circuit_prf_profile);
+    return offered.circuit_prf_key_commit ==
+        bp::secret_commit(sc_from_fp_signed(key), sc_reduce256(blind.data()));
 }
 
 }

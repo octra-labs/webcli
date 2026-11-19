@@ -117,6 +117,28 @@ pvac_params pvac_default_params(void) {
     return p;
 }
 
+int pvac_set_lanes(size_t total) {
+    try {
+        pvac::set_lanes(total);
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+int pvac_ready_build(size_t points) {
+    try {
+        pvac::bp::ready_table().build(points);
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+size_t pvac_ready_sums(void) {
+    return pvac::bp::ready_table().sums();
+}
+
 void pvac_keygen_from_seed(pvac_params prm, const uint8_t seed[32],
                            pvac_pubkey* pk_out, pvac_seckey* sk_out) {
     auto* pk = new pvac::PubKey();
@@ -725,6 +747,21 @@ int pvac_verify_amount(pvac_pubkey pk, pvac_cipher ct,
     return 0;
 }
 
+int pvac_verify_each(const pvac_check* checks, size_t count, int* accepted) {
+    if (!checks || !accepted || count == 0) return 0;
+    std::fill(accepted, accepted + count, 0);
+    try {
+        pvac::lane_run(count, count - 1, [&](size_t index) {
+            const auto& check = checks[index];
+            accepted[index] = pvac_verify_amount(check.pk, check.ct, check.proof, check.commitment, check.kind, check.wide);
+        });
+    } catch (...) {
+        std::fill(accepted, accepted + count, 0);
+        return 0;
+    }
+    return std::all_of(accepted, accepted + count, [](int value) { return value == 1; }) ? 1 : 0;
+}
+
 pvac_zero_proof pvac_make_history_proof(pvac_pubkey pk, pvac_seckey sk,
     pvac_cipher ct, uint64_t amount, const uint8_t blinding[32]) {
     if (!pk || !sk || !ct || !blinding) return nullptr;
@@ -784,7 +821,7 @@ void pvac_pedersen_commit(uint64_t amount, const uint8_t blinding[32], uint8_t o
         return;
     pvac::Scalar val = pvac::bp::sc_from_u64(amount);
     pvac::Scalar blind = pvac::sc_reduce256(blinding);
-    pvac::RistrettoPoint pt = pvac::pedersen_commit(val, blind);
+    pvac::RistrettoPoint pt = pvac::bp::secret_commit(val, blind);
     std::memcpy(out, pt.data(), 32);
 }
 
@@ -795,7 +832,7 @@ int pvac_pedersen_commit_v2(uint64_t amount, const uint8_t blinding[32],
     try {
         pvac::Scalar val = pvac::bp::sc_from_u64(amount);
         pvac::Scalar blind = pvac::sc_reduce256(blinding);
-        pvac::RistrettoPoint pt = pvac::pedersen_commit(val, blind);
+        pvac::RistrettoPoint pt = pvac::bp::secret_commit(val, blind);
         std::memcpy(out, pt.data(), 32);
         return 0;
     } catch (...) {

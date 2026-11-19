@@ -6,14 +6,20 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <chrono>
 #include <mutex>
+#include <random>
 #include <shared_mutex>
 #include <memory>
+#include <thread>
 #include "lib/json.hpp"
 #include "lib/rpc_state.hpp"
 #include "lib/json_shape.hpp"
 #include "lib/program_args.hpp"
 #include "lib/rpc_io.hpp"
+#include "lib/rpc_gate.hpp"
+#include "lib/rpc_retry.hpp"
+#include "lib/rpc_scope.hpp"
 #include "lib/endpoint_policy.hpp"
 
 #include "lib/httplib.h"
@@ -27,6 +33,8 @@ struct RpcResult {
     bool replied = false;
     int code = 0;
     int http_status = 0;
+    bool unsent = false;
+    bool repeated = false;
 };
 
 class RpcClient {
@@ -70,6 +78,48 @@ class RpcClient {
         return rpc_post(client, path, std::move(body), seconds, max_body);
     }
 
+    RpcSent exchange(const std::string& method, const std::string& body, int seconds, bool write) const {
+        using Clock = std::chrono::steady_clock;
+        thread_local std::minstd_rand jitter{std::random_device{}()};
+        const auto start = Clock::now();
+        const auto full = start + std::chrono::seconds(seconds);
+        const auto end = std::min(full, rpc_deadline());
+        if (end < full && (write || end <= start)) return {{{}, rpc_condition(RpcFault::deadline)}, true, false};
+        const bool once = rpc_once_depth() > 0;
+        const bool gated = !once && seconds >= 1 && seconds <= rpc_gate_seconds;
+        const auto window = once ? start : std::min(end, start + std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(rpc_window(seconds))));
+        const auto lane = rpc_lane();
+        bool unsent = true;
+        for (int attempt = 1;; ++attempt) {
+            RpcBody reply;
+            {
+                const RpcSlot slot(lane, gated, window);
+                if (!slot) return {{{}, rpc_condition(RpcFault::busy)}, unsent, attempt > 2};
+                const auto left = std::chrono::ceil<std::chrono::seconds>(end - Clock::now()).count();
+                reply = request(body, static_cast<int>(std::clamp<long long>(left, std::min(seconds, 1), seconds)));
+            }
+            const auto step = rpc_step(reply);
+            unsent = unsent && step.unsent;
+            if (!rpc_repeat(step, write)) return {reply, unsent, attempt > 1};
+            const double wait = rpc_pause(attempt, reply.retry_after, std::uniform_real_distribution<double>(0, 1)(jitter));
+            const auto next = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(wait));
+            if (next >= window) {
+                reply.body.clear();
+                reply.error = rpc_condition(step.fault);
+                return {reply, unsent, attempt > 1};
+            }
+            if (const auto& log = rpc_retry_log()) log({method, attempt, step.status, wait});
+            std::this_thread::sleep_until(next);
+        }
+    }
+
+    static RpcResult failed(const RpcSent& sent, bool write) {
+        const auto& reply = sent.reply;
+        return {false, {}, write && sent.unsent ? reply.error + "; nothing was sent" : reply.error,
+            false, 0, reply.status, sent.unsent, sent.repeated};
+    }
+
 public:
     RpcClient() : path_("/rpc"), ssl_(true), port_(443) {}
     explicit RpcClient(const std::string& url) { parse_url(url); }
@@ -88,9 +138,12 @@ public:
         req["params"] = params;
         req["id"] = ++id_;
         if (!source.empty()) req["source"] = source;
-        const auto response = request(req.dump(), timeout_sec);
-        if (!response.error.empty()) return {false, {}, response.error, false, 0, response.status};
-        return parse_response(response.body, req["id"]);
+        const bool write = rpc_write(method);
+        const auto sent = exchange(method, req.dump(), timeout_sec, write);
+        if (!sent.reply.error.empty()) return failed(sent, write);
+        auto parsed = parse_response(sent.reply.body, req["id"]);
+        parsed.repeated = sent.repeated;
+        return parsed;
     }
 
     RpcResult get_balance(const std::string& addr) {
@@ -265,9 +318,9 @@ public:
             + ",\"method\":\"octra_circleViewAuth\",\"params\":[" + quote(circle_id)
             + "," + quote(method) + "," + params + "," + quote(addr) + "," + quote(pub)
             + "," + quote(sig) + ",false]}";
-        const auto response = request(body, 600);
-        if (!response.error.empty()) return {false, {}, response.error};
-        return parse_response(response.body, id);
+        const auto sent = exchange("octra_circleViewAuth", body, 600, false);
+        if (!sent.reply.error.empty()) return failed(sent, false);
+        return parse_response(sent.reply.body, id);
     }
 
     RpcResult circle_slot_policy(const std::string& circle_id, const std::string& slot_ref) {
@@ -627,9 +680,9 @@ public:
             + ",\"method\":\"contract_call\",\"params\":[" + nlohmann::json(addr).dump()
             + "," + nlohmann::json(method).dump() + "," + params + ","
             + nlohmann::json(caller).dump() + "]}";
-        const auto response = request(body, 15);
-        if (!response.error.empty()) return {false, {}, response.error};
-        return parse_response(response.body, id);
+        const auto sent = exchange("contract_call", body, 15, false);
+        if (!sent.reply.error.empty()) return failed(sent, false);
+        return parse_response(sent.reply.body, id);
     }
 
     RpcResult list_contracts() {
@@ -677,7 +730,10 @@ public:
             req["id"] = static_cast<int>(i + 1);
             batch.push_back(std::move(req));
         }
-        const auto response = request(batch.dump(), timeout_sec);
+        const bool same = std::all_of(methods.begin(), methods.end(),
+            [&](const std::string& method) { return method == methods.front(); });
+        const bool write = std::any_of(methods.begin(), methods.end(), rpc_write);
+        const auto response = exchange(same ? methods.front() : "batch", batch.dump(), timeout_sec, write).reply;
         JsonShape shape;
         if (!response.error.empty() || !nlohmann::json::sax_parse(response.body, &shape)) {
             for (auto& result : out) result.error = response.error.empty()
